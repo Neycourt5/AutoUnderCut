@@ -34,10 +34,25 @@ jobs:
       - name: Build plugin
         run: dotnet build src/SmartUndercutBot/SmartUndercutBot.csproj --configuration Release --no-restore
 
+      - name: Locate packaged plugin
+        id: package
+        shell: pwsh
+        run: |
+          $manifest = Get-ChildItem -Path "src\SmartUndercutBot\bin" -Recurse -Filter "SmartUndercutBot.json" |
+            Where-Object {
+              $json = Get-Content -Raw -LiteralPath $_.FullName | ConvertFrom-Json
+              $json.InternalName -eq "SmartUndercutBot" -and $json.AssemblyVersion -and $json.DalamudApiLevel
+            } |
+            Select-Object -First 1
+          if (-not $manifest) {
+            throw "Could not locate the DalamudPackager output manifest."
+          }
+          "plugin_output=$($manifest.DirectoryName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
       - name: Upload development artifact
         uses: actions/upload-artifact@v4
         with:
           name: SmartUndercutBot
-          path: src/SmartUndercutBot/bin/x64/Release/SmartUndercutBot/*
+          path: ${{ steps.package.outputs.plugin_output }}/*
           if-no-files-found: error
           retention-days: 7

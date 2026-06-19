@@ -37,11 +37,17 @@ jobs:
       - name: Create plugin ZIP and repository JSON
         shell: pwsh
         run: |
-          $output = Join-Path $PWD "src\SmartUndercutBot\bin\x64\Release\SmartUndercutBot"
-          $manifestPath = Join-Path $output "SmartUndercutBot.json"
-          if (-not (Test-Path -LiteralPath $manifestPath)) {
-            throw "Packaged plugin manifest was not found at $manifestPath"
+          $manifestFile = Get-ChildItem -Path "src\SmartUndercutBot\bin" -Recurse -Filter "SmartUndercutBot.json" |
+            Where-Object {
+              $json = Get-Content -Raw -LiteralPath $_.FullName | ConvertFrom-Json
+              $json.InternalName -eq "SmartUndercutBot" -and $json.AssemblyVersion -and $json.DalamudApiLevel
+            } |
+            Select-Object -First 1
+          if (-not $manifestFile) {
+            throw "Could not locate the DalamudPackager output manifest."
           }
+          $output = $manifestFile.DirectoryName
+          $manifestPath = $manifestFile.FullName
 
           $artifacts = Join-Path $PWD "release-artifacts"
           New-Item -ItemType Directory -Force -Path $artifacts | Out-Null
