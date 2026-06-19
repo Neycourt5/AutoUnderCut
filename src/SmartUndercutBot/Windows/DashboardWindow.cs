@@ -1,0 +1,361 @@
+using System.Numerics;
+using Dalamud.Bindings.ImGui;
+using Dalamud.Interface.Utility;
+using Dalamud.Interface.Windowing;
+using SmartUndercutBot.Automation;
+using SmartUndercutBot.Core.Models;
+using SmartUndercutBot.Services;
+
+namespace SmartUndercutBot.Windows;
+
+public sealed class DashboardWindow : Window
+{
+    private readonly ConfigurationService configuration;
+    private readonly AutomationController automation;
+    private readonly IMarketDataService marketData;
+    private readonly AutomationLog log;
+    private int newItemId;
+    private uint? selectedItemId;
+    private bool configurationDirty;
+
+    public DashboardWindow(
+        ConfigurationService configuration,
+        AutomationController automation,
+        IMarketDataService marketData,
+        AutomationLog log)
+        : base("Smart Undercut Bot##Dashboard")
+    {
+        this.configuration = configuration;
+        this.automation = automation;
+        this.marketData = marketData;
+        this.log = log;
+        SizeConstraints = new WindowSizeConstraints
+        {
+            MinimumSize = new Vector2(640, 440),
+            MaximumSize = new Vector2(float.MaxValue),
+        };
+    }
+
+    public override void Draw()
+    {
+        if (!ImGui.BeginTabBar("DashboardTabs"))
+            return;
+
+        if (ImGui.BeginTabItem("Status"))
+        {
+            DrawStatus();
+            ImGui.EndTabItem();
+        }
+        if (ImGui.BeginTabItem("Queue"))
+        {
+            DrawQueue();
+            ImGui.EndTabItem();
+        }
+        if (ImGui.BeginTabItem("Pricing Rules"))
+        {
+            DrawRules();
+            ImGui.EndTabItem();
+        }
+        if (ImGui.BeginTabItem("Safety & Data"))
+        {
+            DrawSafetySettings();
+            ImGui.EndTabItem();
+        }
+        if (ImGui.BeginTabItem("Audit Log"))
+        {
+            DrawLog();
+            ImGui.EndTabItem();
+        }
+
+        ImGui.EndTabBar();
+    }
+
+    private void DrawStatus()
+    {
+        var status = automation.Status;
+        var stateColor = status.State switch
+        {
+            AutomationState.Faulted or AutomationState.Halted => new Vector4(1f, 0.35f, 0.3f, 1f),
+            AutomationState.Completed => new Vector4(0.35f, 0.9f, 0.45f, 1f),
+            AutomationState.Idle => new Vector4(0.7f, 0.7f, 0.7f, 1f),
+            _ => new Vector4(0.35f, 0.75f, 1f, 1f),
+        };
+        ImGui.TextColored(stateColor, status.State.ToString());
+        ImGui.SameLine();
+        ImGui.TextWrapped(status.Detail);
+        ImGui.Separator();
+
+        var config = configuration.Current;
+        var enabled = config.AutomationEnabled;
+        if (ImGui.Checkbox("Start automatically when a retainer sell list opens", ref enabled))
+        {
+            config.AutomationEnabled = enabled;
+            SaveConfiguration();
+        }
+
+        var writes = config.AllowAutomaticWrites;
+        if (ImGui.Checkbox("Arm autonomous price writes", ref writes))
+        {
+            config.AllowAutomaticWrites = writes;
+            SaveConfiguration();
+        }
+        ImGui.TextColored(
+            writes ? new Vector4(1f, 0.72f, 0.2f, 1f) : new Vector4(0.55f, 0.85f, 0.65f, 1f),
+            writes
+                ? "ARMED: accepted decisions are submitted without per-item confirmation."
+                : "DRY RUN: decisions are logged, but the client is not modified.");
+
+        ImGui.Spacing();
+        if (ImGui.Button("Start / Rescan"))
+            automation.StartNow();
+        ImGui.SameLine();
+        if (ImGui.Button("Emergency Stop"))
+            automation.Halt();
+
+        ImGui.Spacing();
+        ImGui.Text($"Progress: {Math.Min(status.CurrentIndex + 1, status.TotalListings)} / {status.TotalListings}");
+        ImGui.Text($"Updates submitted: {status.UpdatesSubmitted}");
+        if (status.NextActionAt.HasValue)
+        {
+            var wait = Math.Max(0, (status.NextActionAt.Value - DateTimeOffset.UtcNow).TotalSeconds);
+            ImGui.Text($"Next action in: {wait:F1}s");
+        }
+    }
+
+    private void DrawQueue()
+    {
+        var queue = automation.QueueSnapshot();
+        if (queue.Count == 0)
+        {
+            ImGui.TextDisabled("No listings are queued.");
+            return;
+        }
+
+        if (!ImGui.BeginTable("RetainerQueue", 6,
+                ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.ScrollY | ImGuiTableFlags.Resizable,
+                new Vector2(0, -1)))
+            return;
+
+        ImGui.TableSetupColumn("#", ImGuiTableColumnFlags.WidthFixed, 30 * ImGuiHelpers.GlobalScale);
+        ImGui.TableSetupColumn("Item");
+        ImGui.TableSetupColumn("Quality", ImGuiTableColumnFlags.WidthFixed, 55 * ImGuiHelpers.GlobalScale);
+        ImGui.TableSetupColumn("Current", ImGuiTableColumnFlags.WidthFixed, 90 * ImGuiHelpers.GlobalScale);
+        ImGui.TableSetupColumn("Target", ImGuiTableColumnFlags.WidthFixed, 90 * ImGuiHelpers.GlobalScale);
+        ImGui.TableSetupColumn("Status");
+        ImGui.TableHeadersRow();
+        foreach (var entry in queue)
+        {
+            ImGui.TableNextRow();
+            ImGui.TableNextColumn(); ImGui.TextUnformatted((entry.Index + 1).ToString());
+            ImGui.TableNextColumn(); ImGui.TextUnformatted(entry.Listing.ItemName);
+            ImGui.TableNextColumn(); ImGui.TextUnformatted(entry.Listing.IsHighQuality ? "HQ" : "NQ");
+            ImGui.TableNextColumn(); ImGui.TextUnformatted($"{entry.Listing.CurrentPrice:N0}");
+            ImGui.TableNextColumn(); ImGui.TextUnformatted(entry.Decision?.TargetPrice is { } target ? $"{target:N0}" : "—");
+            ImGui.TableNextColumn(); ImGui.TextUnformatted(entry.Status);
+        }
+        ImGui.EndTable();
+    }
+
+    private void DrawRules()
+    {
+        if (ImGui.CollapsingHeader("Global rule", ImGuiTreeNodeFlags.DefaultOpen))
+            configurationDirty |= DrawPricingRule("global", configuration.Current.GlobalRule);
+
+        ImGui.Separator();
+        ImGui.TextUnformatted("Per-item overrides");
+        ImGui.Separator();
+        ImGui.SetNextItemWidth(160 * ImGuiHelpers.GlobalScale);
+        ImGui.InputInt("Item ID", ref newItemId);
+        ImGui.SameLine();
+        if (ImGui.Button("Add override") && newItemId > 0)
+        {
+            var itemId = (uint)newItemId;
+            configuration.Current.PerItemRules[itemId] = configuration.Current.GlobalRule.Clone();
+            selectedItemId = itemId;
+            configurationDirty = true;
+        }
+
+        if (ImGui.BeginTable("ItemOverrides", 2, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg,
+                new Vector2(260 * ImGuiHelpers.GlobalScale, 150 * ImGuiHelpers.GlobalScale)))
+        {
+            ImGui.TableSetupColumn("Item ID");
+            ImGui.TableSetupColumn("Mode");
+            ImGui.TableHeadersRow();
+            foreach (var pair in configuration.Current.PerItemRules.OrderBy(x => x.Key))
+            {
+                ImGui.TableNextRow();
+                ImGui.TableNextColumn();
+                if (ImGui.Selectable(pair.Key.ToString(), selectedItemId == pair.Key,
+                        ImGuiSelectableFlags.SpanAllColumns))
+                    selectedItemId = pair.Key;
+                ImGui.TableNextColumn();
+                ImGui.TextUnformatted(pair.Value.Mode.ToString());
+            }
+            ImGui.EndTable();
+        }
+
+        if (selectedItemId is { } selected && configuration.Current.PerItemRules.TryGetValue(selected, out var rule))
+        {
+            ImGui.SameLine();
+            ImGui.BeginGroup();
+            ImGui.Text($"Override for item #{selected}");
+            configurationDirty |= DrawPricingRule($"item{selected}", rule);
+            if (ImGui.Button($"Remove override##{selected}"))
+            {
+                configuration.Current.PerItemRules.Remove(selected);
+                selectedItemId = null;
+                configurationDirty = true;
+            }
+            ImGui.EndGroup();
+        }
+
+        DrawSaveButton();
+    }
+
+    private bool DrawPricingRule(string id, PricingRule rule)
+    {
+        var changed = false;
+        ImGui.PushID(id);
+        changed |= DrawEnumCombo("Pricing mode", ref rule.Mode);
+        changed |= InputUInt("Undercut amount", ref rule.UndercutAmount, 0, 1_000_000);
+        changed |= InputUInt("Minimum price", ref rule.MinimumPrice, 1, 999_999_999);
+        changed |= InputUInt("Cost basis", ref rule.CostBasis, 0, 999_999_999);
+
+        var margin = (float)rule.MinimumMarginPercent;
+        if (ImGui.DragFloat("Minimum margin %", ref margin, 0.1f, 0, 10000, "%.1f%%"))
+        {
+            rule.MinimumMarginPercent = (decimal)Math.Max(0, margin);
+            changed = true;
+        }
+        changed |= InputUInt("Absolute tolerance", ref rule.AbsoluteTolerance, 0, 1_000_000);
+
+        var tolerance = (float)rule.PercentageTolerance;
+        if (ImGui.DragFloat("Percentage tolerance", ref tolerance, 0.05f, 0, 100, "%.2f%%"))
+        {
+            rule.PercentageTolerance = (decimal)Math.Clamp(tolerance, 0, 100);
+            changed = true;
+        }
+
+        var warThreshold = (float)rule.PriceWarDropPercent;
+        if (ImGui.DragFloat("Price-war drop", ref warThreshold, 0.5f, 0, 99.9f, "%.1f%%"))
+        {
+            rule.PriceWarDropPercent = (decimal)Math.Clamp(warThreshold, 0, 99.9f);
+            changed = true;
+        }
+        changed |= DrawEnumCombo("Price-war action", ref rule.PriceWarAction);
+        changed |= DrawEnumCombo("Price rounding", ref rule.Rounding);
+        changed |= DrawEnumCombo("HQ / NQ filter", ref rule.QualityFilter);
+        ImGui.PopID();
+        return changed;
+    }
+
+    private void DrawSafetySettings()
+    {
+        var config = configuration.Current;
+        configurationDirty |= InputInt("Minimum action delay (ms)", ref config.MinimumDelayMs, 250, 60_000);
+        configurationDirty |= InputInt("Maximum action delay (ms)", ref config.MaximumDelayMs, config.MinimumDelayMs, 60_000);
+        configurationDirty |= InputInt("Market timeout (seconds)", ref config.MarketRequestTimeoutSeconds, 2, 60);
+        configurationDirty |= InputInt("Maximum data age (seconds)", ref config.MaximumMarketDataAgeSeconds, 15, 3600);
+        configurationDirty |= InputInt("Maximum updates per session", ref config.MaximumUpdatesPerSession, 1, 20);
+
+        var openDashboard = config.OpenDashboardOnRetainer;
+        if (ImGui.Checkbox("Open dashboard with retainer sell list", ref openDashboard))
+        {
+            config.OpenDashboardOnRetainer = openDashboard;
+            configurationDirty = true;
+        }
+
+        ImGui.SetNextItemWidth(-1);
+        var endpoint = config.MarketApiBaseUrl;
+        if (ImGui.InputText("Market API base URL", ref endpoint, 512))
+        {
+            config.MarketApiBaseUrl = endpoint;
+            configurationDirty = true;
+        }
+        if (ImGui.Button("Clear market cache"))
+            marketData.ClearCache();
+        ImGui.Spacing();
+        ImGui.TextWrapped("Any logout, player movement, closed sell list, changed listing, malformed inventory, stale market response, or failed client request halts or skips work before another write is attempted.");
+        DrawSaveButton();
+    }
+
+    private void DrawLog()
+    {
+        if (ImGui.Button("Copy visible log"))
+        {
+            var text = string.Join(Environment.NewLine, log.Snapshot().Select(FormatLogEntry));
+            ImGui.SetClipboardText(text);
+        }
+        ImGui.Separator();
+        ImGui.BeginChild("AuditLogScroll", Vector2.Zero, true);
+        foreach (var entry in log.Snapshot())
+        {
+            var color = entry.Level switch
+            {
+                AutomationLogLevel.Warning => new Vector4(1f, 0.72f, 0.2f, 1f),
+                AutomationLogLevel.Error => new Vector4(1f, 0.35f, 0.3f, 1f),
+                AutomationLogLevel.Debug => new Vector4(0.6f, 0.6f, 0.6f, 1f),
+                _ => new Vector4(0.85f, 0.85f, 0.85f, 1f),
+            };
+            ImGui.TextColored(color, FormatLogEntry(entry));
+        }
+        ImGui.EndChild();
+    }
+
+    private void DrawSaveButton()
+    {
+        if (!configurationDirty)
+            return;
+        ImGui.Spacing();
+        if (ImGui.Button("Save configuration"))
+            SaveConfiguration();
+        ImGui.SameLine();
+        ImGui.TextColored(new Vector4(1f, 0.72f, 0.2f, 1f), "Unsaved changes");
+    }
+
+    private void SaveConfiguration()
+    {
+        configuration.Save();
+        configurationDirty = false;
+    }
+
+    private static bool DrawEnumCombo<T>(string label, ref T value) where T : struct, Enum
+    {
+        var changed = false;
+        if (!ImGui.BeginCombo(label, value.ToString()))
+            return false;
+        foreach (var option in Enum.GetValues<T>())
+        {
+            var selected = EqualityComparer<T>.Default.Equals(value, option);
+            if (ImGui.Selectable(option.ToString(), selected))
+            {
+                value = option;
+                changed = true;
+            }
+            if (selected)
+                ImGui.SetItemDefaultFocus();
+        }
+        ImGui.EndCombo();
+        return changed;
+    }
+
+    private static bool InputUInt(string label, ref uint value, uint minimum, uint maximum)
+    {
+        var integer = (int)Math.Min(value, int.MaxValue);
+        if (!ImGui.InputInt(label, ref integer))
+            return false;
+        value = (uint)Math.Clamp((long)integer, minimum, maximum);
+        return true;
+    }
+
+    private static bool InputInt(string label, ref int value, int minimum, int maximum)
+    {
+        if (!ImGui.InputInt(label, ref value))
+            return false;
+        value = Math.Clamp(value, minimum, maximum);
+        return true;
+    }
+
+    private static string FormatLogEntry(AutomationLogEntry entry) =>
+        $"[{entry.Timestamp:HH:mm:ss}] [{entry.Level}] {entry.Message}";
+}

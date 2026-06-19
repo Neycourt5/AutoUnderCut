@@ -1,0 +1,30 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SmartUndercutBot", "src\SmartUndercutBot\SmartUndercutBot.csproj", "{85B61363-39A5-49F7-BE41-1E63D0790270}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SmartUndercutBot.Core", "src\SmartUndercutBot.Core\SmartUndercutBot.Core.csproj", "{8C49C770-8804-4772-96A9-84C3780C5F6D}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SmartUndercutBot.Core.Tests", "tests\SmartUndercutBot.Core.Tests\SmartUndercutBot.Core.Tests.csproj", "{21DA0F63-CBC6-49CD-9860-832DE899E910}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|x64 = Debug|x64
+		Release|x64 = Release|x64
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{85B61363-39A5-49F7-BE41-1E63D0790270}.Debug|x64.ActiveCfg = Debug|x64
+		{85B61363-39A5-49F7-BE41-1E63D0790270}.Debug|x64.Build.0 = Debug|x64
+		{85B61363-39A5-49F7-BE41-1E63D0790270}.Release|x64.ActiveCfg = Release|x64
+		{85B61363-39A5-49F7-BE41-1E63D0790270}.Release|x64.Build.0 = Release|x64
+		{8C49C770-8804-4772-96A9-84C3780C5F6D}.Debug|x64.ActiveCfg = Debug|x64
+		{8C49C770-8804-4772-96A9-84C3780C5F6D}.Debug|x64.Build.0 = Debug|x64
+		{8C49C770-8804-4772-96A9-84C3780C5F6D}.Release|x64.ActiveCfg = Release|x64
+		{8C49C770-8804-4772-96A9-84C3780C5F6D}.Release|x64.Build.0 = Release|x64
+		{21DA0F63-CBC6-49CD-9860-832DE899E910}.Debug|x64.ActiveCfg = Debug|x64
+		{21DA0F63-CBC6-49CD-9860-832DE899E910}.Debug|x64.Build.0 = Debug|x64
+		{21DA0F63-CBC6-49CD-9860-832DE899E910}.Release|x64.ActiveCfg = Release|x64
+		{21DA0F63-CBC6-49CD-9860-832DE899E910}.Release|x64.Build.0 = Release|x64
+	EndGlobalSection
+EndGlobal
