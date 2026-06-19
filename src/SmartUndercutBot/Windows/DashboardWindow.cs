@@ -216,10 +216,30 @@ public sealed class DashboardWindow : Window
     {
         var changed = false;
         ImGui.PushID(id);
-        changed |= DrawEnumCombo("Pricing mode", ref rule.Mode);
-        changed |= InputUInt("Undercut amount", ref rule.UndercutAmount, 0, 1_000_000);
-        changed |= InputUInt("Minimum price", ref rule.MinimumPrice, 1, 999_999_999);
-        changed |= InputUInt("Cost basis", ref rule.CostBasis, 0, 999_999_999);
+        var pricingMode = rule.Mode;
+        if (DrawEnumCombo("Pricing mode", ref pricingMode))
+        {
+            rule.Mode = pricingMode;
+            changed = true;
+        }
+        var undercutAmount = rule.UndercutAmount;
+        if (InputUInt("Undercut amount", ref undercutAmount, 0, 1_000_000))
+        {
+            rule.UndercutAmount = undercutAmount;
+            changed = true;
+        }
+        var minimumPrice = rule.MinimumPrice;
+        if (InputUInt("Minimum price", ref minimumPrice, 1, 999_999_999))
+        {
+            rule.MinimumPrice = minimumPrice;
+            changed = true;
+        }
+        var costBasis = rule.CostBasis;
+        if (InputUInt("Cost basis", ref costBasis, 0, 999_999_999))
+        {
+            rule.CostBasis = costBasis;
+            changed = true;
+        }
 
         var margin = (float)rule.MinimumMarginPercent;
         if (ImGui.DragFloat("Minimum margin %", ref margin, 0.1f, 0, 10000, "%.1f%%"))
@@ -227,7 +247,12 @@ public sealed class DashboardWindow : Window
             rule.MinimumMarginPercent = (decimal)Math.Max(0, margin);
             changed = true;
         }
-        changed |= InputUInt("Absolute tolerance", ref rule.AbsoluteTolerance, 0, 1_000_000);
+        var absoluteTolerance = rule.AbsoluteTolerance;
+        if (InputUInt("Absolute tolerance", ref absoluteTolerance, 0, 1_000_000))
+        {
+            rule.AbsoluteTolerance = absoluteTolerance;
+            changed = true;
+        }
 
         var tolerance = (float)rule.PercentageTolerance;
         if (ImGui.DragFloat("Percentage tolerance", ref tolerance, 0.05f, 0, 100, "%.2f%%"))
@@ -242,9 +267,24 @@ public sealed class DashboardWindow : Window
             rule.PriceWarDropPercent = (decimal)Math.Clamp(warThreshold, 0, 99.9f);
             changed = true;
         }
-        changed |= DrawEnumCombo("Price-war action", ref rule.PriceWarAction);
-        changed |= DrawEnumCombo("Price rounding", ref rule.Rounding);
-        changed |= DrawEnumCombo("HQ / NQ filter", ref rule.QualityFilter);
+        var priceWarAction = rule.PriceWarAction;
+        if (DrawEnumCombo("Price-war action", ref priceWarAction))
+        {
+            rule.PriceWarAction = priceWarAction;
+            changed = true;
+        }
+        var rounding = rule.Rounding;
+        if (DrawEnumCombo("Price rounding", ref rounding))
+        {
+            rule.Rounding = rounding;
+            changed = true;
+        }
+        var qualityFilter = rule.QualityFilter;
+        if (DrawEnumCombo("HQ / NQ filter", ref qualityFilter))
+        {
+            rule.QualityFilter = qualityFilter;
+            changed = true;
+        }
         ImGui.PopID();
         return changed;
     }
@@ -252,11 +292,36 @@ public sealed class DashboardWindow : Window
     private void DrawSafetySettings()
     {
         var config = configuration.Current;
-        configurationDirty |= InputInt("Minimum action delay (ms)", ref config.MinimumDelayMs, 250, 60_000);
-        configurationDirty |= InputInt("Maximum action delay (ms)", ref config.MaximumDelayMs, config.MinimumDelayMs, 60_000);
-        configurationDirty |= InputInt("Market timeout (seconds)", ref config.MarketRequestTimeoutSeconds, 2, 60);
-        configurationDirty |= InputInt("Maximum data age (seconds)", ref config.MaximumMarketDataAgeSeconds, 15, 3600);
-        configurationDirty |= InputInt("Maximum updates per session", ref config.MaximumUpdatesPerSession, 1, 20);
+        var minimumDelay = config.MinimumDelayMs;
+        if (InputInt("Minimum action delay (ms)", ref minimumDelay, 250, 60_000))
+        {
+            config.MinimumDelayMs = minimumDelay;
+            configurationDirty = true;
+        }
+        var maximumDelay = config.MaximumDelayMs;
+        if (InputInt("Maximum action delay (ms)", ref maximumDelay, config.MinimumDelayMs, 60_000))
+        {
+            config.MaximumDelayMs = maximumDelay;
+            configurationDirty = true;
+        }
+        var requestTimeout = config.MarketRequestTimeoutSeconds;
+        if (InputInt("Market timeout (seconds)", ref requestTimeout, 2, 60))
+        {
+            config.MarketRequestTimeoutSeconds = requestTimeout;
+            configurationDirty = true;
+        }
+        var maximumDataAge = config.MaximumMarketDataAgeSeconds;
+        if (InputInt("Maximum data age (seconds)", ref maximumDataAge, 15, 3600))
+        {
+            config.MaximumMarketDataAgeSeconds = maximumDataAge;
+            configurationDirty = true;
+        }
+        var maximumUpdates = config.MaximumUpdatesPerSession;
+        if (InputInt("Maximum updates per session", ref maximumUpdates, 1, 20))
+        {
+            config.MaximumUpdatesPerSession = maximumUpdates;
+            configurationDirty = true;
+        }
 
         var openDashboard = config.OpenDashboardOnRetainer;
         if (ImGui.Checkbox("Open dashboard with retainer sell list", ref openDashboard))
