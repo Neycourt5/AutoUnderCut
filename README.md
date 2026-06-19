@@ -32,6 +32,26 @@ dotnet build SmartUndercutBot.sln -c Debug
 
 The plugin project follows the current official SamplePlugin SDK declaration: `Dalamud.NET.Sdk/15.0.0`.
 
+## Publish and install through Dalamud
+
+The GitHub Actions workflows build every push to `main`. Tags beginning with `v` additionally create a GitHub release containing `SmartUndercutBot.zip` and the Dalamud repository index `repo.json`.
+
+Before each release, increase `<Version>` in `src/SmartUndercutBot/SmartUndercutBot.csproj`, commit and push the change, then create and push a matching version tag. For example:
+
+```powershell
+git tag v1.0.0.0
+git push origin main
+git push origin v1.0.0.0
+```
+
+After the release workflow succeeds, add this URL under Dalamud Settings → Experimental → Custom Plugin Repositories:
+
+```text
+https://github.com/Neycourt5/AutoUnderCut/releases/latest/download/repo.json
+```
+
+The GitHub repository and its Releases must be public so Dalamud can download both files without authentication. After saving the repository URL, search for **Smart Undercut Bot** in the plugin installer.
+
 ## Operational notes
 
 Game client structures and generated member signatures can change after a patch. The implementation deliberately uses current named FFXIVClientStructs members and validates every input before invoking the update function, but you should rebuild against the current Dalamud release after each FFXIV patch and run in dry-run mode first.

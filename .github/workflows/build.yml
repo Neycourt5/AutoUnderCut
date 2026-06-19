@@ -1,0 +1,43 @@
+name: Build
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install .NET 10
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Download current Dalamud development files
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri https://goatcorp.github.io/dalamud-distrib/latest.zip -OutFile latest.zip
+          Expand-Archive -Force latest.zip "$env:AppData\XIVLauncher\addon\Hooks\dev"
+
+      - name: Restore
+        run: dotnet restore SmartUndercutBot.sln
+
+      - name: Test pricing core
+        run: dotnet test tests/SmartUndercutBot.Core.Tests/SmartUndercutBot.Core.Tests.csproj --configuration Release --no-restore
+
+      - name: Build plugin
+        run: dotnet build src/SmartUndercutBot/SmartUndercutBot.csproj --configuration Release --no-restore
+
+      - name: Upload development artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SmartUndercutBot
+          path: src/SmartUndercutBot/bin/x64/Release/SmartUndercutBot/*
+          if-no-files-found: error
+          retention-days: 7

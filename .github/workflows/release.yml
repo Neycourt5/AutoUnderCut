@@ -1,0 +1,84 @@
+name: Publish Dalamud repository release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install .NET 10
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Download current Dalamud development files
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri https://goatcorp.github.io/dalamud-distrib/latest.zip -OutFile latest.zip
+          Expand-Archive -Force latest.zip "$env:AppData\XIVLauncher\addon\Hooks\dev"
+
+      - name: Restore, test, and build
+        shell: pwsh
+        run: |
+          dotnet restore SmartUndercutBot.sln
+          dotnet test tests/SmartUndercutBot.Core.Tests/SmartUndercutBot.Core.Tests.csproj --configuration Release --no-restore
+          dotnet build src/SmartUndercutBot/SmartUndercutBot.csproj --configuration Release --no-restore
+
+      - name: Create plugin ZIP and repository JSON
+        shell: pwsh
+        run: |
+          $output = Join-Path $PWD "src\SmartUndercutBot\bin\x64\Release\SmartUndercutBot"
+          $manifestPath = Join-Path $output "SmartUndercutBot.json"
+          if (-not (Test-Path -LiteralPath $manifestPath)) {
+            throw "Packaged plugin manifest was not found at $manifestPath"
+          }
+
+          $artifacts = Join-Path $PWD "release-artifacts"
+          New-Item -ItemType Directory -Force -Path $artifacts | Out-Null
+          Compress-Archive -Path (Join-Path $output "*") -DestinationPath (Join-Path $artifacts "SmartUndercutBot.zip") -Force
+
+          $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
+          if (-not $manifest.InternalName -or -not $manifest.AssemblyVersion -or -not $manifest.DalamudApiLevel) {
+            throw "DalamudPackager did not add InternalName, AssemblyVersion, or DalamudApiLevel to the manifest."
+          }
+
+          $repositoryUrl = "https://github.com/Neycourt5/AutoUnderCut"
+          $downloadUrl = "$repositoryUrl/releases/latest/download/SmartUndercutBot.zip"
+          $manifest | Add-Member -NotePropertyName RepoUrl -NotePropertyValue $repositoryUrl -Force
+          $manifest | Add-Member -NotePropertyName DownloadLinkInstall -NotePropertyValue $downloadUrl -Force
+          $manifest | Add-Member -NotePropertyName DownloadLinkUpdate -NotePropertyValue $downloadUrl -Force
+          $manifest | Add-Member -NotePropertyName DownloadLinkTesting -NotePropertyValue $downloadUrl -Force
+          $manifest | Add-Member -NotePropertyName TestingAssemblyVersion -NotePropertyValue $manifest.AssemblyVersion -Force
+          $manifest | Add-Member -NotePropertyName TestingDalamudApiLevel -NotePropertyValue $manifest.DalamudApiLevel -Force
+          $manifest | Add-Member -NotePropertyName LastUpdate -NotePropertyValue ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds()) -Force
+
+          ConvertTo-Json -InputObject @($manifest) -Depth 20 |
+            Set-Content -LiteralPath (Join-Path $artifacts "repo.json") -Encoding utf8
+
+      - name: Publish GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $zip = "release-artifacts/SmartUndercutBot.zip"
+          $repo = "release-artifacts/repo.json"
+          gh release create $tag "$zip#SmartUndercutBot.zip" "$repo#repo.json" --title $tag --generate-notes --latest
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SmartUndercutBot-${{ github.ref_name }}
+          path: release-artifacts/*
+          if-no-files-found: error
+          retention-days: 30
