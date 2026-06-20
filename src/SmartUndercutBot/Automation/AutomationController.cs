@@ -58,6 +58,7 @@ public sealed class AutomationController : IDisposable
     private readonly ConfigurationService configuration;
     private readonly AutomationLog log;
     private readonly List<AutomationQueueEntry> queue = [];
+    private readonly HashSet<short> processedSlots = [];
 
     private CancellationTokenSource? sessionCancellation;
     private Task<MarketSnapshot>? marketTask;
@@ -210,7 +211,7 @@ public sealed class AutomationController : IDisposable
                 break;
             case AutomationState.WaitingForPriceEditor:
                 if (retainerListings.IsPriceEditorOpen)
-                    RequestCurrentMarket();
+                    ResolveListingAndRequestMarket();
                 else
                     CheckTimeout("Timed out waiting for the Adjust Price window.");
                 break;
@@ -316,6 +317,7 @@ public sealed class AutomationController : IDisposable
         sessionCancellation?.Dispose();
         sessionCancellation = new CancellationTokenSource();
         queue.Clear();
+        processedSlots.Clear();
         currentIndex = 0;
         updatesSubmitted = 0;
         retainerIndex = 0;
@@ -355,6 +357,7 @@ public sealed class AutomationController : IDisposable
     {
         var listings = retainerListings.ReadCurrentListings();
         queue.Clear();
+        processedSlots.Clear();
         queue.AddRange(listings.Select((listing, index) => new AutomationQueueEntry(index, listing, "Queued")));
         currentIndex = 0;
         handledSellList = true;
@@ -397,6 +400,22 @@ public sealed class AutomationController : IDisposable
             return;
         }
         WaitFor(AutomationState.WaitingForPriceEditor, "Waiting for the Adjust Price window.");
+    }
+
+    private void ResolveListingAndRequestMarket()
+    {
+        if (!retainerListings.TryResolveOpenPriceEditor(processedSlots, out var resolved) || resolved is null)
+        {
+            Halt($"Could not match visible sell-list row {currentIndex + 1} to a retainer market slot.");
+            return;
+        }
+
+        var entry = queue[currentIndex];
+        queue[currentIndex] = entry with { Listing = resolved, Status = "Matched visible row" };
+        processedSlots.Add(resolved.Slot);
+        log.Add(AutomationLogLevel.Debug,
+            $"Matched visible row {currentIndex + 1} to {resolved.ItemName}, market slot {resolved.Slot}.");
+        RequestCurrentMarket();
     }
 
     private void RequestCurrentMarket()
@@ -503,7 +522,7 @@ public sealed class AutomationController : IDisposable
         }
 
         updatesSubmitted++;
-        verificationDeadline = DateTimeOffset.UtcNow.AddSeconds(6);
+        verificationDeadline = DateTimeOffset.UtcNow.AddSeconds(10);
         ReplaceCurrent(entry with { Status = $"Submitted {target:N0} gil" });
         log.Add(AutomationLogLevel.Information,
             $"SUBMITTED {entry.Listing.ItemName} ({entry.Listing.RetainerName}, slot {entry.Listing.Slot}): " +

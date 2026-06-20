@@ -26,6 +26,7 @@ public interface IRetainerListingService
     SafetySnapshot CheckSafety(Vector3 sessionPosition);
     IReadOnlyList<RetainerListing> ReadCurrentListings();
     bool TryReadListing(short slot, out RetainerListing? listing);
+    bool TryResolveOpenPriceEditor(IReadOnlySet<short> excludedSlots, out RetainerListing? listing);
     bool SelectRetainer(int index);
     bool SelectSellItems();
     bool OpenListingContextMenu(int rowIndex);
@@ -157,6 +158,36 @@ public sealed unsafe class RetainerListingService : IRetainerListingService
         return listing is not null;
     }
 
+    public bool TryResolveOpenPriceEditor(IReadOnlySet<short> excludedSlots, out RetainerListing? listing)
+    {
+        listing = null;
+        var addon = gameGui.GetAddonByName<AddonRetainerSell>("RetainerSell");
+        if (addon == null || !addon->AtkUnitBase.IsVisible || addon->ItemName == null ||
+            addon->Quantity == null || addon->AskingPrice == null)
+            return false;
+
+        var visibleName = addon->ItemName->NodeText.ToString();
+        var visibleQuantity = (uint)Math.Max(0, addon->Quantity->Value);
+        var visiblePrice = (uint)Math.Max(0, addon->AskingPrice->Value);
+        var visibleHq = visibleName.Contains('\uE03C');
+
+        var candidates = ReadCurrentListings()
+            .Where(x => !excludedSlots.Contains(x.Slot))
+            .Where(x => visibleName.Contains(x.ItemName, StringComparison.OrdinalIgnoreCase))
+            .Where(x => x.Quantity == visibleQuantity)
+            .ToArray();
+        if (candidates.Length == 0)
+            return false;
+
+        // Prefer every field we can observe. Identical stacks are interchangeable here;
+        // excluding prior slots gives each visible row a unique backing market slot.
+        listing = candidates.FirstOrDefault(x => x.CurrentPrice == visiblePrice && x.IsHighQuality == visibleHq)
+            ?? candidates.FirstOrDefault(x => x.CurrentPrice == visiblePrice)
+            ?? candidates.FirstOrDefault(x => x.IsHighQuality == visibleHq)
+            ?? candidates[0];
+        return true;
+    }
+
     public bool SelectRetainer(int index)
     {
         var addon = GetAddon("RetainerList");
@@ -234,11 +265,24 @@ public sealed unsafe class RetainerListingService : IRetainerListingService
             current.IsHighQuality != expected.IsHighQuality)
             return new(false, "The underlying listing changed after evaluation; update was cancelled.");
 
-        // Penny Pincher may have prefilled this control. Our live strategy owns the final value.
-        addon->AskingPrice->SetValue((int)targetPrice);
-        FireCallback(&addon->AtkUnitBase, 0);
-        addon->AtkUnitBase.Close(true);
-        return new(true, "The Adjust Price window submitted its confirm callback to the server.");
+        // Callback 2 is the Adjust Price addon's own numeric-input update path. It also
+        // overwrites any Penny Pincher prefill before we press the real Confirm button.
+        FireCallback(&addon->AtkUnitBase, 2, (int)targetPrice);
+        if (addon->AskingPrice->Value != targetPrice)
+            return new(false, "The Adjust Price input did not accept the target value.");
+        if (addon->Confirm == null || !addon->Confirm->IsEnabled)
+            return new(false, "The Adjust Price confirmation button is unavailable.");
+
+        var buttonNode = addon->Confirm->AtkComponentBase.OwnerNode->AtkResNode;
+        var clickEvent = (AtkEvent*)buttonNode.AtkEventManager.Event;
+        if (clickEvent == null)
+            return new(false, "The Adjust Price confirmation event is unavailable.");
+
+        addon->AtkUnitBase.ReceiveEvent(
+            clickEvent->State.EventType,
+            (int)clickEvent->Param,
+            (AtkEvent*)buttonNode.AtkEventManager.Event);
+        return new(true, "Pressed the Adjust Price confirmation button.");
     }
 
     public bool CloseSellList()

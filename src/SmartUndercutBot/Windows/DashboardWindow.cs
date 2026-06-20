@@ -297,7 +297,7 @@ public sealed class DashboardWindow : Window
     {
         var config = configuration.Current;
         var minimumDelay = config.MinimumDelayMs;
-        if (InputInt("Minimum action delay (ms)", ref minimumDelay, 250, 60_000))
+        if (InputInt("Minimum action delay (ms)", ref minimumDelay, 100, 60_000))
         {
             config.MinimumDelayMs = minimumDelay;
             configurationDirty = true;

@@ -6,12 +6,12 @@ namespace SmartUndercutBot;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 2;
+    public int Version { get; set; } = 3;
     public bool AutomationEnabled { get; set; }
     public bool AllowAutomaticWrites { get; set; }
     public bool OpenDashboardOnRetainer { get; set; } = true;
-    public int MinimumDelayMs { get; set; } = 800;
-    public int MaximumDelayMs { get; set; } = 1500;
+    public int MinimumDelayMs { get; set; } = 250;
+    public int MaximumDelayMs { get; set; } = 450;
     public int MarketRequestTimeoutSeconds { get; set; } = 10;
     public int MaximumUpdatesPerSession { get; set; } = 200;
     public PricingRule GlobalRule { get; set; } = new();
@@ -35,7 +35,16 @@ public sealed class Configuration : IPluginConfiguration
                 MaximumUpdatesPerSession = 200;
             Version = 2;
         }
-        MinimumDelayMs = Math.Clamp(MinimumDelayMs, 250, 60_000);
+        if (Version < 3)
+        {
+            if (MinimumDelayMs == 800 && MaximumDelayMs == 1500)
+            {
+                MinimumDelayMs = 250;
+                MaximumDelayMs = 450;
+            }
+            Version = 3;
+        }
+        MinimumDelayMs = Math.Clamp(MinimumDelayMs, 100, 60_000);
         MaximumDelayMs = Math.Clamp(MaximumDelayMs, MinimumDelayMs, 60_000);
         MarketRequestTimeoutSeconds = Math.Clamp(MarketRequestTimeoutSeconds, 2, 60);
         MaximumUpdatesPerSession = Math.Clamp(MaximumUpdatesPerSession, 1, 200);

@@ -11,7 +11,7 @@ Smart Undercut Bot is a Dalamud SDK 15 plugin for guarded, autonomous retainer-m
 - Defaults to undercutting the lowest real competitor by one gil with no tolerance band.
 - Detects an abnormal low listing against recent sale history and leaves the item unchanged by default.
 - Submits through the real Adjust Price numeric control and confirm callback, then verifies the server-updated retainer slot.
-- Uses randomized 800-1500 ms action delays and immediately stops on movement, logout, unexpected UI state, changed listing, or failed confirmation.
+- Uses randomized 250-450 ms action delays and immediately stops on movement, logout, unexpected UI state, changed listing, or failed confirmation.
 - Supports price floors, cost-basis margins, HQ/NQ filtering, match-lowest mode, optional tolerance bands, and 99/999 rounding.
 - Provides an ImGui status dashboard, per-retainer progress, queue with live/target prices, configuration, and audit log.
 
