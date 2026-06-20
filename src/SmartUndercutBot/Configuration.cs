@@ -6,7 +6,7 @@ namespace SmartUndercutBot;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 4;
+    public int Version { get; set; } = 5;
     public bool AutomationEnabled { get; set; }
     public bool AllowAutomaticWrites { get; set; }
     public bool OpenDashboardOnRetainer { get; set; } = true;
@@ -49,6 +49,13 @@ public sealed class Configuration : IPluginConfiguration
             if (MinimumDelayMs == 250 && MaximumDelayMs == 1500)
                 MaximumDelayMs = 450;
             Version = 4;
+        }
+        if (Version < 5)
+        {
+            // Version 4 could crash the client while confirming Adjust Price. Require
+            // the user to explicitly re-arm writes after installing the safe callback fix.
+            AllowAutomaticWrites = false;
+            Version = 5;
         }
         MinimumDelayMs = Math.Clamp(MinimumDelayMs, 100, 60_000);
         MaximumDelayMs = Math.Clamp(MaximumDelayMs, MinimumDelayMs, 60_000);

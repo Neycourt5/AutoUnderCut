@@ -269,23 +269,18 @@ public sealed unsafe class RetainerListingService : IRetainerListingService
             return new(false, "The underlying listing changed after evaluation; update was cancelled.");
 
         // Callback 2 is the Adjust Price addon's own numeric-input update path. It also
-        // overwrites any Penny Pincher prefill before we press the real Confirm button.
+        // overwrites any Penny Pincher prefill before submitting the addon's Confirm action.
         FireCallback(&addon->AtkUnitBase, 2, (int)targetPrice);
         if (addon->AskingPrice->Value != targetPrice)
             return new(false, "The Adjust Price input did not accept the target value.");
         if (addon->Confirm == null || !addon->Confirm->IsEnabled)
             return new(false, "The Adjust Price confirmation button is unavailable.");
 
-        var buttonNode = addon->Confirm->AtkComponentBase.OwnerNode->AtkResNode;
-        var clickEvent = (AtkEvent*)buttonNode.AtkEventManager.Event;
-        if (clickEvent == null)
-            return new(false, "The Adjust Price confirmation event is unavailable.");
-
-        addon->AtkUnitBase.ReceiveEvent(
-            clickEvent->State.EventType,
-            (int)clickEvent->Param,
-            (AtkEvent*)buttonNode.AtkEventManager.Event);
-        return new(true, "Pressed the Adjust Price confirmation button.");
+        // Callback 0 is RetainerSell's native Confirm action. Do not synthesize a raw
+        // ReceiveEvent here: the event object requires game-owned data and caused an
+        // access violation in AddonRetainerSell.ReceiveEvent on 2026-06-19.
+        FireCallback(&addon->AtkUnitBase, 0);
+        return new(true, "Submitted the Adjust Price confirmation callback.");
     }
 
     public bool CloseSellList()
