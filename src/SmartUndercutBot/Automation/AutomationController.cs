@@ -517,7 +517,11 @@ public sealed class AutomationController : IDisposable
         if (!result.Succeeded)
         {
             ReplaceCurrent(entry with { Status = "Commit rejected" });
-            Halt(result.Message);
+            log.Add(AutomationLogLevel.Error,
+                $"{entry.Listing.ItemName}: update was skipped because the Adjust Price commit failed. {result.Message}");
+            if (retainerListings.IsPriceEditorOpen)
+                retainerListings.CancelPriceEditor();
+            Schedule(AutomationState.WaitingAfterCommit, "Commit failed; continuing to the next listing.");
             return;
         }
 
@@ -545,7 +549,12 @@ public sealed class AutomationController : IDisposable
                     nextActionAt = DateTimeOffset.UtcNow.AddMilliseconds(250);
                     return;
                 }
-                Halt($"The server did not confirm {target:N0} gil for {entry.Listing.ItemName}.");
+                ReplaceCurrent(entry with { Status = "Server verification failed" });
+                log.Add(AutomationLogLevel.Error,
+                    $"{entry.Listing.ItemName}: server verification did not reach {target:N0} gil; skipped and continuing.");
+                if (retainerListings.IsPriceEditorOpen)
+                    retainerListings.CancelPriceEditor();
+                MoveToNextListing();
                 return;
             }
             ReplaceCurrent(entry with { Status = $"Verified {target:N0} gil" });
@@ -553,6 +562,11 @@ public sealed class AutomationController : IDisposable
                 $"VERIFIED {entry.Listing.ItemName} at {target:N0} gil on {entry.Listing.RetainerName}.");
         }
 
+        MoveToNextListing();
+    }
+
+    private void MoveToNextListing()
+    {
         currentIndex++;
         marketTask = null;
         currentMarket = null;

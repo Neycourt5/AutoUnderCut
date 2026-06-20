@@ -55,6 +55,10 @@ public sealed class PricingStrategyService : IPricingStrategyService
                 "Price war detected; using the protected historical floor.");
         }
 
+        if (listing.CurrentPrice <= lowest)
+            return Decision(PriceDecisionKind.NoChange, listing, lowest, floor,
+                "Current listing is already at or below the lowest competitor.");
+
         if (WithinTolerance(listing.CurrentPrice, lowest, rule))
             return Decision(PriceDecisionKind.WithinTolerance, listing, lowest, floor, "Current price is inside the configured tolerance band.");
 

@@ -29,10 +29,19 @@ public sealed class PricingStrategyServiceTests
     [Fact]
     public void DefaultRuleAlwaysUndercutsEvenWhenCurrentPriceIsClose()
     {
-        var decision = service.Evaluate(Context(current: 1_500, lowest: 1_500));
+        var decision = service.Evaluate(Context(current: 1_501, lowest: 1_500));
 
         Assert.Equal(PriceDecisionKind.Update, decision.Kind);
         Assert.Equal(1_499u, decision.TargetPrice);
+    }
+
+    [Fact]
+    public void SkipsWhenAlreadyBelowLowestCompetitor()
+    {
+        var decision = service.Evaluate(Context(current: 1_400, lowest: 1_500));
+
+        Assert.Equal(PriceDecisionKind.NoChange, decision.Kind);
+        Assert.False(decision.ShouldUpdate);
     }
 
     [Fact]
