@@ -10,7 +10,10 @@ public sealed class ConfigurationService
     {
         this.pluginInterface = pluginInterface;
         Current = pluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
+        var oldVersion = Current.Version;
         Current.Normalize();
+        if (Current.Version != oldVersion)
+            pluginInterface.SavePluginConfig(Current);
     }
 
     public Configuration Current { get; }

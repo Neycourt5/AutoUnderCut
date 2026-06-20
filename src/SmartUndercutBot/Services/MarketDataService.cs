@@ -1,6 +1,4 @@
-using System.Collections.Concurrent;
-using System.Net.Http.Json;
-using System.Text.Json.Serialization;
+using Dalamud.Game.Network.Structures;
 using Dalamud.Plugin.Services;
 using SmartUndercutBot.Core.Models;
 
@@ -12,93 +10,130 @@ public interface IMarketDataService
     void ClearCache();
 }
 
+/// <summary>
+/// Captures the market-board packets produced by the game's Compare Prices button.
+/// This keeps pricing tied to the live in-game result instead of a delayed web cache.
+/// </summary>
 public sealed class MarketDataService : IMarketDataService, IDisposable
 {
-    private readonly ConcurrentDictionary<(uint WorldId, uint ItemId), MarketSnapshot> cache = new();
-    private readonly HttpClient httpClient = new();
-    private readonly IPlayerState playerState;
+    private readonly IMarketBoard marketBoard;
     private readonly ConfigurationService configuration;
+    private readonly object sync = new();
+    private PendingRequest? pending;
 
-    public MarketDataService(IPlayerState playerState, ConfigurationService configuration)
+    public MarketDataService(IMarketBoard marketBoard, ConfigurationService configuration)
     {
-        this.playerState = playerState;
+        this.marketBoard = marketBoard;
         this.configuration = configuration;
-        httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("SmartUndercutBot/1.0 Dalamud");
+        marketBoard.OfferingsReceived += OnOfferingsReceived;
+        marketBoard.HistoryReceived += OnHistoryReceived;
     }
 
     public async Task<MarketSnapshot> GetSnapshotAsync(uint itemId, CancellationToken cancellationToken)
     {
-        if (!playerState.IsLoaded || !playerState.CurrentWorld.IsValid)
-            throw new InvalidOperationException("The current world is not available.");
-
-        var worldId = playerState.CurrentWorld.RowId;
-        var key = (worldId, itemId);
-        var maximumAge = TimeSpan.FromSeconds(configuration.Current.MaximumMarketDataAgeSeconds);
-        if (cache.TryGetValue(key, out var cached) && DateTimeOffset.UtcNow - cached.CapturedAt <= maximumAge)
-            return cached with { IsFromCache = true };
+        PendingRequest request;
+        lock (sync)
+        {
+            pending?.Cancel();
+            request = new PendingRequest(itemId);
+            pending = request;
+        }
 
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromSeconds(configuration.Current.MarketRequestTimeoutSeconds));
-        var baseUrl = configuration.Current.MarketApiBaseUrl.TrimEnd('/');
-        var url = $"{baseUrl}/{worldId}/{itemId}?listings=40&entries=40";
+        using var registration = timeout.Token.Register(request.Cancel);
 
         try
         {
-            var response = await httpClient.GetFromJsonAsync<UniversalisResponse>(url, timeout.Token).ConfigureAwait(false)
-                ?? throw new InvalidDataException("Market API returned an empty document.");
-            var now = DateTimeOffset.UtcNow;
-            var capturedAt = response.LastUploadTime > 0
-                ? DateTimeOffset.FromUnixTimeMilliseconds(response.LastUploadTime)
-                : now;
-            var listings = response.Listings
-                .Where(x => x.PricePerUnit > 0)
-                .Select(x => new MarketListing(x.PricePerUnit, x.Quantity, x.Hq, x.RetainerName))
-                .ToArray();
-            var history = response.RecentHistory.Where(x => x.PricePerUnit > 0).Select(x => x.PricePerUnit).Order().ToArray();
-            uint? median = history.Length == 0 ? null : history[history.Length / 2];
-            var snapshot = new MarketSnapshot(itemId, capturedAt, listings, median);
-            cache[key] = snapshot;
-            return snapshot;
+            var listings = await request.Offerings.Task.ConfigureAwait(false);
+
+            // History normally arrives with the same search. Give it a short grace period so
+            // the price-war guard can use the live sale history without slowing every item.
+            var historyReady = request.History.Task;
+            await Task.WhenAny(historyReady, Task.Delay(750, timeout.Token)).ConfigureAwait(false);
+            var historical = historyReady.IsCompletedSuccessfully ? historyReady.Result : Array.Empty<uint>();
+            uint? median = historical.Length == 0
+                ? null
+                : historical.Order().ElementAt(historical.Length / 2);
+
+            return new MarketSnapshot(itemId, DateTimeOffset.UtcNow, listings, median);
         }
-        catch when (cache.TryGetValue(key, out cached) && DateTimeOffset.UtcNow - cached.CapturedAt <= maximumAge * 2)
+        finally
         {
-            return cached with { IsFromCache = true };
+            lock (sync)
+            {
+                if (ReferenceEquals(pending, request))
+                    pending = null;
+            }
         }
     }
 
-    public void ClearCache() => cache.Clear();
-    public void Dispose() => httpClient.Dispose();
-
-    private sealed class UniversalisResponse
+    public void ClearCache()
     {
-        [JsonPropertyName("lastUploadTime")]
-        public long LastUploadTime { get; init; }
-
-        [JsonPropertyName("listings")]
-        public List<UniversalisListing> Listings { get; init; } = [];
-
-        [JsonPropertyName("recentHistory")]
-        public List<UniversalisSale> RecentHistory { get; init; } = [];
+        lock (sync)
+        {
+            pending?.Cancel();
+            pending = null;
+        }
     }
 
-    private sealed class UniversalisListing
+    private void OnOfferingsReceived(IMarketBoardCurrentOfferings offerings)
     {
-        [JsonPropertyName("pricePerUnit")]
-        public uint PricePerUnit { get; init; }
+        PendingRequest? request;
+        lock (sync)
+            request = pending;
+        if (request is null)
+            return;
 
-        [JsonPropertyName("quantity")]
-        public uint Quantity { get; init; }
+        var rows = offerings.ItemListings
+            .Where(x => x.ItemId == request.ItemId)
+            .Select(x => new MarketListing(
+                x.PricePerUnit,
+                x.ItemQuantity,
+                x.IsHq,
+                x.RetainerName,
+                x.RetainerId))
+            .ToArray();
 
-        [JsonPropertyName("hq")]
-        public bool Hq { get; init; }
-
-        [JsonPropertyName("retainerName")]
-        public string? RetainerName { get; init; }
+        // The game sends the cheapest page first, which is all the strategy needs.
+        // An empty page is still a valid "no listings" result for our one active request.
+        if (rows.Length > 0 || offerings.ItemListings.Count == 0)
+            request.Offerings.TrySetResult(rows);
     }
 
-    private sealed class UniversalisSale
+    private void OnHistoryReceived(IMarketBoardHistory history)
     {
-        [JsonPropertyName("pricePerUnit")]
-        public uint PricePerUnit { get; init; }
+        PendingRequest? request;
+        lock (sync)
+            request = pending;
+        if (request is null || history.ItemId != request.ItemId)
+            return;
+
+        request.History.TrySetResult(history.HistoryListings
+            .Where(x => x.SalePrice > 0)
+            .Select(x => x.SalePrice)
+            .ToArray());
+    }
+
+    public void Dispose()
+    {
+        ClearCache();
+        marketBoard.OfferingsReceived -= OnOfferingsReceived;
+        marketBoard.HistoryReceived -= OnHistoryReceived;
+    }
+
+    private sealed class PendingRequest(uint itemId)
+    {
+        public uint ItemId { get; } = itemId;
+        public TaskCompletionSource<IReadOnlyList<MarketListing>> Offerings { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<uint[]> History { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public void Cancel()
+        {
+            Offerings.TrySetCanceled();
+            History.TrySetCanceled();
+        }
     }
 }

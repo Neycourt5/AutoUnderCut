@@ -20,9 +20,19 @@ public sealed class PricingStrategyServiceTests
     [Fact]
     public void SkipsWhenInsideAbsoluteTolerance()
     {
-        var decision = service.Evaluate(Context(current: 1_504, lowest: 1_500));
+        var rule = new PricingRule { AbsoluteTolerance = 5, PercentageTolerance = 0 };
+        var decision = service.Evaluate(Context(current: 1_504, lowest: 1_500, rule: rule));
 
         Assert.Equal(PriceDecisionKind.WithinTolerance, decision.Kind);
+    }
+
+    [Fact]
+    public void DefaultRuleAlwaysUndercutsEvenWhenCurrentPriceIsClose()
+    {
+        var decision = service.Evaluate(Context(current: 1_500, lowest: 1_500));
+
+        Assert.Equal(PriceDecisionKind.Update, decision.Kind);
+        Assert.Equal(1_499u, decision.TargetPrice);
     }
 
     [Fact]
@@ -68,6 +78,19 @@ public sealed class PricingStrategyServiceTests
         var rule = new PricingRule { AbsoluteTolerance = 0, PercentageTolerance = 0 };
 
         var decision = service.Evaluate(new PricingContext(listing, market, rule));
+
+        Assert.Equal(1_499u, decision.TargetPrice);
+    }
+
+    [Fact]
+    public void ExcludesOtherOwnedRetainersFromCompetitors()
+    {
+        var listing = Listing(2_000);
+        var market = new MarketSnapshot(1, DateTimeOffset.UtcNow,
+            [new(500, 1, false, "MyOtherRetainer", 11), new(1_500, 1, false, "SomeoneElse", 99)], 1_500);
+        var rule = new PricingRule();
+
+        var decision = service.Evaluate(new PricingContext(listing, market, rule, new HashSet<ulong> { 10, 11 }));
 
         Assert.Equal(1_499u, decision.TargetPrice);
     }

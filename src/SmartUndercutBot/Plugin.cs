@@ -18,10 +18,10 @@ public sealed class Plugin : IDalamudPlugin
     [PluginService] private static ICommandManager CommandManager { get; set; } = null!;
     [PluginService] private static IFramework Framework { get; set; } = null!;
     [PluginService] private static IClientState ClientState { get; set; } = null!;
-    [PluginService] private static IPlayerState PlayerState { get; set; } = null!;
     [PluginService] private static IObjectTable ObjectTable { get; set; } = null!;
     [PluginService] private static IGameGui GameGui { get; set; } = null!;
     [PluginService] private static IDataManager DataManager { get; set; } = null!;
+    [PluginService] private static IMarketBoard MarketBoard { get; set; } = null!;
     [PluginService] private static IPluginLog PluginLog { get; set; } = null!;
 
     private readonly WindowSystem windowSystem = new("SmartUndercutBot");
@@ -34,7 +34,7 @@ public sealed class Plugin : IDalamudPlugin
     {
         configuration = new ConfigurationService(PluginInterface);
         var automationLog = new AutomationLog(PluginLog);
-        marketData = new MarketDataService(PlayerState, configuration);
+        marketData = new MarketDataService(MarketBoard, configuration);
         var retainerListings = new RetainerListingService(ClientState, ObjectTable, GameGui, DataManager);
         automation = new AutomationController(
             Framework,

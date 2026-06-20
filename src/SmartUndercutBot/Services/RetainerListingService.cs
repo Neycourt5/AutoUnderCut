@@ -1,6 +1,7 @@
 using System.Numerics;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game;
+using FFXIVClientStructs.FFXIV.Client.UI;
 using FFXIVClientStructs.FFXIV.Component.GUI;
 using Lumina.Excel.Sheets;
 using SmartUndercutBot.Core.Models;
@@ -13,11 +14,29 @@ public sealed record PriceUpdateResult(bool Succeeded, string Message);
 
 public interface IRetainerListingService
 {
+    bool IsRetainerListOpen { get; }
+    bool IsRetainerMenuOpen { get; }
     bool IsSellListOpen { get; }
+    bool IsContextMenuOpen { get; }
+    bool IsPriceEditorOpen { get; }
+    bool IsTalkOpen { get; }
+    int RetainerCount { get; }
+    IReadOnlySet<ulong> OwnedRetainerIds { get; }
+    string ActiveRetainerName { get; }
     SafetySnapshot CheckSafety(Vector3 sessionPosition);
     IReadOnlyList<RetainerListing> ReadCurrentListings();
     bool TryReadListing(short slot, out RetainerListing? listing);
-    PriceUpdateResult UpdatePrice(RetainerListing expected, uint targetPrice);
+    bool SelectRetainer(int index);
+    bool SelectSellItems();
+    bool OpenListingContextMenu(int rowIndex);
+    bool SelectAdjustPrice();
+    bool RequestComparePrices();
+    void CloseComparePrices();
+    void CancelPriceEditor();
+    PriceUpdateResult CommitPrice(RetainerListing expected, uint targetPrice);
+    bool CloseSellList();
+    bool CloseRetainerMenu();
+    bool AdvanceTalk();
     Vector3? GetPlayerPosition();
 }
 
@@ -37,7 +56,49 @@ public sealed unsafe class RetainerListingService : IRetainerListingService
         this.dataManager = dataManager;
     }
 
+    public bool IsRetainerListOpen => IsAddonVisible("RetainerList");
+    public bool IsRetainerMenuOpen => IsAddonVisible("SelectString");
     public bool IsSellListOpen => IsAddonVisible("RetainerSellList");
+    public bool IsContextMenuOpen => IsAddonVisible("ContextMenu");
+    public bool IsPriceEditorOpen => IsAddonVisible("RetainerSell");
+    public bool IsTalkOpen => IsAddonVisible("Talk");
+
+    public int RetainerCount
+    {
+        get
+        {
+            var manager = RetainerManager.Instance();
+            return manager == null ? 0 : (int)Math.Min(manager->GetRetainerCount(), 10u);
+        }
+    }
+
+    public IReadOnlySet<ulong> OwnedRetainerIds
+    {
+        get
+        {
+            var result = new HashSet<ulong>();
+            var manager = RetainerManager.Instance();
+            if (manager == null)
+                return result;
+            for (uint i = 0; i < manager->GetRetainerCount(); i++)
+            {
+                var retainer = manager->GetRetainerBySortedIndex(i);
+                if (retainer != null && retainer->RetainerId != 0)
+                    result.Add(retainer->RetainerId);
+            }
+            return result;
+        }
+    }
+
+    public string ActiveRetainerName
+    {
+        get
+        {
+            var manager = RetainerManager.Instance();
+            var retainer = manager == null ? null : manager->GetActiveRetainer();
+            return retainer == null ? "Unknown retainer" : retainer->NameString;
+        }
+    }
 
     public Vector3? GetPlayerPosition() => objectTable.LocalPlayer?.Position;
 
@@ -45,18 +106,8 @@ public sealed unsafe class RetainerListingService : IRetainerListingService
     {
         if (!clientState.IsLoggedIn || objectTable.LocalPlayer is null)
             return new(false, "Player logged out or local player is unavailable.");
-        if (!IsSellListOpen)
-            return new(false, "Retainer sell-list interface closed.");
         if (Vector3.DistanceSquared(objectTable.LocalPlayer.Position, sessionPosition) > 0.0025f)
             return new(false, "Player movement detected.");
-
-        var manager = InventoryManager.Instance();
-        var retainerManager = RetainerManager.Instance();
-        if (manager == null || retainerManager == null || retainerManager->GetActiveRetainer() == null)
-            return new(false, "Retainer state is not available.");
-        var container = manager->GetInventoryContainer(InventoryType.RetainerMarket);
-        if (container == null || !container->IsLoaded || container->Size is < 0 or > MaximumRetainerMarketSlots)
-            return new(false, "Retainer market inventory is unavailable or malformed.");
         return new(true, "Ready");
     }
 
@@ -106,28 +157,147 @@ public sealed unsafe class RetainerListingService : IRetainerListingService
         return listing is not null;
     }
 
-    public PriceUpdateResult UpdatePrice(RetainerListing expected, uint targetPrice)
+    public bool SelectRetainer(int index)
+    {
+        var addon = GetAddon("RetainerList");
+        if (addon == null || index < 0 || index >= RetainerCount)
+            return false;
+        FireCallback(addon, 2, index);
+        return true;
+    }
+
+    public bool SelectSellItems()
+    {
+        var addon = GetAddon("SelectString");
+        if (addon == null)
+            return false;
+        // The retainer menu's third entry is "Sell items in your inventory on the market."
+        FireCallback(addon, 2);
+        return true;
+    }
+
+    public bool OpenListingContextMenu(int rowIndex)
+    {
+        var addon = GetAddon("RetainerSellList");
+        if (addon == null || rowIndex < 0 || rowIndex >= MaximumRetainerMarketSlots)
+            return false;
+        FireCallback(addon, 0, rowIndex, 1);
+        return true;
+    }
+
+    public bool SelectAdjustPrice()
+    {
+        var addon = GetAddon("ContextMenu");
+        if (addon == null)
+            return false;
+        // Adjust Price is the first entry for ordinary market listings.
+        FireCallback(addon, 0, 0, 0, 0, 0);
+        return true;
+    }
+
+    public bool RequestComparePrices()
+    {
+        var addon = gameGui.GetAddonByName<AddonRetainerSell>("RetainerSell");
+        if (addon == null || !addon->AtkUnitBase.IsVisible)
+            return false;
+        FireCallback(&addon->AtkUnitBase, 4);
+        return true;
+    }
+
+    public void CloseComparePrices()
+    {
+        var addon = GetAddon("ItemSearchResult");
+        if (addon != null)
+            addon->Close(true);
+    }
+
+    public void CancelPriceEditor()
+    {
+        var addon = gameGui.GetAddonByName<AddonRetainerSell>("RetainerSell");
+        if (addon == null)
+            return;
+        FireCallback(&addon->AtkUnitBase, 1);
+        addon->AtkUnitBase.Close(true);
+    }
+
+    public PriceUpdateResult CommitPrice(RetainerListing expected, uint targetPrice)
     {
         if (targetPrice is 0 or > PricingStrategyService.MaximumListingPrice)
             return new(false, "Target price is outside valid game bounds.");
-        if (!TryReadListing(expected.Slot, out var current) || current is null)
-            return new(false, "Listing disappeared before commit.");
-        if (current.RetainerId != expected.RetainerId || current.ItemId != expected.ItemId ||
+
+        var addon = gameGui.GetAddonByName<AddonRetainerSell>("RetainerSell");
+        if (addon == null || !addon->AtkUnitBase.IsVisible || addon->AskingPrice == null)
+            return new(false, "The Adjust Price window is no longer available.");
+        if (!TryReadListing(expected.Slot, out var current) || current is null ||
+            current.RetainerId != expected.RetainerId || current.ItemId != expected.ItemId ||
             current.Quantity != expected.Quantity || current.CurrentPrice != expected.CurrentPrice ||
             current.IsHighQuality != expected.IsHighQuality)
-            return new(false, "Listing changed after evaluation; update was cancelled.");
+            return new(false, "The underlying listing changed after evaluation; update was cancelled.");
 
-        var manager = InventoryManager.Instance();
-        if (manager == null)
-            return new(false, "Inventory manager is unavailable.");
-
-        manager->SetRetainerMarketPrice(expected.Slot, targetPrice);
-        return new(true, "The client accepted the retainer price update request.");
+        // Penny Pincher may have prefilled this control. Our live strategy owns the final value.
+        addon->AskingPrice->SetValue((int)targetPrice);
+        FireCallback(&addon->AtkUnitBase, 0);
+        addon->AtkUnitBase.Close(true);
+        return new(true, "The Adjust Price window submitted its confirm callback to the server.");
     }
 
-    private bool IsAddonVisible(string name)
+    public bool CloseSellList()
+    {
+        var addon = GetAddon("RetainerSellList");
+        if (addon == null)
+            return false;
+        addon->Close(true);
+        return true;
+    }
+
+    public bool CloseRetainerMenu()
+    {
+        var addon = GetAddon("SelectString");
+        if (addon == null)
+            return false;
+        addon->Close(true);
+        return true;
+    }
+
+    public bool AdvanceTalk()
+    {
+        var addon = GetAddon("Talk");
+        if (addon == null)
+            return false;
+
+        var evt = stackalloc AtkEvent[1]
+        {
+            new()
+            {
+                Listener = (AtkEventListener*)addon,
+                Target = &AtkStage.Instance()->AtkEventTarget,
+                State = new AtkEventState { StateFlags = (AtkEventStateFlags)132 },
+            },
+        };
+        var data = stackalloc AtkEventData[1];
+        *data = default;
+        addon->ReceiveEvent(AtkEventType.MouseDown, 0, evt, data);
+        addon->ReceiveEvent(AtkEventType.MouseClick, 0, evt, data);
+        addon->ReceiveEvent(AtkEventType.MouseUp, 0, evt, data);
+        return true;
+    }
+
+    private AtkUnitBase* GetAddon(string name)
     {
         var addon = gameGui.GetAddonByName<AtkUnitBase>(name);
-        return addon != null && addon->IsVisible;
+        return addon != null && addon->IsVisible ? addon : null;
+    }
+
+    private bool IsAddonVisible(string name) => GetAddon(name) != null;
+
+    private static void FireCallback(AtkUnitBase* addon, params int[] values)
+    {
+        var atkValues = stackalloc AtkValue[values.Length];
+        for (var i = 0; i < values.Length; i++)
+        {
+            atkValues[i].Type = AtkValueType.Int;
+            atkValues[i].Int = values[i];
+        }
+        addon->FireCallback((uint)values.Length, atkValues, true);
     }
 }

@@ -26,10 +26,15 @@ public sealed class PricingStrategyService : IPricingStrategyService
         }
 
         var floor = CalculateFloor(listing, rule);
+        var ownedRetainers = context.OwnedRetainerIds;
         var competitors = market.Listings
             .Where(x => x.PricePerUnit is > 0 and <= MaximumListingPrice)
             .Where(x => IsQualityAllowed(x.IsHighQuality, listing.IsHighQuality, rule.QualityFilter))
-            .Where(x => string.IsNullOrWhiteSpace(x.RetainerName) ||
+            .Where(x => x.RetainerId == 0 ||
+                        (ownedRetainers is not null
+                            ? !ownedRetainers.Contains(x.RetainerId)
+                            : x.RetainerId != listing.RetainerId))
+            .Where(x => x.RetainerId != 0 || string.IsNullOrWhiteSpace(x.RetainerName) ||
                         !string.Equals(x.RetainerName, listing.RetainerName, StringComparison.OrdinalIgnoreCase))
             .ToArray();
 

@@ -1,8 +1,8 @@
 {
   "Author": "AutoUnderCut",
   "Name": "Smart Undercut Bot",
-  "Punchline": "Guarded, configurable retainer market repricing.",
-  "Description": "Scans the active retainer's market listings, evaluates cached market data, and can autonomously submit guarded price updates. Use /sub to open the dashboard.",
+  "Punchline": "Live, guarded undercutting across every retainer.",
+  "Description": "Starts at the summoning bell, visits every retainer and listing, reads live Compare Prices results, and submits guarded undercuts through the game's Adjust Price flow. Use /sub to open the dashboard.",
   "ApplicableVersion": "any",
   "Tags": [
     "market board",

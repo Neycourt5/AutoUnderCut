@@ -6,16 +6,14 @@ namespace SmartUndercutBot;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 1;
+    public int Version { get; set; } = 2;
     public bool AutomationEnabled { get; set; }
     public bool AllowAutomaticWrites { get; set; }
     public bool OpenDashboardOnRetainer { get; set; } = true;
     public int MinimumDelayMs { get; set; } = 800;
     public int MaximumDelayMs { get; set; } = 1500;
     public int MarketRequestTimeoutSeconds { get; set; } = 10;
-    public int MaximumMarketDataAgeSeconds { get; set; } = 180;
-    public int MaximumUpdatesPerSession { get; set; } = 20;
-    public string MarketApiBaseUrl { get; set; } = "https://universalis.app/api/v2";
+    public int MaximumUpdatesPerSession { get; set; } = 200;
     public PricingRule GlobalRule { get; set; } = new();
     public Dictionary<uint, PricingRule> PerItemRules { get; set; } = [];
 
@@ -24,11 +22,23 @@ public sealed class Configuration : IPluginConfiguration
 
     public void Normalize()
     {
+        if (Version < 2)
+        {
+            // Version 1 shipped with tolerance bands that made a one-gil undercut look idle.
+            // Migrate untouched defaults to the requested always-undercut behavior.
+            if (GlobalRule is not null && GlobalRule.AbsoluteTolerance == 5 && GlobalRule.PercentageTolerance == 0.5m)
+            {
+                GlobalRule.AbsoluteTolerance = 0;
+                GlobalRule.PercentageTolerance = 0;
+            }
+            if (MaximumUpdatesPerSession == 20)
+                MaximumUpdatesPerSession = 200;
+            Version = 2;
+        }
         MinimumDelayMs = Math.Clamp(MinimumDelayMs, 250, 60_000);
         MaximumDelayMs = Math.Clamp(MaximumDelayMs, MinimumDelayMs, 60_000);
         MarketRequestTimeoutSeconds = Math.Clamp(MarketRequestTimeoutSeconds, 2, 60);
-        MaximumMarketDataAgeSeconds = Math.Clamp(MaximumMarketDataAgeSeconds, 15, 3600);
-        MaximumUpdatesPerSession = Math.Clamp(MaximumUpdatesPerSession, 1, 20);
+        MaximumUpdatesPerSession = Math.Clamp(MaximumUpdatesPerSession, 1, 200);
         GlobalRule ??= new PricingRule();
         PerItemRules ??= [];
     }

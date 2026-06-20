@@ -1,23 +1,26 @@
 # Smart Undercut Bot
 
-Smart Undercut Bot is a Dalamud SDK 15 plugin scaffold for guarded, autonomous retainer-market repricing. It keeps pricing policy in a dependency-free core library and confines all game-memory interaction to a small adapter executed from Dalamud's framework thread.
+Smart Undercut Bot is a Dalamud SDK 15 plugin for guarded, autonomous retainer-market repricing.
 
 ## What is implemented
 
-- Activation when `RetainerSellList` opens, plus `/sub` and `/sub stop`.
-- Framework-tick state machine with randomized 800–1500 ms delays.
-- Reads the active retainer's loaded `InventoryType.RetainerMarket` slots.
-- Uses the generated `InventoryManager.SetRetainerMarketPrice` client function after re-validating retainer, slot, item, quantity, quality, and old price.
-- Cached Universalis market snapshots with timeout, age validation, sale-history median, and stale fallback limits.
-- Undercut/match modes, absolute floors, configurable cost-basis margin floors, HQ/NQ filtering, tolerance bands, price-war handling, and 99/999 rounding.
-- Immediate halt on movement, logout, closed UI, invalid inventory, changed listing, or rejected update.
-- ImGui status, queue, rule editor, safety/data settings, and a 500-entry audit log.
-- Dry-run mode is the default. `Arm autonomous price writes` is a single persistent arming control; there is no per-listing approval prompt.
+- Starts when the summoning-bell retainer list opens, or manually with `/sub`.
+- Visits every available retainer and opens every occupied market listing.
+- Uses the in-game Compare Prices request and Dalamud market-board events for live listings and sale history.
+- Excludes all of the player's retainers before choosing the lowest competitor.
+- Defaults to undercutting the lowest real competitor by one gil with no tolerance band.
+- Detects an abnormal low listing against recent sale history and leaves the item unchanged by default.
+- Submits through the real Adjust Price numeric control and confirm callback, then verifies the server-updated retainer slot.
+- Uses randomized 800-1500 ms action delays and immediately stops on movement, logout, unexpected UI state, changed listing, or failed confirmation.
+- Supports price floors, cost-basis margins, HQ/NQ filtering, match-lowest mode, optional tolerance bands, and 99/999 rounding.
+- Provides an ImGui status dashboard, per-retainer progress, queue with live/target prices, configuration, and audit log.
+
+Dry-run mode remains available. `Arm autonomous price writes` enables server submissions without a confirmation prompt for each listing.
 
 ## Projects
 
 - `src/SmartUndercutBot.Core`: pure pricing models and `PricingStrategyService`.
-- `src/SmartUndercutBot`: Dalamud plugin, automation controller, data/cache services, game adapter, and UI.
+- `src/SmartUndercutBot`: Dalamud plugin, automation controller, live market-data service, game UI adapter, and dashboard.
 - `tests/SmartUndercutBot.Core.Tests`: pricing behavior tests.
 
 ## Build
@@ -26,34 +29,22 @@ Install the .NET 10 SDK and set up a normal Dalamud development environment, the
 
 ```powershell
 dotnet restore SmartUndercutBot.sln
-dotnet test SmartUndercutBot.sln -c Debug
-dotnet build SmartUndercutBot.sln -c Debug
+dotnet test SmartUndercutBot.sln -c Release
+dotnet build SmartUndercutBot.sln -c Release
 ```
 
-The plugin project follows the current official SamplePlugin SDK declaration: `Dalamud.NET.Sdk/15.0.0`.
+## Install through Dalamud
 
-## Publish and install through Dalamud
-
-The GitHub Actions workflows build every push to `main`. Tags beginning with `v` additionally create a GitHub release containing `SmartUndercutBot.zip` and the Dalamud repository index `repo.json`.
-
-Before each release, increase `<Version>` in `src/SmartUndercutBot/SmartUndercutBot.csproj`, commit and push the change, then create and push a matching version tag. For example:
-
-```powershell
-git tag v1.0.0.0
-git push origin main
-git push origin v1.0.0.0
-```
-
-After the release workflow succeeds, add this URL under Dalamud Settings → Experimental → Custom Plugin Repositories:
+Add this URL under Dalamud Settings -> Experimental -> Custom Plugin Repositories:
 
 ```text
 https://github.com/Neycourt5/AutoUnderCut/releases/latest/download/repo.json
 ```
 
-The GitHub repository and its Releases must be public so Dalamud can download both files without authentication. After saving the repository URL, search for **Smart Undercut Bot** in the plugin installer.
+Save it, then search for **Smart Undercut Bot** in the plugin installer.
 
 ## Operational notes
 
-Game client structures and generated member signatures can change after a patch. The implementation deliberately uses current named FFXIVClientStructs members and validates every input before invoking the update function, but you should rebuild against the current Dalamud release after each FFXIV patch and run in dry-run mode first.
+Game structures and UI callbacks can change after an FFXIV patch. Rebuild against the current Dalamud release after patches and test in dry-run mode first. Do not interact with the retainer UI while a run is active. Use `/sub stop` or the dashboard's Emergency Stop button to abort.
 
-The market API endpoint is editable in the UI. External data may lag the in-game market board; age limits and price-war protection reduce that risk but cannot eliminate it. Use of automation may also be restricted by the game's terms or server rules; the operator is responsible for checking those rules.
+Automation may be restricted by the game's terms or server rules; the operator is responsible for checking those rules.

@@ -87,7 +87,7 @@ public sealed class DashboardWindow : Window
 
         var config = configuration.Current;
         var enabled = config.AutomationEnabled;
-        if (ImGui.Checkbox("Start automatically when a retainer sell list opens", ref enabled))
+        if (ImGui.Checkbox("Start automatically when the summoning-bell retainer list opens", ref enabled))
         {
             config.AutomationEnabled = enabled;
             SaveConfiguration();
@@ -114,6 +114,8 @@ public sealed class DashboardWindow : Window
 
         ImGui.Spacing();
         ImGui.Text($"Progress: {Math.Min(status.CurrentIndex + 1, status.TotalListings)} / {status.TotalListings}");
+        if (status.TotalRetainers > 0)
+            ImGui.Text($"Retainer: {status.CurrentRetainer} / {status.TotalRetainers}");
         ImGui.Text($"Updates submitted: {status.UpdatesSubmitted}");
         if (status.NextActionAt.HasValue)
         {
@@ -131,7 +133,7 @@ public sealed class DashboardWindow : Window
             return;
         }
 
-        if (!ImGui.BeginTable("RetainerQueue", 6,
+        if (!ImGui.BeginTable("RetainerQueue", 7,
                 ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.ScrollY | ImGuiTableFlags.Resizable,
                 new Vector2(0, -1)))
             return;
@@ -140,6 +142,7 @@ public sealed class DashboardWindow : Window
         ImGui.TableSetupColumn("Item");
         ImGui.TableSetupColumn("Quality", ImGuiTableColumnFlags.WidthFixed, 55 * ImGuiHelpers.GlobalScale);
         ImGui.TableSetupColumn("Current", ImGuiTableColumnFlags.WidthFixed, 90 * ImGuiHelpers.GlobalScale);
+        ImGui.TableSetupColumn("Live lowest", ImGuiTableColumnFlags.WidthFixed, 90 * ImGuiHelpers.GlobalScale);
         ImGui.TableSetupColumn("Target", ImGuiTableColumnFlags.WidthFixed, 90 * ImGuiHelpers.GlobalScale);
         ImGui.TableSetupColumn("Status");
         ImGui.TableHeadersRow();
@@ -150,6 +153,7 @@ public sealed class DashboardWindow : Window
             ImGui.TableNextColumn(); ImGui.TextUnformatted(entry.Listing.ItemName);
             ImGui.TableNextColumn(); ImGui.TextUnformatted(entry.Listing.IsHighQuality ? "HQ" : "NQ");
             ImGui.TableNextColumn(); ImGui.TextUnformatted($"{entry.Listing.CurrentPrice:N0}");
+            ImGui.TableNextColumn(); ImGui.TextUnformatted(entry.Decision?.LowestMarketPrice is { } lowest ? $"{lowest:N0}" : "-");
             ImGui.TableNextColumn(); ImGui.TextUnformatted(entry.Decision?.TargetPrice is { } target ? $"{target:N0}" : "—");
             ImGui.TableNextColumn(); ImGui.TextUnformatted(entry.Status);
         }
@@ -310,37 +314,24 @@ public sealed class DashboardWindow : Window
             config.MarketRequestTimeoutSeconds = requestTimeout;
             configurationDirty = true;
         }
-        var maximumDataAge = config.MaximumMarketDataAgeSeconds;
-        if (InputInt("Maximum data age (seconds)", ref maximumDataAge, 15, 3600))
-        {
-            config.MaximumMarketDataAgeSeconds = maximumDataAge;
-            configurationDirty = true;
-        }
         var maximumUpdates = config.MaximumUpdatesPerSession;
-        if (InputInt("Maximum updates per session", ref maximumUpdates, 1, 20))
+        if (InputInt("Maximum updates per session", ref maximumUpdates, 1, 200))
         {
             config.MaximumUpdatesPerSession = maximumUpdates;
             configurationDirty = true;
         }
 
         var openDashboard = config.OpenDashboardOnRetainer;
-        if (ImGui.Checkbox("Open dashboard with retainer sell list", ref openDashboard))
+        if (ImGui.Checkbox("Open dashboard with summoning bell / retainer sell list", ref openDashboard))
         {
             config.OpenDashboardOnRetainer = openDashboard;
             configurationDirty = true;
         }
 
-        ImGui.SetNextItemWidth(-1);
-        var endpoint = config.MarketApiBaseUrl;
-        if (ImGui.InputText("Market API base URL", ref endpoint, 512))
-        {
-            config.MarketApiBaseUrl = endpoint;
-            configurationDirty = true;
-        }
-        if (ImGui.Button("Clear market cache"))
+        if (ImGui.Button("Cancel pending live market request"))
             marketData.ClearCache();
         ImGui.Spacing();
-        ImGui.TextWrapped("Any logout, player movement, closed sell list, changed listing, malformed inventory, stale market response, or failed client request halts or skips work before another write is attempted.");
+        ImGui.TextWrapped("Prices are read from the game's live Compare Prices result. Any logout, player movement, unexpected UI state, changed listing, malformed inventory, or failed server confirmation halts or skips work before another write is attempted.");
         DrawSaveButton();
     }
 

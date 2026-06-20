@@ -53,7 +53,8 @@ public sealed record MarketListing(
     uint PricePerUnit,
     uint Quantity,
     bool IsHighQuality,
-    string? RetainerName = null);
+    string? RetainerName = null,
+    ulong RetainerId = 0);
 
 public sealed record MarketSnapshot(
     uint ItemId,
@@ -69,8 +70,8 @@ public sealed class PricingRule
     public uint MinimumPrice { get; set; } = 1;
     public uint CostBasis { get; set; }
     public decimal MinimumMarginPercent { get; set; }
-    public uint AbsoluteTolerance { get; set; } = 5;
-    public decimal PercentageTolerance { get; set; } = 0.5m;
+    public uint AbsoluteTolerance { get; set; }
+    public decimal PercentageTolerance { get; set; }
     public decimal PriceWarDropPercent { get; set; } = 20m;
     public PriceWarAction PriceWarAction { get; set; } = PriceWarAction.LeaveUnchanged;
     public PriceRoundingMode Rounding { get; set; }
@@ -82,7 +83,8 @@ public sealed class PricingRule
 public sealed record PricingContext(
     RetainerListing Listing,
     MarketSnapshot Market,
-    PricingRule Rule);
+    PricingRule Rule,
+    IReadOnlySet<ulong>? OwnedRetainerIds = null);
 
 public sealed record PriceDecision(
     PriceDecisionKind Kind,
