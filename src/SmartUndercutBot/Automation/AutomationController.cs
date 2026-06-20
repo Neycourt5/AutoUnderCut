@@ -539,20 +539,39 @@ public sealed class AutomationController : IDisposable
 
     private void PrepareCurrentMarket()
     {
-        var entry = queue[currentIndex];
         CaptureSellerFee();
         currentMarket = null;
         currentDecision = null;
         marketTask = null;
 
+        // Resolve the visible editor before requesting market data. Passing the exact
+        // item ID into MarketDataService prevents a late packet from the previous row
+        // being accepted as the current row's result.
+        if (!retainerListings.TryResolveOpenPriceEditor(0, processedSlots, out var resolved) || resolved is null)
+        {
+            var entry = queue[currentIndex];
+            ReplaceCurrent(entry with { Status = "Could not map visible row" });
+            log.Add(AutomationLogLevel.Error,
+                $"Visible row {currentIndex + 1}: the open Adjust Price item could not be mapped to an unused retainer market slot; skipped.");
+            retainerListings.CancelPriceEditor();
+            Schedule(AutomationState.WaitingAfterCommit, "Could not map this row; continuing to the next listing.");
+            return;
+        }
+
+        var mappedEntry = queue[currentIndex];
+        queue[currentIndex] = mappedEntry with { Listing = resolved, Status = "Matched visible row" };
+        processedSlots.Add(resolved.Slot);
+        log.Add(AutomationLogLevel.Debug,
+            $"Matched visible row {currentIndex + 1} to {resolved.ItemName}, item #{resolved.ItemId}, market slot {resolved.Slot}.");
+
         var cooldown = TimeSpan.FromMilliseconds(configuration.Current.MarketRequestCooldownMs);
         var earliestRequestAt = lastMarketRequestAt + cooldown;
         if (DateTimeOffset.UtcNow < earliestRequestAt)
         {
-            ReplaceCurrent(entry with { Status = "Waiting for market cooldown" });
+            ReplaceCurrent(queue[currentIndex] with { Status = "Waiting for market cooldown" });
             nextActionAt = earliestRequestAt;
             Transition(AutomationState.WaitingBeforeMarketRequest,
-                $"Waiting before requesting live prices for {entry.Listing.ItemName}.");
+                $"Waiting before requesting live prices for {resolved.ItemName}.");
             return;
         }
 
@@ -581,9 +600,7 @@ public sealed class AutomationController : IDisposable
             return;
         }
         ReplaceCurrent(entry with { Status = "Reading live market" });
-        // Item ID 0 means "accept the item shown by this live Compare Prices request."
-        // The returned market packet is authoritative for visible-row ordering.
-        marketTask = marketData.GetSnapshotAsync(0, sessionCancellation!.Token);
+        marketTask = marketData.GetSnapshotAsync(entry.Listing.ItemId, sessionCancellation!.Token);
         if (!retainerListings.RequestComparePrices())
         {
             Halt("Could not click Compare Prices.");
@@ -602,31 +619,27 @@ public sealed class AutomationController : IDisposable
         if (marketTask.IsCanceled || marketTask.IsFaulted)
         {
             var message = marketTask.Exception?.GetBaseException().Message ?? "Live market request timed out.";
-            var entry = queue[currentIndex];
-            ReplaceCurrent(entry with { Status = "Market data failed" });
-            log.Add(AutomationLogLevel.Error, $"{entry.Listing.ItemName}: {message}");
+            var failedEntry = queue[currentIndex];
+            ReplaceCurrent(failedEntry with { Status = "Market data failed" });
+            log.Add(AutomationLogLevel.Error, $"{failedEntry.Listing.ItemName}: {message}");
             retainerListings.CancelPriceEditor();
             Schedule(AutomationState.WaitingAfterCommit, "Market data failed; moving to the next listing.");
             return;
         }
 
         currentMarket = marketTask.Result;
-        if (!retainerListings.TryResolveOpenPriceEditor(currentMarket.ItemId, processedSlots, out var resolved) || resolved is null)
+        var entry = queue[currentIndex];
+        if (currentMarket.ItemId != 0 && currentMarket.ItemId != entry.Listing.ItemId)
         {
-            var entry = queue[currentIndex];
-            ReplaceCurrent(entry with { Status = "Could not map visible row" });
+            ReplaceCurrent(entry with { Status = "Ignored stale market packet" });
             log.Add(AutomationLogLevel.Error,
-                $"Visible row {currentIndex + 1}: live item #{currentMarket.ItemId} could not be mapped to a retainer market slot; skipped.");
+                $"{entry.Listing.ItemName}: ignored stale market packet for item #{currentMarket.ItemId}; expected #{entry.Listing.ItemId}.");
             retainerListings.CancelPriceEditor();
-            Schedule(AutomationState.WaitingAfterCommit, "Could not map this row; continuing to the next listing.");
+            Schedule(AutomationState.WaitingAfterCommit, "Stale market data was rejected; continuing safely.");
             return;
         }
-
-        var mappedEntry = queue[currentIndex];
-        queue[currentIndex] = mappedEntry with { Listing = resolved, Status = "Matched visible row" };
-        processedSlots.Add(resolved.Slot);
         log.Add(AutomationLogLevel.Debug,
-            $"Matched visible row {currentIndex + 1}, live item #{currentMarket.ItemId}, to {resolved.ItemName}, market slot {resolved.Slot}.");
+            $"{entry.Listing.ItemName}: aggregated {currentMarket.Listings.Count} live listing(s) for item #{entry.Listing.ItemId}.");
         Transition(AutomationState.EvaluatingPrice, $"Evaluating {queue[currentIndex].Listing.ItemName}.");
     }
 

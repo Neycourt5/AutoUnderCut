@@ -39,7 +39,8 @@ public sealed class PricingStrategyService : IPricingStrategyService
             .ToArray();
 
         if (competitors.Length == 0)
-            return Decision(PriceDecisionKind.NoMarketData, listing, null, floor, "No valid competitor listings matched the quality filter.");
+            return Decision(PriceDecisionKind.NoMarketData, listing, null, floor,
+                $"No competitor listings matched {QualityDescription(rule.QualityFilter, listing.IsHighQuality)}.");
 
         var lowest = competitors.Min(x => x.PricePerUnit);
         if (IsPriceWar(lowest, market.HistoricalMedianPrice, rule.PriceWarDropPercent))
@@ -57,7 +58,7 @@ public sealed class PricingStrategyService : IPricingStrategyService
 
         if (listing.CurrentPrice <= lowest)
             return Decision(PriceDecisionKind.NoChange, listing, lowest, floor,
-                "Current listing is already at or below the lowest competitor.");
+                $"Current listing is already at or below the lowest competitor in {QualityDescription(rule.QualityFilter, listing.IsHighQuality)}.");
 
         if (WithinTolerance(listing.CurrentPrice, lowest, rule))
             return Decision(PriceDecisionKind.WithinTolerance, listing, lowest, floor, "Current price is inside the configured tolerance band.");
@@ -122,6 +123,15 @@ public sealed class PricingStrategyService : IPricingStrategyService
         QualityFilterMode.HighQualityOnly => marketHq,
         QualityFilterMode.NormalQualityOnly => !marketHq,
         _ => false,
+    };
+
+    private static string QualityDescription(QualityFilterMode mode, bool listingHq) => mode switch
+    {
+        QualityFilterMode.SameQuality => listingHq ? "the HQ market" : "the NQ market",
+        QualityFilterMode.AllQualities => "the combined HQ/NQ market",
+        QualityFilterMode.HighQualityOnly => "the HQ market",
+        QualityFilterMode.NormalQualityOnly => "the NQ market",
+        _ => "the selected quality market",
     };
 
     private static uint RoundDown(uint value, PriceRoundingMode mode) => mode switch

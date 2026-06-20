@@ -19,6 +19,8 @@ public sealed class MarketDataService : IMarketDataService, IDisposable
     private readonly IMarketBoard marketBoard;
     private readonly ConfigurationService configuration;
     private readonly object sync = new();
+    private readonly HashSet<int> completedRequestIds = [];
+    private readonly Queue<int> completedRequestOrder = [];
     private PendingRequest? pending;
 
     public MarketDataService(IMarketBoard marketBoard, ConfigurationService configuration)
@@ -62,6 +64,8 @@ public sealed class MarketDataService : IMarketDataService, IDisposable
         {
             lock (sync)
             {
+                if (request.RequestId is { } requestId)
+                    RememberCompletedRequest(requestId);
                 if (ReferenceEquals(pending, request))
                     pending = null;
             }
@@ -81,9 +85,11 @@ public sealed class MarketDataService : IMarketDataService, IDisposable
     {
         PendingRequest? request;
         lock (sync)
+        {
             request = pending;
-        if (request is null)
-            return;
+            if (request is null || completedRequestIds.Contains(offerings.RequestId))
+                return;
+        }
 
         var receivedItemId = offerings.ItemListings.FirstOrDefault()?.ItemId ?? 0;
         if (request.RequestedItemId != 0 && receivedItemId != 0 && receivedItemId != request.RequestedItemId)
@@ -100,10 +106,11 @@ public sealed class MarketDataService : IMarketDataService, IDisposable
                 x.RetainerId))
             .ToArray();
 
-        // The game sends the cheapest page first, which is all the strategy needs.
-        // An empty page is still a valid "no listings" result for our one active request.
-        if (rows.Length > 0 || offerings.ItemListings.Count == 0)
-            request.Offerings.TrySetResult(rows);
+        // Dalamud emits one event for each raw market packet (up to ten listings),
+        // not one event for the complete result page. Aggregate packets sharing the
+        // request ID and finish after a short quiet period. This also prevents a late
+        // packet from the previous same-item search becoming the next row's result.
+        request.AddOfferingsPacket(offerings.RequestId, rows);
     }
 
     private void OnHistoryReceived(IMarketBoardHistory history)
@@ -128,10 +135,25 @@ public sealed class MarketDataService : IMarketDataService, IDisposable
         marketBoard.HistoryReceived -= OnHistoryReceived;
     }
 
+    private void RememberCompletedRequest(int requestId)
+    {
+        if (!completedRequestIds.Add(requestId))
+            return;
+        completedRequestOrder.Enqueue(requestId);
+        while (completedRequestOrder.Count > 8)
+            completedRequestIds.Remove(completedRequestOrder.Dequeue());
+    }
+
     private sealed class PendingRequest(uint itemId)
     {
+        private static readonly TimeSpan PacketQuietPeriod = TimeSpan.FromMilliseconds(350);
+        private readonly object packetSync = new();
+        private readonly HashSet<MarketListing> accumulatedListings = [];
+        private int packetGeneration;
+
         public uint RequestedItemId { get; } = itemId;
         public uint ResolvedItemId { get; private set; } = itemId;
+        public int? RequestId { get; private set; }
         public TaskCompletionSource<IReadOnlyList<MarketListing>> Offerings { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource<uint[]> History { get; } =
@@ -141,6 +163,34 @@ public sealed class MarketDataService : IMarketDataService, IDisposable
         {
             if (resolvedItemId != 0 && ResolvedItemId == 0)
                 ResolvedItemId = resolvedItemId;
+        }
+
+        public void AddOfferingsPacket(int requestId, IReadOnlyList<MarketListing> listings)
+        {
+            int generation;
+            lock (packetSync)
+            {
+                if (Offerings.Task.IsCompleted)
+                    return;
+                if (RequestId.HasValue && RequestId.Value != requestId)
+                    return;
+                RequestId = requestId;
+                foreach (var listing in listings)
+                    accumulatedListings.Add(listing);
+                generation = ++packetGeneration;
+            }
+            _ = CompleteAfterQuietPeriodAsync(generation);
+        }
+
+        private async Task CompleteAfterQuietPeriodAsync(int generation)
+        {
+            await Task.Delay(PacketQuietPeriod).ConfigureAwait(false);
+            lock (packetSync)
+            {
+                if (generation != packetGeneration || Offerings.Task.IsCompleted)
+                    return;
+                Offerings.TrySetResult(accumulatedListings.ToArray());
+            }
         }
 
         public void Cancel()

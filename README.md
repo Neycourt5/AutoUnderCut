@@ -7,6 +7,7 @@ Smart Undercutter is a Dalamud SDK 15 plugin for guarded retainer-market reprici
 - Starts when the summoning-bell retainer list opens, or manually with `/sub`.
 - Visits every available retainer and opens every occupied market listing.
 - Uses the in-game Compare Prices request and Dalamud market-board events for live listings and sale history.
+- Resolves the visible Adjust Price item before every request and rejects delayed packets from a previous row instead of skipping or mismatching the listing.
 - Excludes all of the player's retainers before choosing the lowest competitor.
 - Defaults to undercutting the lowest real competitor by one gil with no tolerance band.
 - Detects extreme crash listings (60% below recent history by default) and leaves the item unchanged without blocking normal market swings.
