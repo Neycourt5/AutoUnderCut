@@ -87,7 +87,7 @@ public sealed class PricingStrategyService : IPricingStrategyService
     private static uint CalculateFloor(RetainerListing listing, PricingRule rule)
     {
         var costBasis = listing.AcquisitionCost == 0 ? rule.CostBasis : listing.AcquisitionCost;
-        if (costBasis == 0 || rule.MinimumMarginPercent == 0)
+        if (costBasis == 0)
             return Math.Max(1, rule.MinimumPrice);
 
         var marginFloor = decimal.Ceiling(costBasis * (1m + (rule.MinimumMarginPercent / 100m)));

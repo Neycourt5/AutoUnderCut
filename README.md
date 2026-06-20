@@ -9,7 +9,7 @@ Smart Undercutter is a Dalamud SDK 15 plugin for guarded retainer-market reprici
 - Uses the in-game Compare Prices request and Dalamud market-board events for live listings and sale history.
 - Excludes all of the player's retainers before choosing the lowest competitor.
 - Defaults to undercutting the lowest real competitor by one gil with no tolerance band.
-- Detects an abnormal low listing against recent sale history and leaves the item unchanged by default.
+- Detects extreme crash listings (60% below recent history by default) and leaves the item unchanged without blocking normal market swings.
 - Submits through the real Adjust Price numeric control and confirm callback, then verifies the server-updated retainer slot.
 - Uses randomized 250-450 ms action delays and immediately stops on movement, logout, unexpected UI state, changed listing, or failed confirmation.
 - Supports price floors, cost-basis margins, HQ/NQ filtering, match-lowest mode, optional tolerance bands, and 99/999 rounding.
@@ -18,6 +18,7 @@ Smart Undercutter is a Dalamud SDK 15 plugin for guarded retainer-market reprici
 - Builds diversified purchase plans from Universalis sale history and current listings, constrained by gil, bag slots, retainer sale slots, weekly sales, ROI, and per-item limits.
 - Uses Lifestream and vnavmesh to visit same-data-center worlds, then revalidates every candidate against the live in-game listing before submitting a purchase.
 - Returns home, opens a summoning bell, distributes purchased stacks into open retainer slots, and feeds them through the normal live repricing pass.
+- Persists the landed unit cost of automatic purchases, including the buyer fee, and prevents later repricing below that cost plus the configured margin.
 
 Dry-run mode remains available. Repricing writes, purchases, automatic listing, and recurring procurement each have separate opt-in controls. Purchase and listing controls ship disarmed.
 

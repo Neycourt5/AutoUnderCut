@@ -72,7 +72,7 @@ public sealed class PricingRule
     public decimal MinimumMarginPercent { get; set; }
     public uint AbsoluteTolerance { get; set; }
     public decimal PercentageTolerance { get; set; }
-    public decimal PriceWarDropPercent { get; set; } = 20m;
+    public decimal PriceWarDropPercent { get; set; } = 60m;
     public PriceWarAction PriceWarAction { get; set; } = PriceWarAction.LeaveUnchanged;
     public PriceRoundingMode Rounding { get; set; }
     public QualityFilterMode QualityFilter { get; set; } = QualityFilterMode.SameQuality;

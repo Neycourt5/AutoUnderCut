@@ -70,10 +70,42 @@ public sealed class PricingStrategyServiceTests
     }
 
     [Fact]
+    public void NeverUndercutsBelowTrackedPurchaseCost()
+    {
+        var rule = new PricingRule
+        {
+            CostBasis = 1_050,
+            MinimumMarginPercent = 0,
+        };
+        var decision = service.Evaluate(Context(current: 2_000, lowest: 900, rule: rule));
+
+        Assert.Equal(PriceDecisionKind.BelowFloor, decision.Kind);
+        Assert.Equal(1_050u, decision.EffectiveFloor);
+        Assert.False(decision.ShouldUpdate);
+    }
+
+    [Fact]
     public void DetectsPriceWarAgainstHistoricalMedian()
     {
         var rule = new PricingRule { PriceWarDropPercent = 20, AbsoluteTolerance = 0, PercentageTolerance = 0 };
         var decision = service.Evaluate(Context(current: 2_000, lowest: 700, historical: 1_000, rule: rule));
+
+        Assert.Equal(PriceDecisionKind.PriceWar, decision.Kind);
+    }
+
+    [Fact]
+    public void DefaultGuardUndercutsOrdinaryTwentySixPercentMarketDrop()
+    {
+        var decision = service.Evaluate(Context(current: 5_696, lowest: 4_200, historical: 5_696));
+
+        Assert.Equal(PriceDecisionKind.Update, decision.Kind);
+        Assert.Equal(4_199u, decision.TargetPrice);
+    }
+
+    [Fact]
+    public void DefaultGuardStillRejectsExtremeCrashListing()
+    {
+        var decision = service.Evaluate(Context(current: 5_696, lowest: 1_000, historical: 5_696));
 
         Assert.Equal(PriceDecisionKind.PriceWar, decision.Kind);
     }

@@ -6,7 +6,7 @@ namespace SmartUndercutBot;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 9;
+    public int Version { get; set; } = 10;
     public bool AutomationEnabled { get; set; }
     public bool ProcessAllRetainers { get; set; } = true;
     public bool RepeatBellRuns { get; set; }
@@ -109,6 +109,20 @@ public sealed class Configuration : IPluginConfiguration
             AllowAutomaticPurchases = false;
             AllowAutomaticListing = false;
             Version = 9;
+        }
+        if (Version < 10)
+        {
+            // The original 20% guard treated ordinary market movement (for example,
+            // 5,696 down to roughly 4,200) as a price war and never reached the write
+            // step. Preserve protection only for genuinely extreme collapses.
+            if (GlobalRule is not null && GlobalRule.PriceWarDropPercent == 20m)
+                GlobalRule.PriceWarDropPercent = 60m;
+            if (PerItemRules is not null)
+            {
+                foreach (var rule in PerItemRules.Values.Where(x => x.PriceWarDropPercent == 20m))
+                    rule.PriceWarDropPercent = 60m;
+            }
+            Version = 10;
         }
         MinimumDelayMs = Math.Clamp(MinimumDelayMs, 100, 60_000);
         MaximumDelayMs = Math.Clamp(MaximumDelayMs, MinimumDelayMs, 60_000);

@@ -427,7 +427,12 @@ public sealed class ProcurementController : IDisposable
         var pricingRule = configuration.Current.PerItemRules.TryGetValue(actual.ItemId, out var existingRule)
             ? existingRule
             : configuration.Current.GlobalRule.Clone();
-        pricingRule.CostBasis = Math.Max(pricingRule.CostBasis, actual.PricePerUnit);
+        // Buyers always pay a 5% market-board fee. Store a conservative landed
+        // unit cost so later repricing cannot sell below the actual purchase cost.
+        var landedCostPerUnit = (uint)Math.Min(
+            PricingStrategyService.MaximumListingPrice,
+            decimal.Ceiling(actual.PricePerUnit * 1.05m));
+        pricingRule.CostBasis = Math.Max(pricingRule.CostBasis, landedCostPerUnit);
         pricingRule.MinimumMarginPercent = Math.Max(
             pricingRule.MinimumMarginPercent, configuration.Current.ProcurementMinimumRoiPercent);
         configuration.Current.PerItemRules[actual.ItemId] = pricingRule;
@@ -435,7 +440,8 @@ public sealed class ProcurementController : IDisposable
         var cost = (ulong)actual.PricePerUnit * actual.Quantity;
         gilSpent += (uint)Math.Min(cost, uint.MaxValue - gilSpent);
         log.Add(AutomationLogLevel.Information,
-            $"PURCHASED {actual.ItemName} x{actual.Quantity} on {actual.WorldName} at {actual.PricePerUnit:N0} gil each.");
+            $"PURCHASED {actual.ItemName} x{actual.Quantity} on {actual.WorldName} at {actual.PricePerUnit:N0} gil each; " +
+            $"tracked landed cost {landedCostPerUnit:N0} gil including buyer fee.");
         AdvanceOrder();
     }
 
