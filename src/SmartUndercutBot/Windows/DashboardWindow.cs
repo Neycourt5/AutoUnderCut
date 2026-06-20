@@ -23,7 +23,7 @@ public sealed class DashboardWindow : Window
         AutomationController automation,
         IMarketDataService marketData,
         AutomationLog log)
-        : base("Smart Undercut Bot##Dashboard")
+        : base("Smart Undercutter##Dashboard")
     {
         this.configuration = configuration;
         this.automation = automation;
@@ -87,9 +87,16 @@ public sealed class DashboardWindow : Window
 
         var config = configuration.Current;
         var enabled = config.AutomationEnabled;
-        if (ImGui.Checkbox("Start automatically when the summoning-bell retainer list opens", ref enabled))
+        if (ImGui.Checkbox("Start automatically at the summoning bell", ref enabled))
         {
             config.AutomationEnabled = enabled;
+            SaveConfiguration();
+        }
+
+        var allRetainers = config.ProcessAllRetainers;
+        if (ImGui.Checkbox("Automatically process every retainer", ref allRetainers))
+        {
+            config.ProcessAllRetainers = allRetainers;
             SaveConfiguration();
         }
 
@@ -314,6 +321,18 @@ public sealed class DashboardWindow : Window
             config.MarketRequestTimeoutSeconds = requestTimeout;
             configurationDirty = true;
         }
+        var requestCooldown = config.MarketRequestCooldownMs;
+        if (InputInt("Different-item market cooldown (ms)", ref requestCooldown, 1000, 10_000))
+        {
+            config.MarketRequestCooldownMs = requestCooldown;
+            configurationDirty = true;
+        }
+        var sameItemCacheSeconds = config.SameItemCacheSeconds;
+        if (InputInt("Same-item price reuse (seconds)", ref sameItemCacheSeconds, 1, 300))
+        {
+            config.SameItemCacheSeconds = sameItemCacheSeconds;
+            configurationDirty = true;
+        }
         var maximumUpdates = config.MaximumUpdatesPerSession;
         if (InputInt("Maximum updates per session", ref maximumUpdates, 1, 200))
         {
@@ -331,7 +350,7 @@ public sealed class DashboardWindow : Window
         if (ImGui.Button("Cancel pending live market request"))
             marketData.ClearCache();
         ImGui.Spacing();
-        ImGui.TextWrapped("Prices are read from the game's live Compare Prices result. Any logout, player movement, unexpected UI state, changed listing, malformed inventory, or failed server confirmation halts or skips work before another write is attempted.");
+        ImGui.TextWrapped("Consecutive listings of the same item reuse one fresh Compare Prices result. Different items respect the market cooldown before another request. Any logout, player movement, unexpected UI state, changed listing, malformed inventory, or failed server confirmation halts or skips work before another write is attempted.");
         DrawSaveButton();
     }
 

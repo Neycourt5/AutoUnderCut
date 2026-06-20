@@ -1,6 +1,6 @@
 {
   "Author": "AutoUnderCut",
-  "Name": "Smart Undercut Bot",
+  "Name": "Smart Undercutter",
   "Punchline": "Live, guarded undercutting across every retainer.",
   "Description": "Starts at the summoning bell, visits every retainer and listing, reads live Compare Prices results, and submits guarded undercuts through the game's Adjust Price flow. Use /sub to open the dashboard.",
   "ApplicableVersion": "any",

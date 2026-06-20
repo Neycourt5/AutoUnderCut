@@ -173,9 +173,8 @@ public sealed unsafe class RetainerListingService : IRetainerListingService
 
         var candidates = ReadCurrentListings()
             .Where(x => !excludedSlots.Contains(x.Slot))
-            .Where(x => itemId == 0
-                ? visibleName.Contains(x.ItemName, StringComparison.OrdinalIgnoreCase)
-                : x.ItemId == itemId)
+            .Where(x => visibleName.Contains(x.ItemName, StringComparison.OrdinalIgnoreCase))
+            .Where(x => itemId == 0 || x.ItemId == itemId)
             .ToArray();
         if (candidates.Length == 0)
             return false;

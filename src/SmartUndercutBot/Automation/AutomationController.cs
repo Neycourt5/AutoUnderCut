@@ -19,6 +19,7 @@ public enum AutomationState
     WaitingForContextMenu,
     WaitingBeforeOpeningPriceEditor,
     WaitingForPriceEditor,
+    WaitingBeforeMarketRequest,
     RequestingMarketData,
     EvaluatingPrice,
     WaitingBeforeCommit,
@@ -63,11 +64,13 @@ public sealed class AutomationController : IDisposable
     private CancellationTokenSource? sessionCancellation;
     private Task<MarketSnapshot>? marketTask;
     private MarketSnapshot? currentMarket;
+    private MarketSnapshot? reusableMarket;
     private PriceDecision? currentDecision;
     private Vector3 sessionPosition;
     private DateTimeOffset nextActionAt;
     private DateTimeOffset stateDeadline;
     private DateTimeOffset verificationDeadline;
+    private DateTimeOffset lastMarketRequestAt;
     private int currentIndex;
     private int updatesSubmitted;
     private int retainerIndex;
@@ -211,9 +214,12 @@ public sealed class AutomationController : IDisposable
                 break;
             case AutomationState.WaitingForPriceEditor:
                 if (retainerListings.IsPriceEditorOpen)
-                    RequestCurrentMarket();
+                    PrepareCurrentMarket();
                 else
                     CheckTimeout("Timed out waiting for the Adjust Price window.");
+                break;
+            case AutomationState.WaitingBeforeMarketRequest:
+                if (DelayElapsed()) RequestCurrentMarket();
                 break;
             case AutomationState.RequestingMarketData:
                 PollMarketRequest();
@@ -287,7 +293,10 @@ public sealed class AutomationController : IDisposable
     {
         ResetSession();
         bellSession = true;
-        retainerCount = retainerListings.RetainerCount;
+        var availableRetainers = retainerListings.RetainerCount;
+        retainerCount = configuration.Current.ProcessAllRetainers
+            ? availableRetainers
+            : Math.Min(availableRetainers, 1);
         handledBell = true;
         RetainerInterfaceOpened?.Invoke();
         if (retainerCount <= 0)
@@ -296,7 +305,10 @@ public sealed class AutomationController : IDisposable
             return;
         }
 
-        Schedule(AutomationState.WaitingBeforeRetainerSelection, $"Starting all-retainer run ({retainerCount} retainers).");
+        Schedule(AutomationState.WaitingBeforeRetainerSelection,
+            configuration.Current.ProcessAllRetainers
+                ? $"Starting automatic run across all {retainerCount} retainers."
+                : "Starting a single-retainer run.");
         LogSessionStart();
     }
 
@@ -323,8 +335,10 @@ public sealed class AutomationController : IDisposable
         retainerIndex = 0;
         retainerCount = 0;
         currentMarket = null;
+        reusableMarket = null;
         currentDecision = null;
         marketTask = null;
+        lastMarketRequestAt = DateTimeOffset.MinValue;
         sessionPosition = retainerListings.GetPlayerPosition() ?? Vector3.Zero;
     }
 
@@ -402,12 +416,57 @@ public sealed class AutomationController : IDisposable
         WaitFor(AutomationState.WaitingForPriceEditor, "Waiting for the Adjust Price window.");
     }
 
+    private void PrepareCurrentMarket()
+    {
+        var entry = queue[currentIndex];
+        currentMarket = null;
+        currentDecision = null;
+        marketTask = null;
+
+        if (TryReusePreviousMarket())
+            return;
+
+        var cooldown = TimeSpan.FromMilliseconds(configuration.Current.MarketRequestCooldownMs);
+        var earliestRequestAt = lastMarketRequestAt + cooldown;
+        if (DateTimeOffset.UtcNow < earliestRequestAt)
+        {
+            ReplaceCurrent(entry with { Status = "Waiting for market cooldown" });
+            nextActionAt = earliestRequestAt;
+            Transition(AutomationState.WaitingBeforeMarketRequest,
+                $"Waiting before requesting live prices for {entry.Listing.ItemName}.");
+            return;
+        }
+
+        RequestCurrentMarket();
+    }
+
+    private bool TryReusePreviousMarket()
+    {
+        if (reusableMarket is null ||
+            DateTimeOffset.UtcNow - reusableMarket.CapturedAt > TimeSpan.FromSeconds(configuration.Current.SameItemCacheSeconds) ||
+            !retainerListings.TryResolveOpenPriceEditor(reusableMarket.ItemId, processedSlots, out var resolved) ||
+            resolved is null || resolved.ItemId != reusableMarket.ItemId)
+            return false;
+
+        var entry = queue[currentIndex];
+        currentMarket = reusableMarket with { IsFromCache = true };
+        queue[currentIndex] = entry with { Listing = resolved, Status = "Reusing same-item prices" };
+        processedSlots.Add(resolved.Slot);
+        log.Add(AutomationLogLevel.Debug,
+            $"{resolved.ItemName}: reused the previous live market result for visible row {currentIndex + 1}; no Compare Prices request needed.");
+        Transition(AutomationState.EvaluatingPrice, $"Reusing fresh prices for {resolved.ItemName}.");
+        return true;
+    }
+
     private void RequestCurrentMarket()
     {
         var entry = queue[currentIndex];
+        if (!retainerListings.IsPriceEditorOpen)
+        {
+            Halt("The Adjust Price window closed before the market cooldown elapsed.");
+            return;
+        }
         ReplaceCurrent(entry with { Status = "Reading live market" });
-        currentMarket = null;
-        currentDecision = null;
         // Item ID 0 means "accept the item shown by this live Compare Prices request."
         // The returned market packet is authoritative for visible-row ordering.
         marketTask = marketData.GetSnapshotAsync(0, sessionCancellation!.Token);
@@ -416,6 +475,7 @@ public sealed class AutomationController : IDisposable
             Halt("Could not click Compare Prices.");
             return;
         }
+        lastMarketRequestAt = DateTimeOffset.UtcNow;
         Transition(AutomationState.RequestingMarketData, $"Reading live prices for visible row {currentIndex + 1}.");
     }
 
@@ -451,6 +511,7 @@ public sealed class AutomationController : IDisposable
         var mappedEntry = queue[currentIndex];
         queue[currentIndex] = mappedEntry with { Listing = resolved, Status = "Matched visible row" };
         processedSlots.Add(resolved.Slot);
+        reusableMarket = currentMarket;
         log.Add(AutomationLogLevel.Debug,
             $"Matched visible row {currentIndex + 1}, live item #{currentMarket.ItemId}, to {resolved.ItemName}, market slot {resolved.Slot}.");
         Transition(AutomationState.EvaluatingPrice, $"Evaluating {queue[currentIndex].Listing.ItemName}.");
@@ -667,6 +728,7 @@ public sealed class AutomationController : IDisposable
         AutomationState.WaitingForStableInterface or
         AutomationState.WaitingBeforeOpeningListing or
         AutomationState.WaitingBeforeOpeningPriceEditor or
+        AutomationState.WaitingBeforeMarketRequest or
         AutomationState.WaitingBeforeCommit or
         AutomationState.WaitingAfterCommit or
         AutomationState.WaitingBeforeClosingSellList or

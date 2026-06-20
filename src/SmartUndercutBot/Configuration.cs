@@ -6,13 +6,16 @@ namespace SmartUndercutBot;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 5;
+    public int Version { get; set; } = 6;
     public bool AutomationEnabled { get; set; }
+    public bool ProcessAllRetainers { get; set; } = true;
     public bool AllowAutomaticWrites { get; set; }
     public bool OpenDashboardOnRetainer { get; set; } = true;
     public int MinimumDelayMs { get; set; } = 250;
     public int MaximumDelayMs { get; set; } = 450;
     public int MarketRequestTimeoutSeconds { get; set; } = 10;
+    public int MarketRequestCooldownMs { get; set; } = 1200;
+    public int SameItemCacheSeconds { get; set; } = 30;
     public int MaximumUpdatesPerSession { get; set; } = 200;
     public PricingRule GlobalRule { get; set; } = new();
     public Dictionary<uint, PricingRule> PerItemRules { get; set; } = [];
@@ -57,9 +60,20 @@ public sealed class Configuration : IPluginConfiguration
             AllowAutomaticWrites = false;
             Version = 5;
         }
+        if (Version < 6)
+        {
+            ProcessAllRetainers = true;
+            if (MarketRequestCooldownMs == 0)
+                MarketRequestCooldownMs = 1200;
+            if (SameItemCacheSeconds == 0)
+                SameItemCacheSeconds = 30;
+            Version = 6;
+        }
         MinimumDelayMs = Math.Clamp(MinimumDelayMs, 100, 60_000);
         MaximumDelayMs = Math.Clamp(MaximumDelayMs, MinimumDelayMs, 60_000);
         MarketRequestTimeoutSeconds = Math.Clamp(MarketRequestTimeoutSeconds, 2, 60);
+        MarketRequestCooldownMs = Math.Clamp(MarketRequestCooldownMs, 1000, 10_000);
+        SameItemCacheSeconds = Math.Clamp(SameItemCacheSeconds, 1, 300);
         MaximumUpdatesPerSession = Math.Clamp(MaximumUpdatesPerSession, 1, 200);
         GlobalRule ??= new PricingRule();
         PerItemRules ??= [];

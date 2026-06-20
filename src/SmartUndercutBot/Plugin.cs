@@ -52,9 +52,9 @@ public sealed class Plugin : IDalamudPlugin
         PluginInterface.UiBuilder.OpenConfigUi += ToggleDashboard;
         CommandManager.AddHandler(CommandName, new CommandInfo(OnCommand)
         {
-            HelpMessage = "Open the Smart Undercut Bot dashboard.",
+            HelpMessage = "Open the Smart Undercutter dashboard.",
         });
-        PluginLog.Information("Smart Undercut Bot initialized.");
+        PluginLog.Information("Smart Undercutter initialized.");
     }
 
     private void OnCommand(string _, string arguments)

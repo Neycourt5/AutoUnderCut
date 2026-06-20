@@ -1,6 +1,6 @@
-# Smart Undercut Bot
+# Smart Undercutter
 
-Smart Undercut Bot is a Dalamud SDK 15 plugin for guarded, autonomous retainer-market repricing.
+Smart Undercutter is a Dalamud SDK 15 plugin for guarded, autonomous retainer-market repricing.
 
 ## What is implemented
 
@@ -41,7 +41,7 @@ Add this URL under Dalamud Settings -> Experimental -> Custom Plugin Repositorie
 https://github.com/Neycourt5/AutoUnderCut/releases/latest/download/repo.json
 ```
 
-Save it, then search for **Smart Undercut Bot** in the plugin installer.
+Save it, then search for **Smart Undercutter** in the plugin installer.
 
 ## Operational notes
 
