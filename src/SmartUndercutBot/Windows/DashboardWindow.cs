@@ -100,6 +100,29 @@ public sealed class DashboardWindow : Window
             SaveConfiguration();
         }
 
+        var repeatRuns = config.RepeatBellRuns;
+        if (ImGui.Checkbox("Repeat bell runs while idle", ref repeatRuns))
+        {
+            config.RepeatBellRuns = repeatRuns;
+            SaveConfiguration();
+        }
+        if (repeatRuns)
+        {
+            var minimumMinutes = config.RepeatMinimumMinutes;
+            if (InputInt("Minimum minutes between runs", ref minimumMinutes, 5, 1_440))
+            {
+                config.RepeatMinimumMinutes = minimumMinutes;
+                SaveConfiguration();
+            }
+            var maximumMinutes = config.RepeatMaximumMinutes;
+            if (InputInt("Maximum minutes between runs", ref maximumMinutes, config.RepeatMinimumMinutes, 1_440))
+            {
+                config.RepeatMaximumMinutes = maximumMinutes;
+                SaveConfiguration();
+            }
+            ImGui.TextWrapped("The next interval is randomized within this range. Scheduled runs continue only while logged in, stationary, and the summoning-bell retainer list remains open.");
+        }
+
         var writes = config.AllowAutomaticWrites;
         if (ImGui.Checkbox("Arm autonomous price writes", ref writes))
         {

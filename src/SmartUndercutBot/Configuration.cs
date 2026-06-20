@@ -6,9 +6,12 @@ namespace SmartUndercutBot;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 6;
+    public int Version { get; set; } = 7;
     public bool AutomationEnabled { get; set; }
     public bool ProcessAllRetainers { get; set; } = true;
+    public bool RepeatBellRuns { get; set; }
+    public int RepeatMinimumMinutes { get; set; } = 5;
+    public int RepeatMaximumMinutes { get; set; } = 10;
     public bool AllowAutomaticWrites { get; set; }
     public bool OpenDashboardOnRetainer { get; set; } = true;
     public int MinimumDelayMs { get; set; } = 250;
@@ -69,11 +72,21 @@ public sealed class Configuration : IPluginConfiguration
                 SameItemCacheSeconds = 30;
             Version = 6;
         }
+        if (Version < 7)
+        {
+            if (RepeatMinimumMinutes == 0)
+                RepeatMinimumMinutes = 5;
+            if (RepeatMaximumMinutes == 0)
+                RepeatMaximumMinutes = 10;
+            Version = 7;
+        }
         MinimumDelayMs = Math.Clamp(MinimumDelayMs, 100, 60_000);
         MaximumDelayMs = Math.Clamp(MaximumDelayMs, MinimumDelayMs, 60_000);
         MarketRequestTimeoutSeconds = Math.Clamp(MarketRequestTimeoutSeconds, 2, 60);
         MarketRequestCooldownMs = Math.Clamp(MarketRequestCooldownMs, 1000, 10_000);
         SameItemCacheSeconds = Math.Clamp(SameItemCacheSeconds, 1, 300);
+        RepeatMinimumMinutes = Math.Clamp(RepeatMinimumMinutes, 5, 1_440);
+        RepeatMaximumMinutes = Math.Clamp(RepeatMaximumMinutes, RepeatMinimumMinutes, 1_440);
         MaximumUpdatesPerSession = Math.Clamp(MaximumUpdatesPerSession, 1, 200);
         GlobalRule ??= new PricingRule();
         PerItemRules ??= [];

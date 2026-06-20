@@ -29,6 +29,7 @@ public enum AutomationState
     WaitingForRetainerMenuAfterSellList,
     WaitingBeforeClosingRetainer,
     WaitingForRetainerList,
+    WaitingForScheduledRun,
     Completed,
     Halted,
     Faulted,
@@ -250,6 +251,12 @@ public sealed class AutomationController : IDisposable
                     ContinueWithNextRetainer();
                 else
                     CheckTimeout("Timed out returning to the summoning-bell retainer list.");
+                break;
+            case AutomationState.WaitingForScheduledRun:
+                if (!retainerListings.IsRetainerListOpen)
+                    Halt("The summoning-bell list closed; scheduled runs were cancelled.");
+                else if (DelayElapsed())
+                    BeginBellSession();
                 break;
         }
     }
@@ -676,7 +683,11 @@ public sealed class AutomationController : IDisposable
         currentIndex = 0;
         if (retainerIndex >= retainerCount)
         {
-            Complete($"Finished all {retainerCount} retainers; submitted {updatesSubmitted} update(s).");
+            var message = $"Finished {retainerCount} retainer(s); submitted {updatesSubmitted} update(s).";
+            if (configuration.Current.RepeatBellRuns)
+                ScheduleNextBellRun(message);
+            else
+                Complete(message);
             return;
         }
         Schedule(AutomationState.WaitingBeforeRetainerSelection,
@@ -688,6 +699,18 @@ public sealed class AutomationController : IDisposable
         State = AutomationState.Completed;
         detail = message;
         log.Add(AutomationLogLevel.Information, message);
+    }
+
+    private void ScheduleNextBellRun(string completedMessage)
+    {
+        var minimumMinutes = configuration.Current.RepeatMinimumMinutes;
+        var maximumMinutes = configuration.Current.RepeatMaximumMinutes;
+        var minutes = Random.Shared.Next(minimumMinutes, maximumMinutes + 1);
+        nextActionAt = DateTimeOffset.UtcNow.AddMinutes(minutes);
+        Transition(AutomationState.WaitingForScheduledRun,
+            $"{completedMessage} Next bell run in {minutes} minute(s).");
+        log.Add(AutomationLogLevel.Information,
+            $"{completedMessage} Scheduled the next bell run for {nextActionAt.LocalDateTime:t}.");
     }
 
     private void Schedule(AutomationState state, string message)
@@ -732,7 +755,8 @@ public sealed class AutomationController : IDisposable
         AutomationState.WaitingBeforeCommit or
         AutomationState.WaitingAfterCommit or
         AutomationState.WaitingBeforeClosingSellList or
-        AutomationState.WaitingBeforeClosingRetainer;
+        AutomationState.WaitingBeforeClosingRetainer or
+        AutomationState.WaitingForScheduledRun;
 
     public void Dispose()
     {
