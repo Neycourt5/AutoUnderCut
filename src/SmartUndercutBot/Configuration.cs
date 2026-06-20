@@ -6,7 +6,7 @@ namespace SmartUndercutBot;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 7;
+    public int Version { get; set; } = 8;
     public bool AutomationEnabled { get; set; }
     public bool ProcessAllRetainers { get; set; } = true;
     public bool RepeatBellRuns { get; set; }
@@ -18,7 +18,6 @@ public sealed class Configuration : IPluginConfiguration
     public int MaximumDelayMs { get; set; } = 450;
     public int MarketRequestTimeoutSeconds { get; set; } = 10;
     public int MarketRequestCooldownMs { get; set; } = 1200;
-    public int SameItemCacheSeconds { get; set; } = 30;
     public int MaximumUpdatesPerSession { get; set; } = 200;
     public PricingRule GlobalRule { get; set; } = new();
     public Dictionary<uint, PricingRule> PerItemRules { get; set; } = [];
@@ -68,8 +67,6 @@ public sealed class Configuration : IPluginConfiguration
             ProcessAllRetainers = true;
             if (MarketRequestCooldownMs == 0)
                 MarketRequestCooldownMs = 1200;
-            if (SameItemCacheSeconds == 0)
-                SameItemCacheSeconds = 30;
             Version = 6;
         }
         if (Version < 7)
@@ -80,11 +77,23 @@ public sealed class Configuration : IPluginConfiguration
                 RepeatMaximumMinutes = 10;
             Version = 7;
         }
+        if (Version < 8)
+        {
+            // Market requests now have their own throttle. Undo the old workaround that
+            // slowed every unrelated UI action to 1200 ms.
+            if (MinimumDelayMs == 1200 && MaximumDelayMs == 1200)
+            {
+                MinimumDelayMs = 250;
+                MaximumDelayMs = 450;
+            }
+            if (RepeatMinimumMinutes == 5 && RepeatMaximumMinutes == 5)
+                RepeatMaximumMinutes = 10;
+            Version = 8;
+        }
         MinimumDelayMs = Math.Clamp(MinimumDelayMs, 100, 60_000);
         MaximumDelayMs = Math.Clamp(MaximumDelayMs, MinimumDelayMs, 60_000);
         MarketRequestTimeoutSeconds = Math.Clamp(MarketRequestTimeoutSeconds, 2, 60);
         MarketRequestCooldownMs = Math.Clamp(MarketRequestCooldownMs, 1000, 10_000);
-        SameItemCacheSeconds = Math.Clamp(SameItemCacheSeconds, 1, 300);
         RepeatMinimumMinutes = Math.Clamp(RepeatMinimumMinutes, 5, 1_440);
         RepeatMaximumMinutes = Math.Clamp(RepeatMaximumMinutes, RepeatMinimumMinutes, 1_440);
         MaximumUpdatesPerSession = Math.Clamp(MaximumUpdatesPerSession, 1, 200);

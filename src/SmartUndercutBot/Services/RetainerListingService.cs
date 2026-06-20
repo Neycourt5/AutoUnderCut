@@ -21,6 +21,7 @@ public interface IRetainerListingService
     bool IsPriceEditorOpen { get; }
     bool IsTalkOpen { get; }
     int RetainerCount { get; }
+    IReadOnlyList<int> AvailableRetainerIndices { get; }
     IReadOnlySet<ulong> OwnedRetainerIds { get; }
     string ActiveRetainerName { get; }
     SafetySnapshot CheckSafety(Vector3 sessionPosition);
@@ -66,10 +67,31 @@ public sealed unsafe class RetainerListingService : IRetainerListingService
 
     public int RetainerCount
     {
+        get => AvailableRetainerIndices.Count;
+    }
+
+    public IReadOnlyList<int> AvailableRetainerIndices
+    {
         get
         {
-            var manager = RetainerManager.Instance();
-            return manager == null ? 0 : (int)Math.Min(manager->GetRetainerCount(), 10u);
+            var addon = GetAddon("RetainerList");
+            if (addon == null || addon->AtkValues == null)
+                return [];
+
+            var result = new List<int>(10);
+            for (var index = 0; index < 10; index++)
+            {
+                // RetainerList stores ten AtkValues per visible row beginning at index 3.
+                // Offset 0 is the name (null ends the list); offset 8 is the UI's active flag.
+                var rowOffset = 3 + (index * 10);
+                var activeOffset = rowOffset + 8;
+                if (activeOffset >= addon->AtkValuesCount || addon->AtkValues[rowOffset].Type == 0)
+                    break;
+                var active = addon->AtkValues[activeOffset];
+                if (active.Type == AtkValueType.Bool && active.Byte != 0)
+                    result.Add(index);
+            }
+            return result;
         }
     }
 
@@ -193,7 +215,7 @@ public sealed unsafe class RetainerListingService : IRetainerListingService
     public bool SelectRetainer(int index)
     {
         var addon = GetAddon("RetainerList");
-        if (addon == null || index < 0 || index >= RetainerCount)
+        if (addon == null || index < 0 || index >= 10 || !AvailableRetainerIndices.Contains(index))
             return false;
         FireCallback(addon, 2, index);
         return true;

@@ -61,11 +61,11 @@ public sealed class AutomationController : IDisposable
     private readonly AutomationLog log;
     private readonly List<AutomationQueueEntry> queue = [];
     private readonly HashSet<short> processedSlots = [];
+    private readonly List<int> retainerRows = [];
 
     private CancellationTokenSource? sessionCancellation;
     private Task<MarketSnapshot>? marketTask;
     private MarketSnapshot? currentMarket;
-    private MarketSnapshot? reusableMarket;
     private PriceDecision? currentDecision;
     private Vector3 sessionPosition;
     private DateTimeOffset nextActionAt;
@@ -300,10 +300,11 @@ public sealed class AutomationController : IDisposable
     {
         ResetSession();
         bellSession = true;
-        var availableRetainers = retainerListings.RetainerCount;
-        retainerCount = configuration.Current.ProcessAllRetainers
-            ? availableRetainers
-            : Math.Min(availableRetainers, 1);
+        retainerRows.Clear();
+        retainerRows.AddRange(retainerListings.AvailableRetainerIndices);
+        if (!configuration.Current.ProcessAllRetainers && retainerRows.Count > 1)
+            retainerRows.RemoveRange(1, retainerRows.Count - 1);
+        retainerCount = retainerRows.Count;
         handledBell = true;
         RetainerInterfaceOpened?.Invoke();
         if (retainerCount <= 0)
@@ -337,12 +338,12 @@ public sealed class AutomationController : IDisposable
         sessionCancellation = new CancellationTokenSource();
         queue.Clear();
         processedSlots.Clear();
+        retainerRows.Clear();
         currentIndex = 0;
         updatesSubmitted = 0;
         retainerIndex = 0;
         retainerCount = 0;
         currentMarket = null;
-        reusableMarket = null;
         currentDecision = null;
         marketTask = null;
         lastMarketRequestAt = DateTimeOffset.MinValue;
@@ -356,7 +357,7 @@ public sealed class AutomationController : IDisposable
 
     private void SelectCurrentRetainer()
     {
-        if (!retainerListings.SelectRetainer(retainerIndex))
+        if (retainerIndex >= retainerRows.Count || !retainerListings.SelectRetainer(retainerRows[retainerIndex]))
         {
             Halt($"Could not select retainer {retainerIndex + 1}.");
             return;
@@ -430,9 +431,6 @@ public sealed class AutomationController : IDisposable
         currentDecision = null;
         marketTask = null;
 
-        if (TryReusePreviousMarket())
-            return;
-
         var cooldown = TimeSpan.FromMilliseconds(configuration.Current.MarketRequestCooldownMs);
         var earliestRequestAt = lastMarketRequestAt + cooldown;
         if (DateTimeOffset.UtcNow < earliestRequestAt)
@@ -445,24 +443,6 @@ public sealed class AutomationController : IDisposable
         }
 
         RequestCurrentMarket();
-    }
-
-    private bool TryReusePreviousMarket()
-    {
-        if (reusableMarket is null ||
-            DateTimeOffset.UtcNow - reusableMarket.CapturedAt > TimeSpan.FromSeconds(configuration.Current.SameItemCacheSeconds) ||
-            !retainerListings.TryResolveOpenPriceEditor(reusableMarket.ItemId, processedSlots, out var resolved) ||
-            resolved is null || resolved.ItemId != reusableMarket.ItemId)
-            return false;
-
-        var entry = queue[currentIndex];
-        currentMarket = reusableMarket with { IsFromCache = true };
-        queue[currentIndex] = entry with { Listing = resolved, Status = "Reusing same-item prices" };
-        processedSlots.Add(resolved.Slot);
-        log.Add(AutomationLogLevel.Debug,
-            $"{resolved.ItemName}: reused the previous live market result for visible row {currentIndex + 1}; no Compare Prices request needed.");
-        Transition(AutomationState.EvaluatingPrice, $"Reusing fresh prices for {resolved.ItemName}.");
-        return true;
     }
 
     private void RequestCurrentMarket()
@@ -518,7 +498,6 @@ public sealed class AutomationController : IDisposable
         var mappedEntry = queue[currentIndex];
         queue[currentIndex] = mappedEntry with { Listing = resolved, Status = "Matched visible row" };
         processedSlots.Add(resolved.Slot);
-        reusableMarket = currentMarket;
         log.Add(AutomationLogLevel.Debug,
             $"Matched visible row {currentIndex + 1}, live item #{currentMarket.ItemId}, to {resolved.ItemName}, market slot {resolved.Slot}.");
         Transition(AutomationState.EvaluatingPrice, $"Evaluating {queue[currentIndex].Listing.ItemName}.");

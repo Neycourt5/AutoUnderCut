@@ -350,12 +350,6 @@ public sealed class DashboardWindow : Window
             config.MarketRequestCooldownMs = requestCooldown;
             configurationDirty = true;
         }
-        var sameItemCacheSeconds = config.SameItemCacheSeconds;
-        if (InputInt("Same-item price reuse (seconds)", ref sameItemCacheSeconds, 1, 300))
-        {
-            config.SameItemCacheSeconds = sameItemCacheSeconds;
-            configurationDirty = true;
-        }
         var maximumUpdates = config.MaximumUpdatesPerSession;
         if (InputInt("Maximum updates per session", ref maximumUpdates, 1, 200))
         {
@@ -373,7 +367,7 @@ public sealed class DashboardWindow : Window
         if (ImGui.Button("Cancel pending live market request"))
             marketData.ClearCache();
         ImGui.Spacing();
-        ImGui.TextWrapped("Consecutive listings of the same item reuse one fresh Compare Prices result. Different items respect the market cooldown before another request. Any logout, player movement, unexpected UI state, changed listing, malformed inventory, or failed server confirmation halts or skips work before another write is attempted.");
+        ImGui.TextWrapped("Every listing uses a fresh Compare Prices result, with a dedicated cooldown between market requests. Any logout, player movement, unexpected UI state, changed listing, malformed inventory, or failed server confirmation halts or skips work before another write is attempted.");
         DrawSaveButton();
     }
 
