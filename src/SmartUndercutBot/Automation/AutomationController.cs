@@ -14,6 +14,7 @@ public enum AutomationState
     WaitingBeforeOpeningSellList,
     WaitingForSellList,
     WaitingForStableInterface,
+    WaitingAfterAutoListing,
     ReadingListings,
     WaitingBeforeOpeningListing,
     WaitingForContextMenu,
@@ -57,16 +58,21 @@ public sealed class AutomationController : IDisposable
     private readonly IRetainerListingService retainerListings;
     private readonly IMarketDataService marketData;
     private readonly IPricingStrategyService pricing;
+    private readonly IPortfolioValuationService portfolioValuation;
     private readonly ConfigurationService configuration;
+    private readonly ProcurementLedger procurementLedger;
     private readonly AutomationLog log;
     private readonly List<AutomationQueueEntry> queue = [];
     private readonly HashSet<short> processedSlots = [];
     private readonly List<int> retainerRows = [];
+    private readonly Dictionary<(ulong RetainerId, short Slot), PortfolioListingEstimate> portfolioListings = [];
+    private readonly Dictionary<ulong, PortfolioRetainerBalance> portfolioRetainers = [];
 
     private CancellationTokenSource? sessionCancellation;
     private Task<MarketSnapshot>? marketTask;
     private MarketSnapshot? currentMarket;
     private PriceDecision? currentDecision;
+    private PendingAutoListing? pendingAutoListing;
     private Vector3 sessionPosition;
     private DateTimeOffset nextActionAt;
     private DateTimeOffset stateDeadline;
@@ -76,6 +82,12 @@ public sealed class AutomationController : IDisposable
     private int updatesSubmitted;
     private int retainerIndex;
     private int retainerCount;
+    private int listingsSeenAcrossRetainers;
+    private int portfolioExpectedRetainers;
+    private DateTimeOffset? portfolioStartedAt;
+    private DateTimeOffset? portfolioCompletedAt;
+    private bool portfolioFullBellRun;
+    private bool portfolioComplete;
     private bool bellSession;
     private bool handledBell;
     private bool handledSellList;
@@ -86,20 +98,26 @@ public sealed class AutomationController : IDisposable
         IRetainerListingService retainerListings,
         IMarketDataService marketData,
         IPricingStrategyService pricing,
+        IPortfolioValuationService portfolioValuation,
         ConfigurationService configuration,
+        ProcurementLedger procurementLedger,
         AutomationLog log)
     {
         this.framework = framework;
         this.retainerListings = retainerListings;
         this.marketData = marketData;
         this.pricing = pricing;
+        this.portfolioValuation = portfolioValuation;
         this.configuration = configuration;
+        this.procurementLedger = procurementLedger;
         this.log = log;
         framework.Update += OnFrameworkUpdate;
     }
 
     public event Action? RetainerInterfaceOpened;
     public AutomationState State { get; private set; } = AutomationState.Idle;
+    public int? LastKnownFreeSaleSlots { get; private set; }
+    public bool IsActive => State is not (AutomationState.Idle or AutomationState.Completed or AutomationState.Halted or AutomationState.Faulted or AutomationState.WaitingForScheduledRun);
 
     public AutomationStatus Status => new(
         State,
@@ -112,6 +130,16 @@ public sealed class AutomationController : IDisposable
         retainerCount);
 
     public IReadOnlyList<AutomationQueueEntry> QueueSnapshot() => queue.ToArray();
+
+    public PortfolioValuation PortfolioSnapshot() => portfolioValuation.Calculate(
+        portfolioListings.Values.ToArray(),
+        portfolioRetainers.Values.ToArray(),
+        retainerListings.PlayerGil,
+        portfolioStartedAt,
+        portfolioCompletedAt,
+        portfolioFullBellRun,
+        portfolioComplete,
+        portfolioExpectedRetainers);
 
     public void StartNow()
     {
@@ -197,6 +225,9 @@ public sealed class AutomationController : IDisposable
                 break;
             case AutomationState.WaitingForStableInterface:
                 if (DelayElapsed()) Transition(AutomationState.ReadingListings, "Reading current retainer listings.");
+                break;
+            case AutomationState.WaitingAfterAutoListing:
+                if (DelayElapsed()) VerifyAutoListing();
                 break;
             case AutomationState.ReadingListings:
                 ReadListings();
@@ -313,6 +344,8 @@ public sealed class AutomationController : IDisposable
             return;
         }
 
+        ResetPortfolio(isFullBellRun: configuration.Current.ProcessAllRetainers);
+
         Schedule(AutomationState.WaitingBeforeRetainerSelection,
             configuration.Current.ProcessAllRetainers
                 ? $"Starting automatic run across all {retainerCount} retainers."
@@ -325,6 +358,7 @@ public sealed class AutomationController : IDisposable
         ResetSession();
         bellSession = false;
         retainerCount = 1;
+        ResetPortfolio(isFullBellRun: false);
         handledSellList = true;
         RetainerInterfaceOpened?.Invoke();
         Schedule(AutomationState.WaitingForStableInterface, $"Starting with {retainerListings.ActiveRetainerName}.");
@@ -345,9 +379,22 @@ public sealed class AutomationController : IDisposable
         retainerCount = 0;
         currentMarket = null;
         currentDecision = null;
+        pendingAutoListing = null;
         marketTask = null;
         lastMarketRequestAt = DateTimeOffset.MinValue;
+        listingsSeenAcrossRetainers = 0;
         sessionPosition = retainerListings.GetPlayerPosition() ?? Vector3.Zero;
+    }
+
+    private void ResetPortfolio(bool isFullBellRun)
+    {
+        portfolioListings.Clear();
+        portfolioRetainers.Clear();
+        portfolioStartedAt = DateTimeOffset.UtcNow;
+        portfolioCompletedAt = null;
+        portfolioFullBellRun = isFullBellRun;
+        portfolioComplete = false;
+        portfolioExpectedRetainers = retainerCount;
     }
 
     private void LogSessionStart() => log.Add(AutomationLogLevel.Information,
@@ -377,10 +424,22 @@ public sealed class AutomationController : IDisposable
 
     private void ReadListings()
     {
+        if (configuration.Current.AllowAutomaticListing &&
+            retainerListings.TryAutoListPurchase(procurementLedger, out var autoListing) && autoListing is not null)
+        {
+            pendingAutoListing = autoListing;
+            verificationDeadline = DateTimeOffset.UtcNow.AddSeconds(10);
+            Schedule(AutomationState.WaitingAfterAutoListing,
+                $"Listing purchased {autoListing.ItemName} x{autoListing.Quantity} on {retainerListings.ActiveRetainerName}.");
+            return;
+        }
+
         var listings = retainerListings.ReadCurrentListings();
+        CapturePortfolioListings(listings);
         queue.Clear();
         processedSlots.Clear();
         queue.AddRange(listings.Select((listing, index) => new AutomationQueueEntry(index, listing, "Queued")));
+        listingsSeenAcrossRetainers += queue.Count;
         currentIndex = 0;
         handledSellList = true;
         log.Add(AutomationLogLevel.Information,
@@ -391,6 +450,60 @@ public sealed class AutomationController : IDisposable
             return;
         }
         BeginCurrentListing();
+    }
+
+    private void CapturePortfolioListings(IReadOnlyList<RetainerListing> listings)
+    {
+        var retainerId = retainerListings.ActiveRetainerId;
+        if (retainerId == 0 && listings.Count > 0)
+            retainerId = listings[0].RetainerId;
+        var retainerName = retainerListings.ActiveRetainerName;
+        const decimal fallbackSellerFee = 5m;
+
+        portfolioRetainers[retainerId] = new PortfolioRetainerBalance(
+            retainerId, retainerName, retainerListings.ActiveRetainerGil, fallbackSellerFee);
+        foreach (var listing in listings)
+        {
+            portfolioListings[(listing.RetainerId, listing.Slot)] = new PortfolioListingEstimate(
+                listing.RetainerId,
+                listing.RetainerName,
+                listing.Slot,
+                listing.ItemId,
+                listing.ItemName,
+                listing.Quantity,
+                listing.CurrentPrice,
+                listing.CurrentPrice,
+                false,
+                fallbackSellerFee);
+        }
+    }
+
+    private void VerifyAutoListing()
+    {
+        if (pendingAutoListing is null)
+        {
+            Transition(AutomationState.ReadingListings, "Reading current retainer listings.");
+            return;
+        }
+        if (!retainerListings.VerifyAutoListing(pendingAutoListing))
+        {
+            if (DateTimeOffset.UtcNow < verificationDeadline)
+            {
+                nextActionAt = DateTimeOffset.UtcNow.AddMilliseconds(250);
+                return;
+            }
+            log.Add(AutomationLogLevel.Error,
+                $"AUTO-LIST FAILED {pendingAutoListing.ItemName} x{pendingAutoListing.Quantity}; continuing without recording it.");
+            pendingAutoListing = null;
+            Transition(AutomationState.ReadingListings, "Automatic listing verification failed; reading listings.");
+            return;
+        }
+
+        procurementLedger.MarkListed(pendingAutoListing.ItemId, pendingAutoListing.Quantity);
+        log.Add(AutomationLogLevel.Information,
+            $"AUTO-LISTED {pendingAutoListing.ItemName} x{pendingAutoListing.Quantity} at {pendingAutoListing.UnitPrice:N0} gil on {retainerListings.ActiveRetainerName}.");
+        pendingAutoListing = null;
+        Transition(AutomationState.ReadingListings, "Looking for another purchased stack to list.");
     }
 
     private void BeginCurrentListing()
@@ -427,6 +540,7 @@ public sealed class AutomationController : IDisposable
     private void PrepareCurrentMarket()
     {
         var entry = queue[currentIndex];
+        CaptureSellerFee();
         currentMarket = null;
         currentDecision = null;
         marketTask = null;
@@ -443,6 +557,19 @@ public sealed class AutomationController : IDisposable
         }
 
         RequestCurrentMarket();
+    }
+
+    private void CaptureSellerFee()
+    {
+        if (!retainerListings.TryReadSellerFeePercent(out var feePercent))
+            return;
+
+        var retainerId = retainerListings.ActiveRetainerId;
+        if (portfolioRetainers.TryGetValue(retainerId, out var balance))
+            portfolioRetainers[retainerId] = balance with { SellerFeePercent = feePercent };
+
+        foreach (var key in portfolioListings.Keys.Where(x => x.RetainerId == retainerId).ToArray())
+            portfolioListings[key] = portfolioListings[key] with { SellerFeePercent = feePercent };
     }
 
     private void RequestCurrentMarket()
@@ -511,6 +638,7 @@ public sealed class AutomationController : IDisposable
             currentMarket!,
             configuration.Current.GetEffectiveRule(entry.Listing.ItemId),
             retainerListings.OwnedRetainerIds));
+        UpdatePortfolioMarketEstimate(entry.Listing, currentDecision, currentMarket!);
         ReplaceCurrent(entry with { Status = currentDecision.Kind.ToString(), Decision = currentDecision });
 
         if (!currentDecision.ShouldUpdate)
@@ -543,6 +671,37 @@ public sealed class AutomationController : IDisposable
 
         Schedule(AutomationState.WaitingBeforeCommit,
             $"Waiting before updating {entry.Listing.ItemName} to {currentDecision.TargetPrice:N0} gil.");
+    }
+
+    private void UpdatePortfolioMarketEstimate(
+        RetainerListing listing,
+        PriceDecision decision,
+        MarketSnapshot market)
+    {
+        var key = (listing.RetainerId, listing.Slot);
+        if (!portfolioListings.TryGetValue(key, out var estimate))
+            return;
+
+        uint estimatedPrice;
+        if (decision.Kind == PriceDecisionKind.PriceWar && market.HistoricalMedianPrice is { } median)
+        {
+            var rule = configuration.Current.GetEffectiveRule(listing.ItemId);
+            var protectedPrice = (uint)Math.Max(1m,
+                decimal.Floor(median * (1m - (rule.PriceWarDropPercent / 100m))));
+            estimatedPrice = Math.Min(listing.CurrentPrice, Math.Max(decision.EffectiveFloor, protectedPrice));
+        }
+        else if (decision.TargetPrice is { } target)
+            estimatedPrice = target;
+        else if (decision.LowestMarketPrice is { } lowest)
+            estimatedPrice = Math.Min(listing.CurrentPrice, lowest);
+        else
+            estimatedPrice = listing.CurrentPrice;
+
+        portfolioListings[key] = estimate with
+        {
+            EstimatedUnitPrice = estimatedPrice,
+            HasLiveMarketEstimate = decision.LowestMarketPrice.HasValue,
+        };
     }
 
     private void CommitOrDisarm()
@@ -607,6 +766,16 @@ public sealed class AutomationController : IDisposable
                 return;
             }
             ReplaceCurrent(entry with { Status = $"Verified {target:N0} gil" });
+            var key = (entry.Listing.RetainerId, entry.Listing.Slot);
+            if (portfolioListings.TryGetValue(key, out var estimate))
+            {
+                portfolioListings[key] = estimate with
+                {
+                    AskingUnitPrice = target,
+                    EstimatedUnitPrice = target,
+                    HasLiveMarketEstimate = true,
+                };
+            }
             log.Add(AutomationLogLevel.Information,
                 $"VERIFIED {entry.Listing.ItemName} at {target:N0} gil on {entry.Listing.RetainerName}.");
         }
@@ -629,6 +798,8 @@ public sealed class AutomationController : IDisposable
             $"Finished {retainerListings.ActiveRetainerName}: processed {queue.Count} listing(s).");
         if (!bellSession)
         {
+            portfolioComplete = true;
+            portfolioCompletedAt = DateTimeOffset.UtcNow;
             Complete($"Processed {queue.Count} listing(s); submitted {updatesSubmitted} update(s).");
             return;
         }
@@ -662,6 +833,10 @@ public sealed class AutomationController : IDisposable
         currentIndex = 0;
         if (retainerIndex >= retainerCount)
         {
+            portfolioComplete = true;
+            portfolioCompletedAt = DateTimeOffset.UtcNow;
+            LastKnownFreeSaleSlots = Math.Max(0, retainerCount * 20 - listingsSeenAcrossRetainers);
+            procurementLedger.ClearCompleted();
             var message = $"Finished {retainerCount} retainer(s); submitted {updatesSubmitted} update(s).";
             if (configuration.Current.RepeatBellRuns)
                 ScheduleNextBellRun(message);
@@ -728,6 +903,7 @@ public sealed class AutomationController : IDisposable
         AutomationState.WaitingBeforeRetainerSelection or
         AutomationState.WaitingBeforeOpeningSellList or
         AutomationState.WaitingForStableInterface or
+        AutomationState.WaitingAfterAutoListing or
         AutomationState.WaitingBeforeOpeningListing or
         AutomationState.WaitingBeforeOpeningPriceEditor or
         AutomationState.WaitingBeforeMarketRequest or

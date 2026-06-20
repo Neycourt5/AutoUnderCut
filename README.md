@@ -1,6 +1,6 @@
 # Smart Undercutter
 
-Smart Undercutter is a Dalamud SDK 15 plugin for guarded, autonomous retainer-market repricing.
+Smart Undercutter is a Dalamud SDK 15 plugin for guarded retainer-market repricing and opt-in procurement.
 
 ## What is implemented
 
@@ -14,14 +14,18 @@ Smart Undercutter is a Dalamud SDK 15 plugin for guarded, autonomous retainer-ma
 - Uses randomized 250-450 ms action delays and immediately stops on movement, logout, unexpected UI state, changed listing, or failed confirmation.
 - Supports price floors, cost-basis margins, HQ/NQ filtering, match-lowest mode, optional tolerance bands, and 99/999 rounding.
 - Provides an ImGui status dashboard, per-retainer progress, queue with live/target prices, configuration, and audit log.
+- Shows a Portfolio estimate with wallet and retainer gil, gross asking value, live market-aligned value, per-retainer seller tax, estimated net proceeds, markdown risk, and projected total wealth.
+- Builds diversified purchase plans from Universalis sale history and current listings, constrained by gil, bag slots, retainer sale slots, weekly sales, ROI, and per-item limits.
+- Uses Lifestream and vnavmesh to visit same-data-center worlds, then revalidates every candidate against the live in-game listing before submitting a purchase.
+- Returns home, opens a summoning bell, distributes purchased stacks into open retainer slots, and feeds them through the normal live repricing pass.
 
-Dry-run mode remains available. `Arm autonomous price writes` enables server submissions without a confirmation prompt for each listing.
+Dry-run mode remains available. Repricing writes, purchases, automatic listing, and recurring procurement each have separate opt-in controls. Purchase and listing controls ship disarmed.
 
 ## Projects
 
-- `src/SmartUndercutBot.Core`: pure pricing models and `PricingStrategyService`.
+- `src/SmartUndercutBot.Core`: pure pricing, procurement, and portfolio valuation models and services.
 - `src/SmartUndercutBot`: Dalamud plugin, automation controller, live market-data service, game UI adapter, and dashboard.
-- `tests/SmartUndercutBot.Core.Tests`: pricing behavior tests.
+- `tests/SmartUndercutBot.Core.Tests`: pricing, procurement, and portfolio valuation behavior tests.
 
 ## Build
 
@@ -46,5 +50,7 @@ Save it, then search for **Smart Undercutter** in the plugin installer.
 ## Operational notes
 
 Game structures and UI callbacks can change after an FFXIV patch. Rebuild against the current Dalamud release after patches and test in dry-run mode first. Do not interact with the retainer UI while a run is active. Use `/sub stop` or the dashboard's Emergency Stop button to abort.
+
+The procurement workflow expects Lifestream and vnavmesh to be installed. Its default Lifestream shortcut is `/li mb`; this can be changed in the Procurement tab. Automatic procurement only starts while the character is idle at an open summoning-bell retainer list. Run a normal retainer pass first so the plugin has a current count of free sale slots.
 
 Automation may be restricted by the game's terms or server rules; the operator is responsible for checking those rules.

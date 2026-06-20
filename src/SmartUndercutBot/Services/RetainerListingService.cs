@@ -1,4 +1,6 @@
 using System.Numerics;
+using System.Globalization;
+using System.Text.RegularExpressions;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.UI;
@@ -11,6 +13,7 @@ namespace SmartUndercutBot.Services;
 
 public sealed record SafetySnapshot(bool IsSafe, string Reason);
 public sealed record PriceUpdateResult(bool Succeeded, string Message);
+public sealed record PendingAutoListing(uint ItemId, string ItemName, uint Quantity, uint UnitPrice, short MarketSlot);
 
 public interface IRetainerListingService
 {
@@ -23,7 +26,10 @@ public interface IRetainerListingService
     int RetainerCount { get; }
     IReadOnlyList<int> AvailableRetainerIndices { get; }
     IReadOnlySet<ulong> OwnedRetainerIds { get; }
+    ulong ActiveRetainerId { get; }
     string ActiveRetainerName { get; }
+    uint PlayerGil { get; }
+    uint ActiveRetainerGil { get; }
     SafetySnapshot CheckSafety(Vector3 sessionPosition);
     IReadOnlyList<RetainerListing> ReadCurrentListings();
     bool TryReadListing(short slot, out RetainerListing? listing);
@@ -33,12 +39,15 @@ public interface IRetainerListingService
     bool OpenListingContextMenu(int rowIndex);
     bool SelectAdjustPrice();
     bool RequestComparePrices();
+    bool TryReadSellerFeePercent(out decimal feePercent);
     void CloseComparePrices();
     void CancelPriceEditor();
     PriceUpdateResult CommitPrice(RetainerListing expected, uint targetPrice);
     bool CloseSellList();
     bool CloseRetainerMenu();
     bool AdvanceTalk();
+    bool TryAutoListPurchase(ProcurementLedger ledger, out PendingAutoListing? pending);
+    bool VerifyAutoListing(PendingAutoListing pending);
     Vector3? GetPlayerPosition();
 }
 
@@ -120,6 +129,34 @@ public sealed unsafe class RetainerListingService : IRetainerListingService
             var manager = RetainerManager.Instance();
             var retainer = manager == null ? null : manager->GetActiveRetainer();
             return retainer == null ? "Unknown retainer" : retainer->NameString;
+        }
+    }
+
+    public ulong ActiveRetainerId
+    {
+        get
+        {
+            var manager = RetainerManager.Instance();
+            var retainer = manager == null ? null : manager->GetActiveRetainer();
+            return retainer == null ? 0 : retainer->RetainerId;
+        }
+    }
+
+    public uint PlayerGil
+    {
+        get
+        {
+            var manager = InventoryManager.Instance();
+            return manager == null ? 0 : manager->GetGil();
+        }
+    }
+
+    public uint ActiveRetainerGil
+    {
+        get
+        {
+            var manager = InventoryManager.Instance();
+            return manager == null ? 0 : manager->GetRetainerGil();
         }
     }
 
@@ -259,6 +296,27 @@ public sealed unsafe class RetainerListingService : IRetainerListingService
         return true;
     }
 
+    public bool TryReadSellerFeePercent(out decimal feePercent)
+    {
+        feePercent = 5m;
+        var addon = gameGui.GetAddonByName<AddonRetainerSell>("RetainerSell");
+        if (addon == null || !addon->AtkUnitBase.IsVisible || addon->Tax == null)
+            return false;
+
+        var match = Regex.Match(addon->Tax->NodeText.ToString(), @"(?<rate>\d+(?:[\.,]\d+)?)\s*%",
+            RegexOptions.CultureInvariant);
+        if (!match.Success)
+            return false;
+
+        var value = match.Groups["rate"].Value.Replace(',', '.');
+        if (!decimal.TryParse(value, NumberStyles.Number, CultureInfo.InvariantCulture, out var parsed) ||
+            parsed is < 0 or > 100)
+            return false;
+
+        feePercent = parsed;
+        return true;
+    }
+
     public void CloseComparePrices()
     {
         var addon = GetAddon("ItemSearchResult");
@@ -289,10 +347,18 @@ public sealed unsafe class RetainerListingService : IRetainerListingService
             current.IsHighQuality != expected.IsHighQuality)
             return new(false, "The underlying listing changed after evaluation; update was cancelled.");
 
-        // Callback 2 is the Adjust Price addon's own numeric-input update path. It also
-        // overwrites any Penny Pincher prefill before submitting the addon's Confirm action.
-        FireCallback(&addon->AtkUnitBase, 2, (int)targetPrice);
-        if (addon->AskingPrice->Value != targetPrice)
+        // SetValue is the same safe component path used by established repricers. It
+        // overwrites any Penny Pincher prefill and dispatches the numeric-input change.
+        addon->AskingPrice->SetValue((int)targetPrice);
+
+        // Some UI revisions do not propagate SetValue into RetainerSell's AtkValues.
+        // Callback 2 is the addon's native asking-price update path, so use it as a
+        // fallback and verify both representations before the Confirm callback.
+        if (addon->AskingPrice->Value != targetPrice || addon->AtkUnitBase.AtkValues == null ||
+            addon->AtkUnitBase.AtkValuesCount <= 5 || addon->AtkUnitBase.AtkValues[5].Int != targetPrice)
+            FireCallback(&addon->AtkUnitBase, 2, (int)targetPrice);
+        if (addon->AskingPrice->Value != targetPrice || addon->AtkUnitBase.AtkValues == null ||
+            addon->AtkUnitBase.AtkValuesCount <= 5 || addon->AtkUnitBase.AtkValues[5].Int != targetPrice)
             return new(false, "The Adjust Price input did not accept the target value.");
         if (addon->Confirm == null || !addon->Confirm->IsEnabled)
             return new(false, "The Adjust Price confirmation button is unavailable.");
@@ -301,7 +367,8 @@ public sealed unsafe class RetainerListingService : IRetainerListingService
         // ReceiveEvent here: the event object requires game-owned data and caused an
         // access violation in AddonRetainerSell.ReceiveEvent on 2026-06-19.
         FireCallback(&addon->AtkUnitBase, 0);
-        return new(true, "Submitted the Adjust Price confirmation callback.");
+        addon->AtkUnitBase.Close(true);
+        return new(true, "Set the numeric price and submitted the Adjust Price confirmation callback.");
     }
 
     public bool CloseSellList()
@@ -343,6 +410,71 @@ public sealed unsafe class RetainerListingService : IRetainerListingService
         addon->ReceiveEvent(AtkEventType.MouseClick, 0, evt, data);
         addon->ReceiveEvent(AtkEventType.MouseUp, 0, evt, data);
         return true;
+    }
+
+    public bool TryAutoListPurchase(ProcurementLedger ledger, out PendingAutoListing? pending)
+    {
+        pending = null;
+        var manager = InventoryManager.Instance();
+        if (manager == null)
+            return false;
+        var market = manager->GetInventoryContainer(InventoryType.RetainerMarket);
+        if (market == null || !market->IsLoaded || market->Size is <= 0 or > MaximumRetainerMarketSlots)
+            return false;
+
+        short destinationSlot = -1;
+        for (short slot = 0; slot < market->Size; slot++)
+        {
+            var item = market->GetInventorySlot(slot);
+            if (item != null && item->ItemId == 0)
+            {
+                destinationSlot = slot;
+                break;
+            }
+        }
+        if (destinationSlot < 0)
+            return false;
+
+        var inventoryTypes = new[]
+        {
+            InventoryType.Inventory1,
+            InventoryType.Inventory2,
+            InventoryType.Inventory3,
+            InventoryType.Inventory4,
+        };
+        foreach (var type in inventoryTypes)
+        {
+            var inventory = manager->GetInventoryContainer(type);
+            if (inventory == null || !inventory->IsLoaded)
+                continue;
+            for (ushort sourceSlot = 0; sourceSlot < inventory->Size; sourceSlot++)
+            {
+                var item = inventory->GetInventorySlot(sourceSlot);
+                if (item == null || item->ItemId == 0 || item->Quantity <= 0 ||
+                    !ledger.TryGetPending(item->ItemId, out var entry) || entry is null)
+                    continue;
+                var quantity = Math.Min((uint)item->Quantity, Math.Min(entry.PendingQuantity, (uint)entry.TargetStackSize));
+                if (quantity == 0 || entry.TargetSalePrice == 0)
+                    continue;
+
+                manager->MoveToRetainerMarket(type, sourceSlot, InventoryType.RetainerMarket,
+                    (ushort)destinationSlot, quantity, entry.TargetSalePrice);
+                pending = new(entry.ItemId, entry.ItemName, quantity, entry.TargetSalePrice, destinationSlot);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public bool VerifyAutoListing(PendingAutoListing pending)
+    {
+        var manager = InventoryManager.Instance();
+        var market = manager == null ? null : manager->GetInventoryContainer(InventoryType.RetainerMarket);
+        if (manager == null || market == null || !market->IsLoaded || pending.MarketSlot < 0 || pending.MarketSlot >= market->Size)
+            return false;
+        var item = market->GetInventorySlot(pending.MarketSlot);
+        return item != null && item->ItemId == pending.ItemId && item->Quantity == pending.Quantity &&
+               manager->GetRetainerMarketPrice(pending.MarketSlot) == pending.UnitPrice;
     }
 
     private AtkUnitBase* GetAddon(string name)

@@ -6,7 +6,7 @@ namespace SmartUndercutBot;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 8;
+    public int Version { get; set; } = 9;
     public bool AutomationEnabled { get; set; }
     public bool ProcessAllRetainers { get; set; } = true;
     public bool RepeatBellRuns { get; set; }
@@ -19,6 +19,18 @@ public sealed class Configuration : IPluginConfiguration
     public int MarketRequestTimeoutSeconds { get; set; } = 10;
     public int MarketRequestCooldownMs { get; set; } = 1200;
     public int MaximumUpdatesPerSession { get; set; } = 200;
+    public bool AutomaticProcurementEnabled { get; set; }
+    public bool AllowAutomaticPurchases { get; set; }
+    public bool AllowAutomaticListing { get; set; }
+    public int ProcurementIntervalMinutes { get; set; } = 30;
+    public uint ProcurementBudget { get; set; } = 5_000_000;
+    public int ProcurementTargetSaleSlots { get; set; } = 60;
+    public int ProcurementInventoryReserve { get; set; } = 10;
+    public decimal ProcurementMinimumRoiPercent { get; set; } = 20m;
+    public uint ProcurementMinimumProfitPerUnit { get; set; } = 100;
+    public string ProcurementDataCenter { get; set; } = string.Empty;
+    public string MarketBoardTravelCommand { get; set; } = "/li mb";
+    public List<ProcurementRule> ProcurementRules { get; set; } = [];
     public PricingRule GlobalRule { get; set; } = new();
     public Dictionary<uint, PricingRule> PerItemRules { get; set; } = [];
 
@@ -90,6 +102,14 @@ public sealed class Configuration : IPluginConfiguration
                 RepeatMaximumMinutes = 10;
             Version = 8;
         }
+        if (Version < 9)
+        {
+            // Procurement is deliberately opt-in and starts disarmed.
+            AutomaticProcurementEnabled = false;
+            AllowAutomaticPurchases = false;
+            AllowAutomaticListing = false;
+            Version = 9;
+        }
         MinimumDelayMs = Math.Clamp(MinimumDelayMs, 100, 60_000);
         MaximumDelayMs = Math.Clamp(MaximumDelayMs, MinimumDelayMs, 60_000);
         MarketRequestTimeoutSeconds = Math.Clamp(MarketRequestTimeoutSeconds, 2, 60);
@@ -97,6 +117,24 @@ public sealed class Configuration : IPluginConfiguration
         RepeatMinimumMinutes = Math.Clamp(RepeatMinimumMinutes, 5, 1_440);
         RepeatMaximumMinutes = Math.Clamp(RepeatMaximumMinutes, RepeatMinimumMinutes, 1_440);
         MaximumUpdatesPerSession = Math.Clamp(MaximumUpdatesPerSession, 1, 200);
+        ProcurementIntervalMinutes = Math.Clamp(ProcurementIntervalMinutes, 15, 1_440);
+        ProcurementBudget = Math.Clamp(ProcurementBudget, 1_000u, 100_000_000u);
+        ProcurementTargetSaleSlots = Math.Clamp(ProcurementTargetSaleSlots, 1, 200);
+        ProcurementInventoryReserve = Math.Clamp(ProcurementInventoryReserve, 1, 100);
+        ProcurementMinimumRoiPercent = Math.Clamp(ProcurementMinimumRoiPercent, 0m, 1_000m);
+        ProcurementMinimumProfitPerUnit = Math.Clamp(ProcurementMinimumProfitPerUnit, 0u, 100_000_000u);
+        ProcurementDataCenter ??= string.Empty;
+        MarketBoardTravelCommand = string.IsNullOrWhiteSpace(MarketBoardTravelCommand)
+            ? "/li mb"
+            : MarketBoardTravelCommand.Trim();
+        ProcurementRules ??= [];
+        foreach (var rule in ProcurementRules)
+        {
+            rule.ItemName ??= string.Empty;
+            rule.TargetStackSize = Math.Clamp(rule.TargetStackSize, 1, 999);
+            rule.MaximumSaleSlots = Math.Clamp(rule.MaximumSaleSlots, 1, 60);
+            rule.MinimumWeeklyUnitsSold = Math.Clamp(rule.MinimumWeeklyUnitsSold, 0, 1_000_000);
+        }
         GlobalRule ??= new PricingRule();
         PerItemRules ??= [];
     }

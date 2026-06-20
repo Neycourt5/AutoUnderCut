@@ -12,21 +12,31 @@ public sealed class DashboardWindow : Window
 {
     private readonly ConfigurationService configuration;
     private readonly AutomationController automation;
+    private readonly ProcurementController procurement;
+    private readonly IUniversalisService universalis;
+    private readonly ProcurementLedger procurementLedger;
     private readonly IMarketDataService marketData;
     private readonly AutomationLog log;
     private int newItemId;
     private uint? selectedItemId;
+    private int newProcurementItemId;
     private bool configurationDirty;
 
     public DashboardWindow(
         ConfigurationService configuration,
         AutomationController automation,
+        ProcurementController procurement,
+        IUniversalisService universalis,
+        ProcurementLedger procurementLedger,
         IMarketDataService marketData,
         AutomationLog log)
         : base("Smart Undercutter##Dashboard")
     {
         this.configuration = configuration;
         this.automation = automation;
+        this.procurement = procurement;
+        this.universalis = universalis;
+        this.procurementLedger = procurementLedger;
         this.marketData = marketData;
         this.log = log;
         SizeConstraints = new WindowSizeConstraints
@@ -51,9 +61,19 @@ public sealed class DashboardWindow : Window
             DrawQueue();
             ImGui.EndTabItem();
         }
+        if (ImGui.BeginTabItem("Portfolio"))
+        {
+            DrawPortfolio();
+            ImGui.EndTabItem();
+        }
         if (ImGui.BeginTabItem("Pricing Rules"))
         {
             DrawRules();
+            ImGui.EndTabItem();
+        }
+        if (ImGui.BeginTabItem("Procurement"))
+        {
+            DrawProcurement();
             ImGui.EndTabItem();
         }
         if (ImGui.BeginTabItem("Safety & Data"))
@@ -140,7 +160,10 @@ public sealed class DashboardWindow : Window
             automation.StartNow();
         ImGui.SameLine();
         if (ImGui.Button("Emergency Stop"))
+        {
             automation.Halt();
+            procurement.Halt();
+        }
 
         ImGui.Spacing();
         ImGui.Text($"Progress: {Math.Min(status.CurrentIndex + 1, status.TotalListings)} / {status.TotalListings}");
@@ -189,6 +212,81 @@ public sealed class DashboardWindow : Window
         }
         ImGui.EndTable();
     }
+
+    private void DrawPortfolio()
+    {
+        var portfolio = automation.PortfolioSnapshot();
+        if (!portfolio.StartedAt.HasValue)
+        {
+            ImGui.TextDisabled("Run a retainer scan to build a listing and gil estimate.");
+            return;
+        }
+
+        var statusText = portfolio.IsComplete
+            ? portfolio.IsFullBellRun
+                ? $"Complete account estimate: {portfolio.RetainersScanned} / {portfolio.ExpectedRetainers} retainers"
+                : "Complete estimate for the currently open retainer only"
+            : $"Scanning: {portfolio.RetainersScanned} / {portfolio.ExpectedRetainers} retainers read";
+        ImGui.TextColored(
+            portfolio.IsComplete && portfolio.IsFullBellRun
+                ? new Vector4(0.35f, 0.9f, 0.45f, 1f)
+                : new Vector4(1f, 0.72f, 0.2f, 1f),
+            statusText);
+        if (portfolio.CompletedAt is { } completed)
+            ImGui.TextDisabled($"Last completed {completed.LocalDateTime:g}");
+
+        ImGui.Separator();
+        ImGui.TextUnformatted($"Current gil found: {FormatGil(portfolio.CurrentGil)}");
+        ImGui.TextDisabled($"Wallet {FormatGil(portfolio.PlayerGil)} + scanned retainers {FormatGil(portfolio.RetainerGil)}");
+        ImGui.Spacing();
+        ImGui.TextUnformatted($"Listed value at current asking prices: {FormatGil(portfolio.GrossAskingValue)}");
+        ImGui.TextUnformatted($"Market-aligned listed estimate: {FormatGil(portfolio.EstimatedGrossValue)}");
+        ImGui.TextUnformatted($"Possible repricing markdown: {FormatGil(portfolio.EstimatedMarkdown)}");
+        ImGui.Spacing();
+        ImGui.TextUnformatted($"Net proceeds at asking prices: {FormatGil(portfolio.EstimatedNetAtAsking)}");
+        ImGui.TextUnformatted($"Net market-aligned proceeds: {FormatGil(portfolio.EstimatedNetMarketAligned)}");
+        ImGui.Spacing();
+        ImGui.TextColored(new Vector4(0.35f, 0.85f, 1f, 1f),
+            $"Projected total wealth at asking: {FormatGil(portfolio.ProjectedWealthAtAsking)}");
+        ImGui.TextColored(new Vector4(0.55f, 0.9f, 0.65f, 1f),
+            $"Conservative projected total wealth: {FormatGil(portfolio.ProjectedWealthMarketAligned)}");
+
+        ImGui.Spacing();
+        ImGui.TextWrapped(
+            $"The market-aligned estimate uses live competitor/strategy prices for {portfolio.LiveEstimatedListings} of {portfolio.Listings} listings and falls back to the current asking price where no live result was available. " +
+            "Price-war outliers use the protected historical floor instead of assuming you must match a suspiciously cheap listing. Net values subtract each retainer's seller tax read from the Adjust Price window (usually 5%, 3%, or 0%; 5% fallback). These are estimates, not guaranteed sale proceeds.");
+
+        ImGui.Separator();
+        if (!ImGui.BeginTable("PortfolioByRetainer", 8,
+                ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.Resizable | ImGuiTableFlags.ScrollX,
+                new Vector2(0, 190 * ImGuiHelpers.GlobalScale)))
+            return;
+
+        ImGui.TableSetupColumn("Retainer");
+        ImGui.TableSetupColumn("Listings", ImGuiTableColumnFlags.WidthFixed, 65);
+        ImGui.TableSetupColumn("Units", ImGuiTableColumnFlags.WidthFixed, 65);
+        ImGui.TableSetupColumn("Asking", ImGuiTableColumnFlags.WidthFixed, 105);
+        ImGui.TableSetupColumn("Market estimate", ImGuiTableColumnFlags.WidthFixed, 110);
+        ImGui.TableSetupColumn("Net estimate", ImGuiTableColumnFlags.WidthFixed, 105);
+        ImGui.TableSetupColumn("Retainer gil", ImGuiTableColumnFlags.WidthFixed, 105);
+        ImGui.TableSetupColumn("Seller fee", ImGuiTableColumnFlags.WidthFixed, 70);
+        ImGui.TableHeadersRow();
+        foreach (var retainer in portfolio.Retainers)
+        {
+            ImGui.TableNextRow();
+            ImGui.TableNextColumn(); ImGui.TextUnformatted(retainer.RetainerName);
+            ImGui.TableNextColumn(); ImGui.TextUnformatted(retainer.Listings.ToString());
+            ImGui.TableNextColumn(); ImGui.TextUnformatted(retainer.Units.ToString("N0"));
+            ImGui.TableNextColumn(); ImGui.TextUnformatted(retainer.GrossAskingValue.ToString("N0"));
+            ImGui.TableNextColumn(); ImGui.TextUnformatted(retainer.EstimatedGrossValue.ToString("N0"));
+            ImGui.TableNextColumn(); ImGui.TextUnformatted(retainer.EstimatedNetMarketAligned.ToString("N0"));
+            ImGui.TableNextColumn(); ImGui.TextUnformatted(retainer.RetainerGil.ToString("N0"));
+            ImGui.TableNextColumn(); ImGui.TextUnformatted($"{retainer.SellerFeePercent:0.##}%");
+        }
+        ImGui.EndTable();
+    }
+
+    private static string FormatGil(ulong value) => $"{value:N0} gil";
 
     private void DrawRules()
     {
@@ -321,6 +419,223 @@ public sealed class DashboardWindow : Window
         }
         ImGui.PopID();
         return changed;
+    }
+
+    private void DrawProcurement()
+    {
+        var status = procurement.Status;
+        var statusColor = status.State switch
+        {
+            ProcurementState.Faulted or ProcurementState.Halted => new Vector4(1f, 0.35f, 0.3f, 1f),
+            ProcurementState.Completed or ProcurementState.PlanReady => new Vector4(0.35f, 0.9f, 0.45f, 1f),
+            _ => new Vector4(0.35f, 0.75f, 1f, 1f),
+        };
+        ImGui.TextColored(statusColor, status.State.ToString());
+        ImGui.SameLine();
+        ImGui.TextWrapped(status.Detail);
+        ImGui.Text($"Purchases: {status.CurrentOrder} / {status.TotalOrders}    Spent: {status.GilSpent:N0} gil");
+        if (status.NextAutomaticScan is { } nextScan)
+            ImGui.Text($"Next automatic procurement scan: {nextScan.LocalDateTime:g}");
+
+        if (ImGui.Button("Scan Universalis"))
+            procurement.ScanNow();
+        ImGui.SameLine();
+        if (ImGui.Button("Run guarded purchase plan"))
+            procurement.RunNow();
+        ImGui.SameLine();
+        if (ImGui.Button("Stop procurement"))
+            procurement.Halt();
+
+        ImGui.Separator();
+        var config = configuration.Current;
+        var automatic = config.AutomaticProcurementEnabled;
+        if (ImGui.Checkbox("Run procurement automatically while idle at the bell", ref automatic))
+        {
+            config.AutomaticProcurementEnabled = automatic;
+            SaveConfiguration();
+        }
+        var armed = config.AllowAutomaticPurchases;
+        if (ImGui.Checkbox("Arm automatic market-board purchases", ref armed))
+        {
+            config.AllowAutomaticPurchases = armed;
+            SaveConfiguration();
+        }
+        var autoList = config.AllowAutomaticListing;
+        if (ImGui.Checkbox("Automatically list purchased stacks on retainers", ref autoList))
+        {
+            config.AllowAutomaticListing = autoList;
+            SaveConfiguration();
+        }
+        ImGui.TextColored(armed ? new Vector4(1f, 0.72f, 0.2f, 1f) : new Vector4(0.55f, 0.85f, 0.65f, 1f),
+            armed
+                ? "PURCHASES ARMED: every order is still revalidated against the live in-game listing and price ceiling."
+                : "DRY RUN: Universalis plans are shown but no purchases are submitted.");
+
+        var budget = config.ProcurementBudget;
+        if (InputUInt("Maximum gil budget", ref budget, 1_000, 100_000_000))
+        {
+            config.ProcurementBudget = budget;
+            configurationDirty = true;
+        }
+        var interval = config.ProcurementIntervalMinutes;
+        if (InputInt("Minutes between procurement scans", ref interval, 15, 1_440))
+        {
+            config.ProcurementIntervalMinutes = interval;
+            configurationDirty = true;
+        }
+        var targetSlots = config.ProcurementTargetSaleSlots;
+        if (InputInt("Maximum sale slots to fill", ref targetSlots, 1, 200))
+        {
+            config.ProcurementTargetSaleSlots = targetSlots;
+            configurationDirty = true;
+        }
+        var reserveSlots = config.ProcurementInventoryReserve;
+        if (InputInt("Bag slots to keep free", ref reserveSlots, 1, 100))
+        {
+            config.ProcurementInventoryReserve = reserveSlots;
+            configurationDirty = true;
+        }
+        var roi = (float)config.ProcurementMinimumRoiPercent;
+        if (ImGui.DragFloat("Minimum expected ROI %", ref roi, 0.5f, 0, 1_000, "%.1f%%"))
+        {
+            config.ProcurementMinimumRoiPercent = (decimal)Math.Max(0, roi);
+            configurationDirty = true;
+        }
+        var minimumProfit = config.ProcurementMinimumProfitPerUnit;
+        if (InputUInt("Minimum profit per unit", ref minimumProfit, 0, 100_000_000))
+        {
+            config.ProcurementMinimumProfitPerUnit = minimumProfit;
+            configurationDirty = true;
+        }
+        var dataCenter = config.ProcurementDataCenter;
+        if (ImGui.InputText("Universalis data center (blank = home DC)", ref dataCenter, 64))
+        {
+            config.ProcurementDataCenter = dataCenter;
+            configurationDirty = true;
+        }
+        var travelCommand = config.MarketBoardTravelCommand;
+        if (ImGui.InputText("Lifestream market-board command", ref travelCommand, 128))
+        {
+            config.MarketBoardTravelCommand = travelCommand;
+            configurationDirty = true;
+        }
+
+        ImGui.Separator();
+        ImGui.TextUnformatted("Items");
+        if (ImGui.Button("Add favorite food + gemdraughts"))
+        {
+            foreach (var rule in universalis.CreateFavoriteRules())
+            {
+                if (config.ProcurementRules.All(x => x.ItemId != rule.ItemId))
+                    config.ProcurementRules.Add(rule);
+            }
+            configurationDirty = true;
+        }
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(120 * ImGuiHelpers.GlobalScale);
+        ImGui.InputInt("Item ID##Procurement", ref newProcurementItemId);
+        ImGui.SameLine();
+        if (ImGui.Button("Add item") && newProcurementItemId > 0 &&
+            config.ProcurementRules.All(x => x.ItemId != (uint)newProcurementItemId))
+        {
+            config.ProcurementRules.Add(new ProcurementRule
+            {
+                ItemId = (uint)newProcurementItemId,
+                ItemName = $"Item #{newProcurementItemId}",
+            });
+            configurationDirty = true;
+        }
+
+        if (ImGui.BeginTable("ProcurementRules", 8,
+                ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.ScrollX | ImGuiTableFlags.Resizable,
+                new Vector2(0, 190 * ImGuiHelpers.GlobalScale)))
+        {
+            ImGui.TableSetupColumn("On", ImGuiTableColumnFlags.WidthFixed, 35);
+            ImGui.TableSetupColumn("Item", ImGuiTableColumnFlags.WidthFixed, 210);
+            ImGui.TableSetupColumn("Max unit", ImGuiTableColumnFlags.WidthFixed, 90);
+            ImGui.TableSetupColumn("Stack", ImGuiTableColumnFlags.WidthFixed, 70);
+            ImGui.TableSetupColumn("Max slots", ImGuiTableColumnFlags.WidthFixed, 75);
+            ImGui.TableSetupColumn("Weekly sales", ImGuiTableColumnFlags.WidthFixed, 90);
+            ImGui.TableSetupColumn("HQ", ImGuiTableColumnFlags.WidthFixed, 35);
+            ImGui.TableSetupColumn("", ImGuiTableColumnFlags.WidthFixed, 45);
+            ImGui.TableHeadersRow();
+            var removeIndex = -1;
+            for (var index = 0; index < config.ProcurementRules.Count; index++)
+            {
+                var rule = config.ProcurementRules[index];
+                ImGui.PushID($"proc-rule-{rule.ItemId}");
+                ImGui.TableNextRow();
+                ImGui.TableNextColumn();
+                var enabled = rule.Enabled;
+                if (ImGui.Checkbox("##enabled", ref enabled)) { rule.Enabled = enabled; configurationDirty = true; }
+                ImGui.TableNextColumn(); ImGui.TextUnformatted($"{rule.ItemName} ({rule.ItemId})");
+                ImGui.TableNextColumn();
+                var maxPrice = rule.MaximumUnitPrice;
+                ImGui.SetNextItemWidth(-1);
+                if (InputUInt("##max", ref maxPrice, 0, 100_000_000)) { rule.MaximumUnitPrice = maxPrice; configurationDirty = true; }
+                ImGui.TableNextColumn();
+                var stack = rule.TargetStackSize;
+                ImGui.SetNextItemWidth(-1);
+                if (InputInt("##stack", ref stack, 1, 999)) { rule.TargetStackSize = stack; configurationDirty = true; }
+                ImGui.TableNextColumn();
+                var maxSlots = rule.MaximumSaleSlots;
+                ImGui.SetNextItemWidth(-1);
+                if (InputInt("##slots", ref maxSlots, 1, 60)) { rule.MaximumSaleSlots = maxSlots; configurationDirty = true; }
+                ImGui.TableNextColumn();
+                var velocity = rule.MinimumWeeklyUnitsSold;
+                ImGui.SetNextItemWidth(-1);
+                if (InputInt("##velocity", ref velocity, 0, 1_000_000)) { rule.MinimumWeeklyUnitsSold = velocity; configurationDirty = true; }
+                ImGui.TableNextColumn();
+                var hq = rule.AllowHighQuality;
+                if (ImGui.Checkbox("##hq", ref hq)) { rule.AllowHighQuality = hq; configurationDirty = true; }
+                ImGui.TableNextColumn();
+                if (ImGui.SmallButton("X")) removeIndex = index;
+                ImGui.PopID();
+            }
+            if (removeIndex >= 0)
+            {
+                config.ProcurementRules.RemoveAt(removeIndex);
+                configurationDirty = true;
+            }
+            ImGui.EndTable();
+        }
+
+        ImGui.Separator();
+        ImGui.TextUnformatted("Current plan");
+        var plan = procurement.Plan;
+        ImGui.Text($"{plan.Orders.Count} stack(s) | Cost {plan.TotalCost:N0} | Expected profit {plan.ExpectedProfit:N0} | Sale slots {plan.SaleSlots}");
+        if (ImGui.BeginTable("ProcurementPlan", 6,
+                ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.ScrollY,
+                new Vector2(0, 140 * ImGuiHelpers.GlobalScale)))
+        {
+            ImGui.TableSetupColumn("World");
+            ImGui.TableSetupColumn("Item");
+            ImGui.TableSetupColumn("Qty");
+            ImGui.TableSetupColumn("Buy/unit");
+            ImGui.TableSetupColumn("Ceiling");
+            ImGui.TableSetupColumn("Target sale");
+            ImGui.TableHeadersRow();
+            foreach (var order in plan.Orders)
+            {
+                ImGui.TableNextRow();
+                ImGui.TableNextColumn(); ImGui.TextUnformatted(order.WorldName);
+                ImGui.TableNextColumn(); ImGui.TextUnformatted(order.ItemName);
+                ImGui.TableNextColumn(); ImGui.TextUnformatted(order.Quantity.ToString());
+                ImGui.TableNextColumn(); ImGui.TextUnformatted(order.PricePerUnit.ToString("N0"));
+                ImGui.TableNextColumn(); ImGui.TextUnformatted(order.MaximumAcceptableUnitPrice.ToString("N0"));
+                ImGui.TableNextColumn(); ImGui.TextUnformatted(order.TargetSalePrice.ToString("N0"));
+            }
+            ImGui.EndTable();
+        }
+
+        var ledger = procurementLedger.Snapshot();
+        if (ledger.Count > 0)
+        {
+            ImGui.TextUnformatted("Purchased inventory waiting to be listed:");
+            foreach (var entry in ledger.Where(x => x.PendingQuantity > 0))
+                ImGui.BulletText($"{entry.ItemName}: {entry.PendingQuantity} remaining at initial {entry.TargetSalePrice:N0} gil");
+        }
+        DrawSaveButton();
     }
 
     private void DrawSafetySettings()

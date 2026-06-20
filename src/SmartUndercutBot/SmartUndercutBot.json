@@ -1,12 +1,13 @@
 {
   "Author": "AutoUnderCut",
   "Name": "Smart Undercutter",
-  "Punchline": "Live, guarded undercutting across every retainer.",
-  "Description": "Starts at the summoning bell, visits every retainer and listing, reads live Compare Prices results, and submits guarded undercuts through the game's Adjust Price flow. Use /sub to open the dashboard.",
+  "Punchline": "Guarded repricing, purchasing, and retainer restocking.",
+  "Description": "Reprices every active retainer, discovers guarded Universalis deals, can travel with Lifestream and vnavmesh, purchases only after live revalidation, and distributes purchased stacks across open retainer sale slots. Use /sub to open the dashboard.",
   "ApplicableVersion": "any",
   "Tags": [
     "market board",
     "retainer",
-    "pricing"
+    "pricing",
+    "procurement"
   ]
 }
