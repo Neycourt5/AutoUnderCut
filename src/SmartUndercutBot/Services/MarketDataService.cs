@@ -56,7 +56,7 @@ public sealed class MarketDataService : IMarketDataService, IDisposable
                 ? null
                 : historical.Order().ElementAt(historical.Length / 2);
 
-            return new MarketSnapshot(itemId, DateTimeOffset.UtcNow, listings, median);
+            return new MarketSnapshot(request.ResolvedItemId, DateTimeOffset.UtcNow, listings, median);
         }
         finally
         {
@@ -85,8 +85,13 @@ public sealed class MarketDataService : IMarketDataService, IDisposable
         if (request is null)
             return;
 
+        var receivedItemId = offerings.ItemListings.FirstOrDefault()?.ItemId ?? 0;
+        if (request.RequestedItemId != 0 && receivedItemId != 0 && receivedItemId != request.RequestedItemId)
+            return;
+        request.ResolveItem(receivedItemId);
+
         var rows = offerings.ItemListings
-            .Where(x => x.ItemId == request.ItemId)
+            .Where(x => request.ResolvedItemId == 0 || x.ItemId == request.ResolvedItemId)
             .Select(x => new MarketListing(
                 x.PricePerUnit,
                 x.ItemQuantity,
@@ -106,9 +111,10 @@ public sealed class MarketDataService : IMarketDataService, IDisposable
         PendingRequest? request;
         lock (sync)
             request = pending;
-        if (request is null || history.ItemId != request.ItemId)
+        if (request is null || (request.RequestedItemId != 0 && history.ItemId != request.RequestedItemId))
             return;
 
+        request.ResolveItem(history.ItemId);
         request.History.TrySetResult(history.HistoryListings
             .Where(x => x.SalePrice > 0)
             .Select(x => x.SalePrice)
@@ -124,11 +130,18 @@ public sealed class MarketDataService : IMarketDataService, IDisposable
 
     private sealed class PendingRequest(uint itemId)
     {
-        public uint ItemId { get; } = itemId;
+        public uint RequestedItemId { get; } = itemId;
+        public uint ResolvedItemId { get; private set; } = itemId;
         public TaskCompletionSource<IReadOnlyList<MarketListing>> Offerings { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource<uint[]> History { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public void ResolveItem(uint resolvedItemId)
+        {
+            if (resolvedItemId != 0 && ResolvedItemId == 0)
+                ResolvedItemId = resolvedItemId;
+        }
 
         public void Cancel()
         {

@@ -6,7 +6,7 @@ namespace SmartUndercutBot;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 3;
+    public int Version { get; set; } = 4;
     public bool AutomationEnabled { get; set; }
     public bool AllowAutomaticWrites { get; set; }
     public bool OpenDashboardOnRetainer { get; set; } = true;
@@ -43,6 +43,12 @@ public sealed class Configuration : IPluginConfiguration
                 MaximumDelayMs = 450;
             }
             Version = 3;
+        }
+        if (Version < 4)
+        {
+            if (MinimumDelayMs == 250 && MaximumDelayMs == 1500)
+                MaximumDelayMs = 450;
+            Version = 4;
         }
         MinimumDelayMs = Math.Clamp(MinimumDelayMs, 100, 60_000);
         MaximumDelayMs = Math.Clamp(MaximumDelayMs, MinimumDelayMs, 60_000);

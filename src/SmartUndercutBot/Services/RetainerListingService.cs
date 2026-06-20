@@ -26,7 +26,7 @@ public interface IRetainerListingService
     SafetySnapshot CheckSafety(Vector3 sessionPosition);
     IReadOnlyList<RetainerListing> ReadCurrentListings();
     bool TryReadListing(short slot, out RetainerListing? listing);
-    bool TryResolveOpenPriceEditor(IReadOnlySet<short> excludedSlots, out RetainerListing? listing);
+    bool TryResolveOpenPriceEditor(uint itemId, IReadOnlySet<short> excludedSlots, out RetainerListing? listing);
     bool SelectRetainer(int index);
     bool SelectSellItems();
     bool OpenListingContextMenu(int rowIndex);
@@ -158,7 +158,7 @@ public sealed unsafe class RetainerListingService : IRetainerListingService
         return listing is not null;
     }
 
-    public bool TryResolveOpenPriceEditor(IReadOnlySet<short> excludedSlots, out RetainerListing? listing)
+    public bool TryResolveOpenPriceEditor(uint itemId, IReadOnlySet<short> excludedSlots, out RetainerListing? listing)
     {
         listing = null;
         var addon = gameGui.GetAddonByName<AddonRetainerSell>("RetainerSell");
@@ -173,15 +173,18 @@ public sealed unsafe class RetainerListingService : IRetainerListingService
 
         var candidates = ReadCurrentListings()
             .Where(x => !excludedSlots.Contains(x.Slot))
-            .Where(x => visibleName.Contains(x.ItemName, StringComparison.OrdinalIgnoreCase))
-            .Where(x => x.Quantity == visibleQuantity)
+            .Where(x => itemId == 0
+                ? visibleName.Contains(x.ItemName, StringComparison.OrdinalIgnoreCase)
+                : x.ItemId == itemId)
             .ToArray();
         if (candidates.Length == 0)
             return false;
 
         // Prefer every field we can observe. Identical stacks are interchangeable here;
         // excluding prior slots gives each visible row a unique backing market slot.
-        listing = candidates.FirstOrDefault(x => x.CurrentPrice == visiblePrice && x.IsHighQuality == visibleHq)
+        listing = candidates.FirstOrDefault(x => x.Quantity == visibleQuantity && x.CurrentPrice == visiblePrice && x.IsHighQuality == visibleHq)
+            ?? candidates.FirstOrDefault(x => x.Quantity == visibleQuantity && x.CurrentPrice == visiblePrice)
+            ?? candidates.FirstOrDefault(x => x.Quantity == visibleQuantity && x.IsHighQuality == visibleHq)
             ?? candidates.FirstOrDefault(x => x.CurrentPrice == visiblePrice)
             ?? candidates.FirstOrDefault(x => x.IsHighQuality == visibleHq)
             ?? candidates[0];
