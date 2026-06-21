@@ -16,6 +16,7 @@ public enum ProcurementState
     FindingMarketBoard,
     MovingToMarketBoard,
     WaitingForMarketBoard,
+    WaitingForStockHuntListings,
     AwaitingManualReview,
     WaitingForListings,
     WaitingForPurchase,
@@ -47,6 +48,15 @@ public sealed record ProcurementStatus(
 
 public sealed class ProcurementController : IDisposable
 {
+    private static readonly string[] NorthAmericaAndOceaniaWorlds =
+    [
+        "Adamantoise", "Cactuar", "Faerie", "Gilgamesh", "Jenova", "Midgardsormr", "Sargatanas", "Siren",
+        "Behemoth", "Excalibur", "Exodus", "Famfrit", "Hyperion", "Lamia", "Leviathan", "Ultros",
+        "Balmung", "Brynhildr", "Coeurl", "Diabolos", "Goblin", "Malboro", "Mateus", "Zalera",
+        "Cuchulainn", "Golem", "Halicarnassus", "Kraken", "Maduin", "Marilith", "Rafflesia", "Seraph",
+        "Bismarck", "Ravana", "Sephirot", "Sophia", "Zurvan",
+    ];
+
     private readonly IFramework framework;
     private readonly IPlayerState playerState;
     private readonly ICommandManager commandManager;
@@ -65,11 +75,16 @@ public sealed class ProcurementController : IDisposable
     private CancellationTokenSource? cancellation;
     private Task<IReadOnlyList<ProcurementMarketItem>>? scanTask;
     private List<IGrouping<string, ProcurementOrder>> worldGroups = [];
+    private List<string> stockHuntWorlds = [];
+    private List<ProcurementRule> stockHuntRules = [];
+    private readonly List<ProcurementMarketListing> stockHuntListings = [];
     private ProcurementOrder? currentOrder;
     private LivePurchaseListing? currentLiveListing;
+    private ProcurementRule? currentStockHuntRule;
     private DateTimeOffset deadline;
     private DateTimeOffset nextActionAt;
     private DateTimeOffset nextAutomaticScan;
+    private DateTimeOffset nextLiveStockHunt;
     private int worldIndex;
     private int orderIndex;
     private int inventoryBefore;
@@ -80,6 +95,9 @@ public sealed class ProcurementController : IDisposable
     private string detail = "Procurement is idle.";
     private uint gilSpent;
     private int localTravelAttempts;
+    private int stockHuntWorldIndex;
+    private int stockHuntRuleIndex;
+    private bool stockHuntScanning;
 
     public ProcurementController(
         IFramework framework,
@@ -112,6 +130,7 @@ public sealed class ProcurementController : IDisposable
         this.configuration = configuration;
         this.log = log;
         nextAutomaticScan = DateTimeOffset.UtcNow.AddMinutes(configuration.Current.ProcurementIntervalMinutes);
+        nextLiveStockHunt = DateTimeOffset.UtcNow;
         framework.Update += OnFrameworkUpdate;
     }
 
@@ -141,6 +160,8 @@ public sealed class ProcurementController : IDisposable
 
     public void RunGuidedNow() => StartScan(ProcurementRunMode.GuidedReview);
 
+    public void RunLiveStockHuntNow() => StartLiveStockHunt();
+
     public void CompleteGuidedWorldReview()
     {
         if (State != ProcurementState.AwaitingManualReview)
@@ -158,6 +179,7 @@ public sealed class ProcurementController : IDisposable
         scanTask = null;
         vnavmesh.Stop();
         taskbarAttention.StopFlashing();
+        stockHuntScanning = false;
         State = ProcurementState.Halted;
         detail = reason;
         log.Add(AutomationLogLevel.Warning, reason);
@@ -167,6 +189,7 @@ public sealed class ProcurementController : IDisposable
     {
         if (IsActive)
             return;
+        stockHuntScanning = false;
         var dataCenter = universalis.ResolveDataCenter(configuration.Current.ProcurementDataCenter);
         if (string.IsNullOrWhiteSpace(dataCenter))
         {
@@ -226,6 +249,8 @@ public sealed class ProcurementController : IDisposable
             case ProcurementState.WaitingForWorld:
                 if (IsOnWorld(WorldName) && !lifestream.IsBusy)
                     Delay(ProcurementState.WaitingAfterWorldArrival, "Destination world loaded; allowing the character to settle.", 8_000);
+                else if (stockHuntScanning && DateTimeOffset.UtcNow >= deadline)
+                    SkipStockHuntWorld($"LIVE TOUR timed out travelling to {WorldName}; skipping that world.");
                 else
                     CheckTimeout($"Timed out travelling to {WorldName}.");
                 break;
@@ -244,13 +269,20 @@ public sealed class ProcurementController : IDisposable
             case ProcurementState.WaitingForMarketBoard:
                 if (market.IsMarketBoardOpen)
                 {
-                    if (activeRunMode == ProcurementRunMode.GuidedReview)
+                    if (stockHuntScanning)
+                        BeginStockHuntRuleScan();
+                    else if (activeRunMode == ProcurementRunMode.GuidedReview)
                         BeginGuidedReview();
                     else
                         BeginCurrentOrder();
                 }
+                else if (stockHuntScanning && DateTimeOffset.UtcNow >= deadline)
+                    SkipStockHuntWorld($"LIVE TOUR could not open {WorldName}'s Market Board; skipping that world.");
                 else
                     CheckTimeout("Timed out opening the Market Board.");
+                break;
+            case ProcurementState.WaitingForStockHuntListings:
+                PollStockHuntListings();
                 break;
             case ProcurementState.AwaitingManualReview:
                 break;
@@ -329,6 +361,64 @@ public sealed class ProcurementController : IDisposable
             BeginExecution(runAfterScan);
     }
 
+    private void StartLiveStockHunt()
+    {
+        if (IsActive)
+            return;
+        if (!configuration.Current.AllowAutomaticPurchases)
+        {
+            State = ProcurementState.Halted;
+            detail = "Arm automatic market-board purchases before starting the live all-world stock hunt.";
+            log.Add(AutomationLogLevel.Warning, detail);
+            return;
+        }
+        if (!playerState.IsLoaded)
+        {
+            Halt("The character is not fully loaded.");
+            return;
+        }
+        if (repricing.LastKnownFreeSaleSlots is not > 0)
+        {
+            Halt("The live all-world stock hunt needs at least one confirmed empty retainer sale slot. Run the all-retainer bell pass first.");
+            return;
+        }
+
+        homeWorld = playerState.HomeWorld.Value.Name.ToString();
+        stockHuntRules = configuration.Current.ProcurementRules
+            .Where(x => x.Enabled && x.ItemId != 0 && x.RequireHighQuality)
+            .Where(x => market.GetInventoryCount(x.ItemId, true) < configuration.Current.LiveWorldStockThresholdPerItem)
+            .DistinctBy(x => x.ItemId)
+            .ToList();
+        if (stockHuntRules.Count == 0)
+        {
+            State = ProcurementState.Completed;
+            detail = $"No curated HQ item is below the live-tour threshold of {configuration.Current.LiveWorldStockThresholdPerItem:N0}.";
+            log.Add(AutomationLogLevel.Information, detail);
+            return;
+        }
+
+        ledger.ClearBagStockQueue();
+        repricing.Halt("Paused while the live all-world stock hunt runs.");
+        market.CloseRetainerList();
+        activeRunMode = ProcurementRunMode.AutomaticPurchase;
+        runAfterScan = ProcurementRunMode.None;
+        Plan = ProcurementPlan.Empty;
+        gilSpent = 0;
+        stockHuntListings.Clear();
+        stockHuntWorlds = NorthAmericaAndOceaniaWorlds
+            .Prepend(homeWorld)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        stockHuntWorldIndex = 0;
+        stockHuntRuleIndex = 0;
+        currentStockHuntRule = null;
+        stockHuntScanning = true;
+        nextLiveStockHunt = DateTimeOffset.UtcNow.AddMinutes(configuration.Current.LiveWorldStockHuntCooldownMinutes);
+        detail = $"Starting live HQ stock hunt for {stockHuntRules.Count} low-stock item(s) across {stockHuntWorlds.Count} NA/Oceania worlds.";
+        log.Add(AutomationLogLevel.Information, detail);
+        TravelToCurrentWorld();
+    }
+
     private void BeginExecution(ProcurementRunMode mode)
     {
         if (mode == ProcurementRunMode.AutomaticPurchase && !configuration.Current.AllowAutomaticPurchases)
@@ -381,12 +471,19 @@ public sealed class ProcurementController : IDisposable
             "Review the live board, then choose Done here / Next world.");
     }
 
-    private string WorldName => worldIndex < worldGroups.Count ? worldGroups[worldIndex].Key : string.Empty;
+    private string WorldName => stockHuntScanning
+        ? stockHuntWorldIndex < stockHuntWorlds.Count ? stockHuntWorlds[stockHuntWorldIndex] : string.Empty
+        : worldIndex < worldGroups.Count ? worldGroups[worldIndex].Key : string.Empty;
 
     private void TravelToCurrentWorld()
     {
         market.CloseMarketBoard();
-        if (worldIndex >= worldGroups.Count)
+        if (stockHuntScanning && stockHuntWorldIndex >= stockHuntWorlds.Count)
+        {
+            CompleteStockHuntScan();
+            return;
+        }
+        if (!stockHuntScanning && worldIndex >= worldGroups.Count)
         {
             ReturnHome();
             return;
@@ -401,6 +498,11 @@ public sealed class ProcurementController : IDisposable
             : commandManager.ProcessCommand($"/li {WorldName}");
         if (!accepted)
         {
+            if (stockHuntScanning)
+            {
+                SkipStockHuntWorld($"Lifestream could not visit {WorldName}; skipping that world.");
+                return;
+            }
             Halt("Lifestream was busy or did not accept the world-travel command. Try Run guarded purchase plan again.");
             return;
         }
@@ -417,6 +519,142 @@ public sealed class ProcurementController : IDisposable
                 ? "Waiting for Lifestream to take us to the home market area."
                 : $"Waiting for Lifestream to take us to {WorldName}'s market area.",
             75);
+    }
+
+    private void BeginStockHuntRuleScan()
+    {
+        if (!stockHuntScanning)
+            return;
+        if (stockHuntRuleIndex >= stockHuntRules.Count)
+        {
+            FinishStockHuntWorld();
+            return;
+        }
+
+        currentStockHuntRule = stockHuntRules[stockHuntRuleIndex];
+        if (!market.RequestListings(currentStockHuntRule.ItemId))
+        {
+            nextActionAt = DateTimeOffset.UtcNow.AddMilliseconds(1_200);
+            Wait(ProcurementState.WaitingForStockHuntListings,
+                $"Waiting to scan {currentStockHuntRule.ItemName} on {WorldName}.", 12);
+            return;
+        }
+        nextActionAt = DateTimeOffset.UtcNow.AddMilliseconds(1_200);
+        Wait(ProcurementState.WaitingForStockHuntListings,
+            $"Reading live {currentStockHuntRule.ItemName} listings on {WorldName}.", 12);
+    }
+
+    private void PollStockHuntListings()
+    {
+        if (currentStockHuntRule is null)
+        {
+            if (DelayElapsed())
+                BeginStockHuntRuleScan();
+            return;
+        }
+
+        if (!market.AreListingsReady(currentStockHuntRule.ItemId))
+        {
+            if (DateTimeOffset.UtcNow >= deadline)
+            {
+                log.Add(AutomationLogLevel.Warning,
+                    $"LIVE TOUR SKIPPED {currentStockHuntRule.ItemName} on {WorldName}: market request timed out.");
+                AdvanceStockHuntRule();
+                return;
+            }
+            if (DelayElapsed())
+            {
+                market.RequestListings(currentStockHuntRule.ItemId);
+                nextActionAt = DateTimeOffset.UtcNow.AddMilliseconds(1_200);
+            }
+            return;
+        }
+
+        var live = market.ReadLiveListings(currentStockHuntRule.ItemId)
+            .Where(x => x.IsHighQuality && x.Quantity <= Math.Max(1, currentStockHuntRule.TargetStackSize))
+            .ToArray();
+        foreach (var listing in live)
+        {
+            stockHuntListings.Add(new(
+                listing.ItemId,
+                listing.ListingId,
+                listing.RetainerId,
+                WorldName,
+                0,
+                listing.PricePerUnit,
+                listing.Quantity,
+                listing.IsHighQuality));
+        }
+        log.Add(AutomationLogLevel.Information,
+            $"LIVE TOUR {WorldName}: {currentStockHuntRule.ItemName} returned {live.Length} eligible HQ listing(s).");
+        AdvanceStockHuntRule();
+    }
+
+    private void AdvanceStockHuntRule()
+    {
+        stockHuntRuleIndex++;
+        currentStockHuntRule = null;
+        nextActionAt = DateTimeOffset.UtcNow.AddMilliseconds(1_200);
+        State = ProcurementState.WaitingForStockHuntListings;
+        detail = $"Waiting before the next live scan on {WorldName}.";
+    }
+
+    private void FinishStockHuntWorld()
+    {
+        var completedWorld = WorldName;
+        market.CloseMarketBoard();
+        stockHuntWorldIndex++;
+        stockHuntRuleIndex = 0;
+        currentStockHuntRule = null;
+        log.Add(AutomationLogLevel.Information,
+            $"LIVE TOUR finished {completedWorld} ({stockHuntWorldIndex}/{stockHuntWorlds.Count}).");
+        TravelToCurrentWorld();
+    }
+
+    private void SkipStockHuntWorld(string reason)
+    {
+        log.Add(AutomationLogLevel.Warning, reason);
+        market.CloseMarketBoard();
+        stockHuntWorldIndex++;
+        stockHuntRuleIndex = 0;
+        currentStockHuntRule = null;
+        TravelToCurrentWorld();
+    }
+
+    private void CompleteStockHuntScan()
+    {
+        stockHuntScanning = false;
+        market.CloseMarketBoard();
+        var markets = stockHuntRules.Select(rule => new ProcurementMarketItem(
+            rule.ItemId,
+            rule.ItemName,
+            stockHuntListings
+                .Where(x => x.ItemId == rule.ItemId)
+                .DistinctBy(x => (x.WorldName, x.ListingId, x.RetainerId))
+                .ToArray(),
+            [])).ToArray();
+        var config = configuration.Current;
+        var freeSaleSlots = repricing.LastKnownFreeSaleSlots ?? 0;
+        Plan = planner.BuildLiveMarketPlan(new(
+            markets,
+            stockHuntRules,
+            homeWorld,
+            retainerListings.OwnedRetainerIds,
+            Math.Min(config.ProcurementBudget, market.Gil),
+            Math.Min(freeSaleSlots, config.ProcurementTargetSaleSlots),
+            Math.Max(0, (int)market.FreeInventorySlots - config.ProcurementInventoryReserve),
+            config.ProcurementMinimumRoiPercent,
+            config.ProcurementMinimumProfitPerUnit));
+        detail = Plan.Orders.Count == 0
+            ? $"Live tour checked {stockHuntWorlds.Count} worlds; no listing beat the live {homeWorld} resale floor and safety guards."
+            : $"Live tour found {Plan.Orders.Count} guarded buy(s), costing {Plan.TotalCost:N0} gil with about {Plan.ExpectedProfit:N0} gil expected profit.";
+        log.Add(AutomationLogLevel.Information, detail);
+        if (Plan.Orders.Count == 0)
+        {
+            ReturnHome();
+            return;
+        }
+        BeginExecution(ProcurementRunMode.AutomaticPurchase);
     }
 
     private void BeginCurrentOrder()
@@ -589,7 +827,10 @@ public sealed class ProcurementController : IDisposable
             detail = returningHome
                 ? "Lifestream is moving to the home market area."
                 : $"Lifestream is moving to {WorldName}'s market area.";
-            CheckTimeout($"Lifestream did not finish travelling to the market area near {objectName}.");
+            if (stockHuntScanning && DateTimeOffset.UtcNow >= deadline)
+                SkipStockHuntWorld($"LIVE TOUR timed out reaching {WorldName}'s {objectName}; skipping that world.");
+            else
+                CheckTimeout($"Lifestream did not finish travelling to the market area near {objectName}.");
             return;
         }
 
@@ -601,6 +842,11 @@ public sealed class ProcurementController : IDisposable
 
         if (localTravelAttempts >= 3)
         {
+            if (stockHuntScanning)
+            {
+                SkipStockHuntWorld($"LIVE TOUR could not reach {WorldName}'s {objectName} after 3 attempts; skipping that world.");
+                return;
+            }
             Halt($"Could not reach a {objectName} after 3 Lifestream market-area attempts. " +
                  $"Check that '{configuration.Current.MarketBoardTravelCommand}' works in chat and that Lifestream is enabled.");
             return;
@@ -636,7 +882,10 @@ public sealed class ProcurementController : IDisposable
         var position = market.FindNearest(objectName);
         if (!position.HasValue)
         {
-            CheckTimeout($"Could not find a {objectName} before the timeout.");
+            if (stockHuntScanning && DateTimeOffset.UtcNow >= deadline)
+                SkipStockHuntWorld($"LIVE TOUR could not find {WorldName}'s {objectName}; skipping that world.");
+            else
+                CheckTimeout($"Could not find a {objectName} before the timeout.");
             return;
         }
         if (market.DistanceTo(position.Value) <= 4.5f)
@@ -647,7 +896,10 @@ public sealed class ProcurementController : IDisposable
         }
         if (!vnavmesh.IsReady || !vnavmesh.MoveTo(position.Value, 3f))
         {
-            CheckTimeout("vnavmesh was unavailable or could not create a path.");
+            if (stockHuntScanning && DateTimeOffset.UtcNow >= deadline)
+                SkipStockHuntWorld($"LIVE TOUR could not path to {WorldName}'s {objectName}; skipping that world.");
+            else
+                CheckTimeout("vnavmesh was unavailable or could not create a path.");
             return;
         }
         State = movingState;
@@ -666,7 +918,10 @@ public sealed class ProcurementController : IDisposable
         }
         if (!vnavmesh.IsRunning && position.HasValue)
             vnavmesh.MoveTo(position.Value, 3f);
-        CheckTimeout($"Timed out walking to {objectName}.");
+        if (stockHuntScanning && DateTimeOffset.UtcNow >= deadline)
+            SkipStockHuntWorld($"LIVE TOUR timed out walking to {WorldName}'s {objectName}; skipping that world.");
+        else
+            CheckTimeout($"Timed out walking to {objectName}.");
     }
 
     private void TryAutomaticStart()
@@ -674,6 +929,15 @@ public sealed class ProcurementController : IDisposable
         if (!configuration.Current.AutomaticProcurementEnabled || !retainerListings.IsRetainerListOpen ||
             repricing.IsActive)
             return;
+
+        if (configuration.Current.LiveWorldStockHuntEnabled &&
+            configuration.Current.AllowAutomaticPurchases &&
+            repricing.LastKnownFreeSaleSlots is > 0 &&
+            DateTimeOffset.UtcNow >= nextLiveStockHunt && HasLowCuratedStock())
+        {
+            StartLiveStockHunt();
+            return;
+        }
 
         // A completed retainer pass gives us an authoritative free-slot count. Scan
         // immediately when that capacity changes (a listing sold), otherwise use the
@@ -687,6 +951,10 @@ public sealed class ProcurementController : IDisposable
         nextAutomaticScan = DateTimeOffset.UtcNow.AddMinutes(configuration.Current.ProcurementIntervalMinutes);
         StartScan(ProcurementRunMode.AutomaticPurchase);
     }
+
+    private bool HasLowCuratedStock() => configuration.Current.ProcurementRules
+        .Where(x => x.Enabled && x.ItemId != 0 && x.RequireHighQuality)
+        .Any(x => market.GetInventoryCount(x.ItemId, true) < configuration.Current.LiveWorldStockThresholdPerItem);
 
     private bool IsOnWorld(string world) => playerState.IsLoaded && string.Equals(
         playerState.CurrentWorld.Value.Name.ToString(), world, StringComparison.OrdinalIgnoreCase);

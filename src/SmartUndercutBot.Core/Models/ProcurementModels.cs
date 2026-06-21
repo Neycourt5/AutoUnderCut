@@ -41,6 +41,18 @@ public sealed record ProcurementPlanRequest(
     uint MinimumProfitPerUnit,
     decimal MarketTaxPercent = 5m);
 
+public sealed record LiveMarketPlanRequest(
+    IReadOnlyList<ProcurementMarketItem> Markets,
+    IReadOnlyList<ProcurementRule> Rules,
+    string HomeWorld,
+    IReadOnlySet<ulong> OwnedRetainerIds,
+    uint GilBudget,
+    int FreeSaleSlots,
+    int FreeInventorySlots,
+    decimal MinimumRoiPercent,
+    uint MinimumProfitPerUnit,
+    decimal MarketTaxPercent = 5m);
+
 public sealed record ProcurementOrder(
     uint ItemId,
     string ItemName,

@@ -83,4 +83,51 @@ public sealed class ProcurementPlannerServiceTests
         Assert.Equal(1_000u, order.PricePerUnit);
         Assert.Equal(2_000u, order.TargetSalePrice);
     }
+
+    [Fact]
+    public void LiveMarketPlanUsesHomeWorldPriceAndIgnoresOwnedListings()
+    {
+        var market = new ProcurementMarketItem(1, "Caramel Popcorn",
+            [
+                new(1, 10, 100, "Siren", 1, 1, 99, true),
+                new(1, 11, 101, "Siren", 1, 2_000, 99, true),
+                new(1, 12, 102, "Cactuar", 2, 1_000, 99, true),
+            ], []);
+        var rule = new ProcurementRule
+        {
+            ItemId = 1,
+            ItemName = market.ItemName,
+            AllowHighQuality = true,
+            RequireHighQuality = true,
+            MaximumSaleSlots = 8,
+        };
+
+        var plan = planner.BuildLiveMarketPlan(new(
+            [market], [rule], "Siren", new HashSet<ulong> { 100 },
+            500_000, 5, 5, 20m, 100));
+
+        var order = Assert.Single(plan.Orders);
+        Assert.Equal("Cactuar", order.WorldName);
+        Assert.Equal(2_000u, order.TargetSalePrice);
+        Assert.Equal(1_000u, order.PricePerUnit);
+    }
+
+    [Fact]
+    public void LiveMarketPlanRejectsDealWithoutLiveHomeWorldAnchor()
+    {
+        var market = new ProcurementMarketItem(1, "Caramel Popcorn",
+            [new(1, 12, 102, "Cactuar", 2, 1, 99, true)], []);
+        var rule = new ProcurementRule
+        {
+            ItemId = 1,
+            AllowHighQuality = true,
+            RequireHighQuality = true,
+        };
+
+        var plan = planner.BuildLiveMarketPlan(new(
+            [market], [rule], "Siren", new HashSet<ulong>(),
+            500_000, 5, 5, 20m, 100));
+
+        Assert.Empty(plan.Orders);
+    }
 }

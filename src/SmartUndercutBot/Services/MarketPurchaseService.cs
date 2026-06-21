@@ -29,6 +29,7 @@ public interface IMarketPurchaseService
     bool InteractNearest(string objectName, float maximumDistance = 5f);
     bool RequestListings(uint itemId);
     bool AreListingsReady(uint itemId);
+    IReadOnlyList<LivePurchaseListing> ReadLiveListings(uint itemId);
     bool TrySelectLiveListing(ProcurementOrder expected, out LivePurchaseListing? listing);
     bool SubmitPurchase(LivePurchaseListing listing);
     void CloseMarketBoard();
@@ -107,6 +108,25 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService
     {
         var proxy = InfoProxyItemSearch.Instance();
         return proxy != null && !proxy->WaitingForListings && proxy->SearchItemId == itemId;
+    }
+
+    public IReadOnlyList<LivePurchaseListing> ReadLiveListings(uint itemId)
+    {
+        var proxy = InfoProxyItemSearch.Instance();
+        if (proxy == null || proxy->WaitingForListings || proxy->SearchItemId != itemId)
+            return [];
+
+        var result = new List<LivePurchaseListing>();
+        var source = proxy->Listings;
+        var count = (int)Math.Min(proxy->ListingCount, (uint)source.Length);
+        for (var index = 0; index < count; index++)
+        {
+            var row = source[index];
+            if (row.ItemId == itemId && row.UnitPrice > 0 && row.Quantity > 0)
+                result.Add(new(index, row.ItemId, row.ListingId, row.RetainerId,
+                    row.UnitPrice, row.Quantity, row.IsHqItem));
+        }
+        return result;
     }
 
     public bool TrySelectLiveListing(ProcurementOrder expected, out LivePurchaseListing? listing)

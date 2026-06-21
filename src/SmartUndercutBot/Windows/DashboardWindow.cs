@@ -537,6 +537,9 @@ public sealed class DashboardWindow : Window
         if (ImGui.Button("Run guided deal route"))
             procurement.RunGuidedNow();
         ImGui.SameLine();
+        if (ImGui.Button("Live all-world stock hunt"))
+            procurement.RunLiveStockHuntNow();
+        ImGui.SameLine();
         if (ImGui.Button("Stop procurement"))
             procurement.Halt();
 
@@ -623,6 +626,25 @@ public sealed class DashboardWindow : Window
             configurationDirty = true;
         }
         ImGui.TextDisabled("Default scans every North American world plus Oceania: North-America,Oceania");
+        var liveHunt = config.LiveWorldStockHuntEnabled;
+        if (ImGui.Checkbox("Use a live all-world fallback when curated stock is low", ref liveHunt))
+        {
+            config.LiveWorldStockHuntEnabled = liveHunt;
+            SaveConfiguration();
+        }
+        ImGui.TextWrapped("This slow fallback ignores Universalis listings, visits every NA and Oceania world, reads each in-game HQ market, and uses the live Siren price as the resale anchor.");
+        var lowStockThreshold = config.LiveWorldStockThresholdPerItem;
+        if (InputInt("Live-tour low-stock threshold per item", ref lowStockThreshold, 1, 9999))
+        {
+            config.LiveWorldStockThresholdPerItem = lowStockThreshold;
+            configurationDirty = true;
+        }
+        var liveHuntCooldown = config.LiveWorldStockHuntCooldownMinutes;
+        if (InputInt("Minutes between full live-world tours", ref liveHuntCooldown, 60, 10_080))
+        {
+            config.LiveWorldStockHuntCooldownMinutes = liveHuntCooldown;
+            configurationDirty = true;
+        }
         var travelCommand = config.MarketBoardTravelCommand;
         if (ImGui.InputText("Lifestream market-board command", ref travelCommand, 128))
         {

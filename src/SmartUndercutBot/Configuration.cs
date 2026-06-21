@@ -6,7 +6,7 @@ namespace SmartUndercutBot;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 14;
+    public int Version { get; set; } = 15;
     public bool AutomationEnabled { get; set; }
     public bool ProcessAllRetainers { get; set; } = true;
     public bool RepeatBellRuns { get; set; }
@@ -34,6 +34,9 @@ public sealed class Configuration : IPluginConfiguration
     public uint ProcurementMinimumProfitPerUnit { get; set; } = 100;
     public string ProcurementDataCenter { get; set; } = "North-America,Oceania";
     public string MarketBoardTravelCommand { get; set; } = "/li mb";
+    public bool LiveWorldStockHuntEnabled { get; set; } = true;
+    public int LiveWorldStockThresholdPerItem { get; set; } = 199;
+    public int LiveWorldStockHuntCooldownMinutes { get; set; } = 360;
     public List<ProcurementRule> ProcurementRules { get; set; } = [];
     public PricingRule GlobalRule { get; set; } = new();
     public Dictionary<uint, PricingRule> PerItemRules { get; set; } = [];
@@ -180,6 +183,15 @@ public sealed class Configuration : IPluginConfiguration
                 ProcurementDataCenter = "North-America,Oceania";
             Version = 14;
         }
+        if (Version < 15)
+        {
+            LiveWorldStockHuntEnabled = true;
+            if (LiveWorldStockThresholdPerItem == 0)
+                LiveWorldStockThresholdPerItem = 199;
+            if (LiveWorldStockHuntCooldownMinutes == 0)
+                LiveWorldStockHuntCooldownMinutes = 360;
+            Version = 15;
+        }
         MinimumDelayMs = Math.Clamp(MinimumDelayMs, 100, 60_000);
         MaximumDelayMs = Math.Clamp(MaximumDelayMs, MinimumDelayMs, 60_000);
         MarketRequestTimeoutSeconds = Math.Clamp(MarketRequestTimeoutSeconds, 2, 60);
@@ -193,6 +205,8 @@ public sealed class Configuration : IPluginConfiguration
         ProcurementBudget = Math.Clamp(ProcurementBudget, 1_000u, 100_000_000u);
         ProcurementTargetSaleSlots = Math.Clamp(ProcurementTargetSaleSlots, 1, 200);
         ProcurementInventoryReserve = Math.Clamp(ProcurementInventoryReserve, 1, 100);
+        LiveWorldStockThresholdPerItem = Math.Clamp(LiveWorldStockThresholdPerItem, 1, 9999);
+        LiveWorldStockHuntCooldownMinutes = Math.Clamp(LiveWorldStockHuntCooldownMinutes, 60, 10_080);
         BagListingReservePerItem = Math.Clamp(BagListingReservePerItem, 0, 9999);
         ProcurementMinimumRoiPercent = Math.Clamp(ProcurementMinimumRoiPercent, 0m, 1_000m);
         ProcurementMinimumProfitPerUnit = Math.Clamp(ProcurementMinimumProfitPerUnit, 0u, 100_000_000u);
