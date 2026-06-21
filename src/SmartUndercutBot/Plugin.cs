@@ -69,6 +69,7 @@ public sealed class Plugin : IDalamudPlugin
             new ProcurementPlannerService(),
             new MarketPurchaseService(ObjectTable, GameGui),
             new VnavmeshService(PluginInterface),
+            new LifestreamService(PluginInterface),
             taskbarAttention,
             procurementLedger,
             automation,

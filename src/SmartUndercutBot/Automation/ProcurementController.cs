@@ -12,6 +12,7 @@ public enum ProcurementState
     PlanReady,
     WaitingForWorld,
     WaitingAfterWorldArrival,
+    WaitingForMarketBoardTravel,
     FindingMarketBoard,
     MovingToMarketBoard,
     WaitingForMarketBoard,
@@ -20,6 +21,7 @@ public enum ProcurementState
     WaitingForPurchase,
     WaitingForHomeWorld,
     WaitingAfterHomeArrival,
+    WaitingForSummoningBellTravel,
     FindingSummoningBell,
     MovingToSummoningBell,
     WaitingForSummoningBell,
@@ -53,6 +55,7 @@ public sealed class ProcurementController : IDisposable
     private readonly IProcurementPlannerService planner;
     private readonly IMarketPurchaseService market;
     private readonly IVnavmeshService vnavmesh;
+    private readonly ILifestreamService lifestream;
     private readonly ITaskbarAttentionService taskbarAttention;
     private readonly ProcurementLedger ledger;
     private readonly AutomationController repricing;
@@ -76,6 +79,7 @@ public sealed class ProcurementController : IDisposable
     private string homeWorld = string.Empty;
     private string detail = "Procurement is idle.";
     private uint gilSpent;
+    private int localTravelAttempts;
 
     public ProcurementController(
         IFramework framework,
@@ -86,6 +90,7 @@ public sealed class ProcurementController : IDisposable
         IProcurementPlannerService planner,
         IMarketPurchaseService market,
         IVnavmeshService vnavmesh,
+        ILifestreamService lifestream,
         ITaskbarAttentionService taskbarAttention,
         ProcurementLedger ledger,
         AutomationController repricing,
@@ -100,6 +105,7 @@ public sealed class ProcurementController : IDisposable
         this.planner = planner;
         this.market = market;
         this.vnavmesh = vnavmesh;
+        this.lifestream = lifestream;
         this.taskbarAttention = taskbarAttention;
         this.ledger = ledger;
         this.repricing = repricing;
@@ -218,13 +224,16 @@ public sealed class ProcurementController : IDisposable
         switch (State)
         {
             case ProcurementState.WaitingForWorld:
-                if (IsOnWorld(WorldName))
-                    Delay(ProcurementState.WaitingAfterWorldArrival, "Waiting for the destination world to settle.", 5_000);
+                if (IsOnWorld(WorldName) && !lifestream.IsBusy)
+                    Delay(ProcurementState.WaitingAfterWorldArrival, "Destination world loaded; allowing the character to settle.", 8_000);
                 else
                     CheckTimeout($"Timed out travelling to {WorldName}.");
                 break;
             case ProcurementState.WaitingAfterWorldArrival:
-                if (DelayElapsed()) TravelToMarketBoard();
+                if (DelayElapsed() && !lifestream.IsBusy) BeginLocalTravel(false);
+                break;
+            case ProcurementState.WaitingForMarketBoardTravel:
+                PollLocalTravel("Market Board", ProcurementState.FindingMarketBoard, false);
                 break;
             case ProcurementState.FindingMarketBoard:
                 FindAndApproach("Market Board", ProcurementState.MovingToMarketBoard, ProcurementState.WaitingForMarketBoard);
@@ -252,13 +261,16 @@ public sealed class ProcurementController : IDisposable
                 PollPurchase();
                 break;
             case ProcurementState.WaitingForHomeWorld:
-                if (IsOnWorld(homeWorld))
-                    Delay(ProcurementState.WaitingAfterHomeArrival, "Waiting for the home world to settle.", 5_000);
+                if (IsOnWorld(homeWorld) && !lifestream.IsBusy)
+                    Delay(ProcurementState.WaitingAfterHomeArrival, "Home world loaded; allowing the character to settle.", 8_000);
                 else
                     CheckTimeout($"Timed out returning to {homeWorld}.");
                 break;
             case ProcurementState.WaitingAfterHomeArrival:
-                if (DelayElapsed()) TravelToSummoningBell();
+                if (DelayElapsed() && !lifestream.IsBusy) BeginLocalTravel(true);
+                break;
+            case ProcurementState.WaitingForSummoningBellTravel:
+                PollLocalTravel("Summoning Bell", ProcurementState.FindingSummoningBell, true);
                 break;
             case ProcurementState.FindingSummoningBell:
                 FindAndApproach("Summoning Bell", ProcurementState.MovingToSummoningBell, ProcurementState.WaitingForSummoningBell);
@@ -381,21 +393,30 @@ public sealed class ProcurementController : IDisposable
         }
         if (IsOnWorld(WorldName))
         {
-            Delay(ProcurementState.WaitingAfterWorldArrival, $"Preparing to visit {WorldName}'s market board.", 2_000);
+            Delay(ProcurementState.WaitingAfterWorldArrival, $"Preparing to visit {WorldName}'s market board.", 3_000);
             return;
         }
-        if (!commandManager.ProcessCommand($"/li {WorldName}"))
+        var accepted = lifestream.IsAvailable
+            ? lifestream.ChangeWorld(WorldName)
+            : commandManager.ProcessCommand($"/li {WorldName}");
+        if (!accepted)
         {
-            Halt("Lifestream did not accept the world-travel command.");
+            Halt("Lifestream was busy or did not accept the world-travel command. Try Run guarded purchase plan again.");
             return;
         }
         Wait(ProcurementState.WaitingForWorld, $"Travelling to {WorldName} with Lifestream.", 180);
     }
 
-    private void TravelToMarketBoard()
+    private void BeginLocalTravel(bool returningHome)
     {
-        commandManager.ProcessCommand(configuration.Current.MarketBoardTravelCommand);
-        Wait(ProcurementState.FindingMarketBoard, $"Finding {WorldName}'s market board.", 90);
+        localTravelAttempts = 0;
+        nextActionAt = DateTimeOffset.UtcNow;
+        Wait(
+            returningHome ? ProcurementState.WaitingForSummoningBellTravel : ProcurementState.WaitingForMarketBoardTravel,
+            returningHome
+                ? "Waiting for Lifestream to take us to the home market area."
+                : $"Waiting for Lifestream to take us to {WorldName}'s market area.",
+            75);
     }
 
     private void BeginCurrentOrder()
@@ -539,21 +560,75 @@ public sealed class ProcurementController : IDisposable
         market.CloseMarketBoard();
         if (IsOnWorld(homeWorld))
         {
-            Delay(ProcurementState.WaitingAfterHomeArrival, "Preparing to return to the summoning bell.", 2_000);
+            Delay(ProcurementState.WaitingAfterHomeArrival, "Preparing to return to the summoning bell.", 3_000);
             return;
         }
-        if (!commandManager.ProcessCommand($"/li {homeWorld}"))
+        var accepted = lifestream.IsAvailable
+            ? lifestream.ChangeWorld(homeWorld)
+            : commandManager.ProcessCommand($"/li {homeWorld}");
+        if (!accepted)
         {
-            Halt("Lifestream did not accept the return-home command.");
+            Halt("Lifestream was busy or did not accept the return-home command.");
             return;
         }
         Wait(ProcurementState.WaitingForHomeWorld, $"Returning to {homeWorld}.", 180);
     }
 
-    private void TravelToSummoningBell()
+    private void PollLocalTravel(string objectName, ProcurementState foundState, bool returningHome)
     {
-        commandManager.ProcessCommand(configuration.Current.MarketBoardTravelCommand);
-        Wait(ProcurementState.FindingSummoningBell, "Finding a summoning bell near the market board.", 90);
+        if (market.FindNearest(objectName).HasValue)
+        {
+            State = foundState;
+            detail = $"Found {objectName}; preparing to approach it.";
+            deadline = DateTimeOffset.UtcNow.AddSeconds(60);
+            return;
+        }
+
+        if (lifestream.IsBusy)
+        {
+            detail = returningHome
+                ? "Lifestream is moving to the home market area."
+                : $"Lifestream is moving to {WorldName}'s market area.";
+            CheckTimeout($"Lifestream did not finish travelling to the market area near {objectName}.");
+            return;
+        }
+
+        if (DateTimeOffset.UtcNow < nextActionAt)
+        {
+            CheckTimeout($"Could not find {objectName} after travelling to the market area.");
+            return;
+        }
+
+        if (localTravelAttempts >= 3)
+        {
+            Halt($"Could not reach a {objectName} after 3 Lifestream market-area attempts. " +
+                 $"Check that '{configuration.Current.MarketBoardTravelCommand}' works in chat and that Lifestream is enabled.");
+            return;
+        }
+
+        localTravelAttempts++;
+        if (!TryExecuteMarketTravel())
+        {
+            nextActionAt = DateTimeOffset.UtcNow.AddSeconds(4);
+            detail = $"Lifestream did not accept market-area attempt {localTravelAttempts}/3; waiting to retry.";
+            log.Add(AutomationLogLevel.Warning, detail);
+            return;
+        }
+
+        nextActionAt = DateTimeOffset.UtcNow.AddSeconds(12);
+        detail = $"Market-area travel attempt {localTravelAttempts}/3 accepted; waiting for {objectName} to load.";
+        log.Add(AutomationLogLevel.Information, detail);
+    }
+
+    private bool TryExecuteMarketTravel()
+    {
+        var command = configuration.Current.MarketBoardTravelCommand.Trim();
+        if (lifestream.IsAvailable && command.StartsWith("/li", StringComparison.OrdinalIgnoreCase))
+        {
+            var arguments = command.Length > 3 ? command[3..].Trim() : string.Empty;
+            return lifestream.ExecuteCommand(arguments);
+        }
+        return commandManager.ProcessCommand(command);
     }
 
     private void FindAndApproach(string objectName, ProcurementState movingState, ProcurementState openedState)
