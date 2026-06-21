@@ -8,7 +8,8 @@ public sealed record ProcurementLedgerEntry(
     uint PurchasedQuantity,
     uint ListedQuantity,
     uint TargetSalePrice,
-    int TargetStackSize)
+    int TargetStackSize,
+    bool IsHighQuality)
 {
     public uint PendingQuantity => PurchasedQuantity > ListedQuantity ? PurchasedQuantity - ListedQuantity : 0;
 }
@@ -16,7 +17,7 @@ public sealed record ProcurementLedgerEntry(
 public sealed class ProcurementLedger
 {
     private readonly object sync = new();
-    private readonly Dictionary<uint, ProcurementLedgerEntry> entries = [];
+    private readonly Dictionary<(uint ItemId, bool IsHighQuality), ProcurementLedgerEntry> entries = [];
 
     public IReadOnlyList<ProcurementLedgerEntry> Snapshot()
     {
@@ -28,9 +29,10 @@ public sealed class ProcurementLedger
     {
         lock (sync)
         {
-            if (entries.TryGetValue(order.ItemId, out var existing))
+            var key = (order.ItemId, order.IsHighQuality);
+            if (entries.TryGetValue(key, out var existing))
             {
-                entries[order.ItemId] = existing with
+                entries[key] = existing with
                 {
                     PurchasedQuantity = existing.PurchasedQuantity + order.Quantity,
                     TargetSalePrice = order.TargetSalePrice,
@@ -39,28 +41,30 @@ public sealed class ProcurementLedger
             }
             else
             {
-                entries[order.ItemId] = new(
-                    order.ItemId, order.ItemName, order.Quantity, 0, order.TargetSalePrice, targetStackSize);
+                entries[key] = new(
+                    order.ItemId, order.ItemName, order.Quantity, 0, order.TargetSalePrice, targetStackSize,
+                    order.IsHighQuality);
             }
         }
     }
 
-    public bool TryGetPending(uint itemId, out ProcurementLedgerEntry? entry)
+    public bool TryGetPending(uint itemId, bool isHighQuality, out ProcurementLedgerEntry? entry)
     {
         lock (sync)
         {
-            entry = entries.GetValueOrDefault(itemId);
+            entry = entries.GetValueOrDefault((itemId, isHighQuality));
             return entry?.PendingQuantity > 0;
         }
     }
 
-    public void MarkListed(uint itemId, uint quantity)
+    public void MarkListed(uint itemId, bool isHighQuality, uint quantity)
     {
         lock (sync)
         {
-            if (!entries.TryGetValue(itemId, out var entry))
+            var key = (itemId, isHighQuality);
+            if (!entries.TryGetValue(key, out var entry))
                 return;
-            entries[itemId] = entry with
+            entries[key] = entry with
             {
                 ListedQuantity = Math.Min(entry.PurchasedQuantity, entry.ListedQuantity + quantity),
             };

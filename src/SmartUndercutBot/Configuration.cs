@@ -6,7 +6,7 @@ namespace SmartUndercutBot;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 10;
+    public int Version { get; set; } = 12;
     public bool AutomationEnabled { get; set; }
     public bool ProcessAllRetainers { get; set; } = true;
     public bool RepeatBellRuns { get; set; }
@@ -17,12 +17,14 @@ public sealed class Configuration : IPluginConfiguration
     public int MinimumDelayMs { get; set; } = 250;
     public int MaximumDelayMs { get; set; } = 450;
     public int MarketRequestTimeoutSeconds { get; set; } = 10;
-    public int MarketRequestCooldownMs { get; set; } = 1200;
+    public int MarketRequestCooldownMs { get; set; } = 1600;
+    public int MarketRequestRetryCount { get; set; } = 2;
+    public int MarketRetryBackoffMs { get; set; } = 2000;
     public int MaximumUpdatesPerSession { get; set; } = 200;
     public bool AutomaticProcurementEnabled { get; set; }
     public bool AllowAutomaticPurchases { get; set; }
     public bool AllowAutomaticListing { get; set; }
-    public int ProcurementIntervalMinutes { get; set; } = 30;
+    public int ProcurementIntervalMinutes { get; set; } = 10;
     public uint ProcurementBudget { get; set; } = 5_000_000;
     public int ProcurementTargetSaleSlots { get; set; } = 60;
     public int ProcurementInventoryReserve { get; set; } = 10;
@@ -124,14 +126,54 @@ public sealed class Configuration : IPluginConfiguration
             }
             Version = 10;
         }
+        if (Version < 11)
+        {
+            // Repeated Compare Prices requests can be rejected by the game even when
+            // the previous request completed. Give distinct items more room and retry
+            // transient failures instead of silently abandoning the listing.
+            if (MarketRequestCooldownMs <= 1200)
+                MarketRequestCooldownMs = 1600;
+            if (MarketRequestRetryCount == 0)
+                MarketRequestRetryCount = 2;
+            if (MarketRetryBackoffMs == 0)
+                MarketRetryBackoffMs = 2000;
+            Version = 11;
+        }
+        if (Version < 12)
+        {
+            ProcurementRules ??= [];
+            var removedDefaults = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                "Grade 3 Gemdraught of Strength",
+                "Grade 3 Gemdraught of Dexterity",
+                "Grade 3 Gemdraught of Intelligence",
+                "Grade 3 Gemdraught of Mind",
+                "Mate Cookie",
+                "Mollete",
+                "Popoto Potage",
+            };
+            ProcurementRules.RemoveAll(x => removedDefaults.Contains(x.ItemName));
+            foreach (var rule in ProcurementRules.Where(x =>
+                         string.Equals(x.ItemName, "Caramel Popcorn", StringComparison.OrdinalIgnoreCase) ||
+                         x.ItemName?.StartsWith("Grade 4 Gemdraught of ", StringComparison.OrdinalIgnoreCase) == true))
+            {
+                rule.AllowHighQuality = true;
+                rule.RequireHighQuality = true;
+            }
+            if (ProcurementIntervalMinutes == 30)
+                ProcurementIntervalMinutes = 10;
+            Version = 12;
+        }
         MinimumDelayMs = Math.Clamp(MinimumDelayMs, 100, 60_000);
         MaximumDelayMs = Math.Clamp(MaximumDelayMs, MinimumDelayMs, 60_000);
         MarketRequestTimeoutSeconds = Math.Clamp(MarketRequestTimeoutSeconds, 2, 60);
         MarketRequestCooldownMs = Math.Clamp(MarketRequestCooldownMs, 1000, 10_000);
+        MarketRequestRetryCount = Math.Clamp(MarketRequestRetryCount, 0, 5);
+        MarketRetryBackoffMs = Math.Clamp(MarketRetryBackoffMs, 1000, 10_000);
         RepeatMinimumMinutes = Math.Clamp(RepeatMinimumMinutes, 5, 1_440);
         RepeatMaximumMinutes = Math.Clamp(RepeatMaximumMinutes, RepeatMinimumMinutes, 1_440);
         MaximumUpdatesPerSession = Math.Clamp(MaximumUpdatesPerSession, 1, 200);
-        ProcurementIntervalMinutes = Math.Clamp(ProcurementIntervalMinutes, 15, 1_440);
+        ProcurementIntervalMinutes = Math.Clamp(ProcurementIntervalMinutes, 5, 1_440);
         ProcurementBudget = Math.Clamp(ProcurementBudget, 1_000u, 100_000_000u);
         ProcurementTargetSaleSlots = Math.Clamp(ProcurementTargetSaleSlots, 1, 200);
         ProcurementInventoryReserve = Math.Clamp(ProcurementInventoryReserve, 1, 100);
@@ -148,6 +190,8 @@ public sealed class Configuration : IPluginConfiguration
             rule.TargetStackSize = Math.Clamp(rule.TargetStackSize, 1, 999);
             rule.MaximumSaleSlots = Math.Clamp(rule.MaximumSaleSlots, 1, 60);
             rule.MinimumWeeklyUnitsSold = Math.Clamp(rule.MinimumWeeklyUnitsSold, 0, 1_000_000);
+            if (rule.RequireHighQuality)
+                rule.AllowHighQuality = true;
         }
         GlobalRule ??= new PricingRule();
         PerItemRules ??= [];

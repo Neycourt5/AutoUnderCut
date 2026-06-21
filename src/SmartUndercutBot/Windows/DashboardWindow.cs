@@ -448,6 +448,21 @@ public sealed class DashboardWindow : Window
 
         ImGui.Separator();
         var config = configuration.Current;
+        var fullLoop = config.AutomationEnabled && config.ProcessAllRetainers && config.RepeatBellRuns &&
+                       config.AllowAutomaticWrites && config.AutomaticProcurementEnabled &&
+                       config.AllowAutomaticPurchases && config.AllowAutomaticListing;
+        if (ImGui.Checkbox("Enable complete AFK reprice + restock loop", ref fullLoop))
+        {
+            config.AutomationEnabled = fullLoop;
+            config.ProcessAllRetainers = fullLoop;
+            config.RepeatBellRuns = fullLoop;
+            config.AllowAutomaticWrites = fullLoop;
+            config.AutomaticProcurementEnabled = fullLoop;
+            config.AllowAutomaticPurchases = fullLoop;
+            config.AllowAutomaticListing = fullLoop;
+            SaveConfiguration();
+        }
+        ImGui.TextWrapped("When enabled, remain idle with the summoning-bell retainer list open. The plugin reprices all available retainers, detects newly empty sale slots, scans guarded Universalis deals, travels with Lifestream, walks with vnavmesh, buys only after live revalidation, returns home, and lists the purchased stock.");
         var automatic = config.AutomaticProcurementEnabled;
         if (ImGui.Checkbox("Run procurement automatically while idle at the bell", ref automatic))
         {
@@ -478,7 +493,7 @@ public sealed class DashboardWindow : Window
             configurationDirty = true;
         }
         var interval = config.ProcurementIntervalMinutes;
-        if (InputInt("Minutes between procurement scans", ref interval, 15, 1_440))
+        if (InputInt("Minutes between procurement scans", ref interval, 5, 1_440))
         {
             config.ProcurementIntervalMinutes = interval;
             configurationDirty = true;
@@ -522,7 +537,7 @@ public sealed class DashboardWindow : Window
 
         ImGui.Separator();
         ImGui.TextUnformatted("Items");
-        if (ImGui.Button("Add favorite food + gemdraughts"))
+        if (ImGui.Button("Add Grade 4 gemdraughts + Caramel Popcorn"))
         {
             foreach (var rule in universalis.CreateFavoriteRules())
             {
@@ -556,7 +571,7 @@ public sealed class DashboardWindow : Window
             ImGui.TableSetupColumn("Stack", ImGuiTableColumnFlags.WidthFixed, 70);
             ImGui.TableSetupColumn("Max slots", ImGuiTableColumnFlags.WidthFixed, 75);
             ImGui.TableSetupColumn("Weekly sales", ImGuiTableColumnFlags.WidthFixed, 90);
-            ImGui.TableSetupColumn("HQ", ImGuiTableColumnFlags.WidthFixed, 35);
+            ImGui.TableSetupColumn("HQ only", ImGuiTableColumnFlags.WidthFixed, 55);
             ImGui.TableSetupColumn("", ImGuiTableColumnFlags.WidthFixed, 45);
             ImGui.TableHeadersRow();
             var removeIndex = -1;
@@ -586,8 +601,14 @@ public sealed class DashboardWindow : Window
                 ImGui.SetNextItemWidth(-1);
                 if (InputInt("##velocity", ref velocity, 0, 1_000_000)) { rule.MinimumWeeklyUnitsSold = velocity; configurationDirty = true; }
                 ImGui.TableNextColumn();
-                var hq = rule.AllowHighQuality;
-                if (ImGui.Checkbox("##hq", ref hq)) { rule.AllowHighQuality = hq; configurationDirty = true; }
+                var hqOnly = rule.RequireHighQuality;
+                if (ImGui.Checkbox("##hq", ref hqOnly))
+                {
+                    rule.RequireHighQuality = hqOnly;
+                    if (hqOnly)
+                        rule.AllowHighQuality = true;
+                    configurationDirty = true;
+                }
                 ImGui.TableNextColumn();
                 if (ImGui.SmallButton("X")) removeIndex = index;
                 ImGui.PopID();
@@ -665,6 +686,18 @@ public sealed class DashboardWindow : Window
             config.MarketRequestCooldownMs = requestCooldown;
             configurationDirty = true;
         }
+        var retryCount = config.MarketRequestRetryCount;
+        if (InputInt("Market request retries", ref retryCount, 0, 5))
+        {
+            config.MarketRequestRetryCount = retryCount;
+            configurationDirty = true;
+        }
+        var retryBackoff = config.MarketRetryBackoffMs;
+        if (InputInt("Market retry backoff (ms)", ref retryBackoff, 1000, 10_000))
+        {
+            config.MarketRetryBackoffMs = retryBackoff;
+            configurationDirty = true;
+        }
         var maximumUpdates = config.MaximumUpdatesPerSession;
         if (InputInt("Maximum updates per session", ref maximumUpdates, 1, 200))
         {
@@ -682,7 +715,7 @@ public sealed class DashboardWindow : Window
         if (ImGui.Button("Cancel pending live market request"))
             marketData.ClearCache();
         ImGui.Spacing();
-        ImGui.TextWrapped("Every listing uses a fresh Compare Prices result, with a dedicated cooldown between market requests. Any logout, player movement, unexpected UI state, changed listing, malformed inventory, or failed server confirmation halts or skips work before another write is attempted.");
+        ImGui.TextWrapped("A fresh Compare Prices result is reused for matching same-item rows for up to 30 seconds. Distinct items use the configured cooldown, and transient market-loading failures retry the same row with backoff. Any logout, player movement, unexpected UI state, changed listing, malformed inventory, or failed server confirmation stops or skips work before another write is attempted.");
         DrawSaveButton();
     }
 

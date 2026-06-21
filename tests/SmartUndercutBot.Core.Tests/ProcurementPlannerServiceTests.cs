@@ -54,4 +54,33 @@ public sealed class ProcurementPlannerServiceTests
 
         Assert.Equal(3, plan.Orders.Count);
     }
+
+    [Fact]
+    public void HighQualityOnlyRuleRejectsNqDealsAndUsesHqHistory()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var market = new ProcurementMarketItem(1, "Caramel Popcorn",
+            [
+                new(1, 10, 20, "Alpha", 1, 100, 99, false),
+                new(1, 11, 21, "Alpha", 1, 1_000, 99, true),
+            ],
+            [
+                new(200, 999, false, now),
+                new(2_000, 99, true, now),
+            ]);
+        var rule = new ProcurementRule
+        {
+            ItemId = 1,
+            ItemName = market.ItemName,
+            AllowHighQuality = true,
+            RequireHighQuality = true,
+        };
+
+        var plan = planner.BuildPlan(new([market], [rule], 200_000, 5, 5, 20m, 100));
+
+        var order = Assert.Single(plan.Orders);
+        Assert.True(order.IsHighQuality);
+        Assert.Equal(1_000u, order.PricePerUnit);
+        Assert.Equal(2_000u, order.TargetSalePrice);
+    }
 }

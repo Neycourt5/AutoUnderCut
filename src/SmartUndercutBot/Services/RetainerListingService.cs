@@ -13,7 +13,13 @@ namespace SmartUndercutBot.Services;
 
 public sealed record SafetySnapshot(bool IsSafe, string Reason);
 public sealed record PriceUpdateResult(bool Succeeded, string Message);
-public sealed record PendingAutoListing(uint ItemId, string ItemName, uint Quantity, uint UnitPrice, short MarketSlot);
+public sealed record PendingAutoListing(
+    uint ItemId,
+    string ItemName,
+    uint Quantity,
+    uint UnitPrice,
+    short MarketSlot,
+    bool IsHighQuality);
 
 public interface IRetainerListingService
 {
@@ -450,8 +456,10 @@ public sealed unsafe class RetainerListingService : IRetainerListingService
             for (ushort sourceSlot = 0; sourceSlot < inventory->Size; sourceSlot++)
             {
                 var item = inventory->GetInventorySlot(sourceSlot);
+                var isHighQuality = item != null &&
+                                    (item->Flags & InventoryItem.ItemFlags.HighQuality) != 0;
                 if (item == null || item->ItemId == 0 || item->Quantity <= 0 ||
-                    !ledger.TryGetPending(item->ItemId, out var entry) || entry is null)
+                    !ledger.TryGetPending(item->ItemId, isHighQuality, out var entry) || entry is null)
                     continue;
                 var quantity = Math.Min((uint)item->Quantity, Math.Min(entry.PendingQuantity, (uint)entry.TargetStackSize));
                 if (quantity == 0 || entry.TargetSalePrice == 0)
@@ -459,7 +467,8 @@ public sealed unsafe class RetainerListingService : IRetainerListingService
 
                 manager->MoveToRetainerMarket(type, sourceSlot, InventoryType.RetainerMarket,
                     (ushort)destinationSlot, quantity, entry.TargetSalePrice);
-                pending = new(entry.ItemId, entry.ItemName, quantity, entry.TargetSalePrice, destinationSlot);
+                pending = new(entry.ItemId, entry.ItemName, quantity, entry.TargetSalePrice, destinationSlot,
+                    entry.IsHighQuality);
                 return true;
             }
         }
@@ -474,6 +483,7 @@ public sealed unsafe class RetainerListingService : IRetainerListingService
             return false;
         var item = market->GetInventorySlot(pending.MarketSlot);
         return item != null && item->ItemId == pending.ItemId && item->Quantity == pending.Quantity &&
+               ((item->Flags & InventoryItem.ItemFlags.HighQuality) != 0) == pending.IsHighQuality &&
                manager->GetRetainerMarketPrice(pending.MarketSlot) == pending.UnitPrice;
     }
 

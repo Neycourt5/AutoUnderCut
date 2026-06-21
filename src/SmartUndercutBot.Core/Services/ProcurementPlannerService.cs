@@ -27,7 +27,9 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
                 continue;
 
             var sales = market.RecentSales
-                .Where(x => rule.AllowHighQuality || !x.IsHighQuality)
+                .Where(x => rule.RequireHighQuality
+                    ? x.IsHighQuality
+                    : rule.AllowHighQuality || !x.IsHighQuality)
                 .Where(x => x.PricePerUnit > 0 && x.SoldAt >= DateTimeOffset.UtcNow.AddDays(-7))
                 .ToArray();
             if (sales.Sum(x => (long)x.Quantity) < rule.MinimumWeeklyUnitsSold)
@@ -51,6 +53,7 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
             {
                 if (listing.ItemId != market.ItemId || listing.PricePerUnit == 0 || listing.PricePerUnit > ceiling ||
                     listing.Quantity == 0 || listing.IsHighQuality && !rule.AllowHighQuality ||
+                    rule.RequireHighQuality && !listing.IsHighQuality ||
                     listing.Quantity > Math.Max(1, rule.TargetStackSize))
                     continue;
 

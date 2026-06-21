@@ -20,18 +20,11 @@ public sealed class UniversalisService : IUniversalisService, IDisposable
 {
     private static readonly string[] FavoriteNames =
     [
-        "Grade 3 Gemdraught of Strength",
         "Grade 4 Gemdraught of Strength",
-        "Grade 3 Gemdraught of Dexterity",
         "Grade 4 Gemdraught of Dexterity",
-        "Grade 3 Gemdraught of Intelligence",
         "Grade 4 Gemdraught of Intelligence",
-        "Grade 3 Gemdraught of Mind",
         "Grade 4 Gemdraught of Mind",
-        "Mate Cookie",
-        "Mollete",
         "Caramel Popcorn",
-        "Popoto Potage",
     ];
 
     private readonly HttpClient httpClient = new() { Timeout = TimeSpan.FromSeconds(30) };
@@ -69,6 +62,8 @@ public sealed class UniversalisService : IUniversalisService, IDisposable
                 TargetStackSize = 99,
                 MaximumSaleSlots = 8,
                 MinimumWeeklyUnitsSold = 20,
+                AllowHighQuality = true,
+                RequireHighQuality = true,
             })
             .OrderBy(x => x.ItemName)
             .ToArray();

@@ -61,6 +61,7 @@ public sealed class ProcurementController : IDisposable
     private int worldIndex;
     private int orderIndex;
     private int inventoryBefore;
+    private int lastScannedFreeSaleSlots = -1;
     private bool executeAfterScan;
     private string homeWorld = string.Empty;
     private string detail = "Procurement is idle.";
@@ -228,7 +229,10 @@ public sealed class ProcurementController : IDisposable
                 if (retainerListings.IsRetainerListOpen)
                 {
                     Complete("Purchasing finished; the retainer run will distribute and list purchased stacks.");
-                    repricing.StartNow();
+                    // AutomationController observes the bell first in the framework
+                    // update order and may already have started this pass.
+                    if (!repricing.IsActive)
+                        repricing.StartNow();
                 }
                 else
                     CheckTimeout("Timed out opening the summoning-bell retainer list.");
@@ -247,15 +251,17 @@ public sealed class ProcurementController : IDisposable
         }
         var config = configuration.Current;
         var freeSaleSlots = repricing.LastKnownFreeSaleSlots ?? config.ProcurementTargetSaleSlots;
+        var plannedSaleSlots = Math.Min(freeSaleSlots, config.ProcurementTargetSaleSlots);
         var freeInventorySlots = Math.Max(0, (int)market.FreeInventorySlots - config.ProcurementInventoryReserve);
         Plan = planner.BuildPlan(new(
             scanTask.Result,
             config.ProcurementRules,
             Math.Min(config.ProcurementBudget, market.Gil),
-            Math.Min(freeSaleSlots, config.ProcurementTargetSaleSlots),
+            plannedSaleSlots,
             freeInventorySlots,
             config.ProcurementMinimumRoiPercent,
             config.ProcurementMinimumProfitPerUnit));
+        lastScannedFreeSaleSlots = plannedSaleSlots;
         scanTask = null;
         nextAutomaticScan = DateTimeOffset.UtcNow.AddMinutes(config.ProcurementIntervalMinutes);
         State = ProcurementState.PlanReady;
@@ -524,8 +530,18 @@ public sealed class ProcurementController : IDisposable
 
     private void TryAutomaticStart()
     {
-        if (!configuration.Current.AutomaticProcurementEnabled || DateTimeOffset.UtcNow < nextAutomaticScan ||
-            !retainerListings.IsRetainerListOpen || repricing.IsActive)
+        if (!configuration.Current.AutomaticProcurementEnabled || !retainerListings.IsRetainerListOpen ||
+            repricing.IsActive)
+            return;
+
+        // A completed retainer pass gives us an authoritative free-slot count. Scan
+        // immediately when that capacity changes (a listing sold), otherwise use the
+        // configured periodic interval while the character remains idle at the bell.
+        var freeSaleSlots = repricing.LastKnownFreeSaleSlots;
+        var newlyAvailableCapacity = freeSaleSlots is > 0 &&
+                                     Math.Min(freeSaleSlots.Value, configuration.Current.ProcurementTargetSaleSlots) !=
+                                     lastScannedFreeSaleSlots;
+        if (!newlyAvailableCapacity && DateTimeOffset.UtcNow < nextAutomaticScan)
             return;
         nextAutomaticScan = DateTimeOffset.UtcNow.AddMinutes(configuration.Current.ProcurementIntervalMinutes);
         StartScan(true);

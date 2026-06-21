@@ -20,6 +20,7 @@ public enum AutomationState
     WaitingForContextMenu,
     WaitingBeforeOpeningPriceEditor,
     WaitingForPriceEditor,
+    WaitingForPriceEditorStable,
     WaitingBeforeMarketRequest,
     RequestingMarketData,
     EvaluatingPrice,
@@ -54,6 +55,7 @@ public sealed record AutomationStatus(
 
 public sealed class AutomationController : IDisposable
 {
+    private static readonly TimeSpan SameItemMarketReuseWindow = TimeSpan.FromSeconds(30);
     private readonly IFramework framework;
     private readonly IRetainerListingService retainerListings;
     private readonly IMarketDataService marketData;
@@ -71,6 +73,7 @@ public sealed class AutomationController : IDisposable
     private CancellationTokenSource? sessionCancellation;
     private Task<MarketSnapshot>? marketTask;
     private MarketSnapshot? currentMarket;
+    private MarketSnapshot? reusableMarket;
     private PriceDecision? currentDecision;
     private PendingAutoListing? pendingAutoListing;
     private Vector3 sessionPosition;
@@ -79,6 +82,8 @@ public sealed class AutomationController : IDisposable
     private DateTimeOffset verificationDeadline;
     private DateTimeOffset lastMarketRequestAt;
     private int currentIndex;
+    private int marketRequestAttempts;
+    private bool currentRowMapped;
     private int updatesSubmitted;
     private int retainerIndex;
     private int retainerCount;
@@ -246,9 +251,13 @@ public sealed class AutomationController : IDisposable
                 break;
             case AutomationState.WaitingForPriceEditor:
                 if (retainerListings.IsPriceEditorOpen)
-                    PrepareCurrentMarket();
+                    Schedule(AutomationState.WaitingForPriceEditorStable,
+                        $"Waiting for the Adjust Price fields for {queue[currentIndex].Listing.ItemName}.");
                 else
                     CheckTimeout("Timed out waiting for the Adjust Price window.");
+                break;
+            case AutomationState.WaitingForPriceEditorStable:
+                if (DelayElapsed()) PrepareCurrentMarket();
                 break;
             case AutomationState.WaitingBeforeMarketRequest:
                 if (DelayElapsed()) RequestCurrentMarket();
@@ -378,6 +387,7 @@ public sealed class AutomationController : IDisposable
         retainerIndex = 0;
         retainerCount = 0;
         currentMarket = null;
+        reusableMarket = null;
         currentDecision = null;
         pendingAutoListing = null;
         marketTask = null;
@@ -499,7 +509,8 @@ public sealed class AutomationController : IDisposable
             return;
         }
 
-        procurementLedger.MarkListed(pendingAutoListing.ItemId, pendingAutoListing.Quantity);
+        procurementLedger.MarkListed(
+            pendingAutoListing.ItemId, pendingAutoListing.IsHighQuality, pendingAutoListing.Quantity);
         log.Add(AutomationLogLevel.Information,
             $"AUTO-LISTED {pendingAutoListing.ItemName} x{pendingAutoListing.Quantity} at {pendingAutoListing.UnitPrice:N0} gil on {retainerListings.ActiveRetainerName}.");
         pendingAutoListing = null;
@@ -513,6 +524,8 @@ public sealed class AutomationController : IDisposable
             FinishCurrentRetainer();
             return;
         }
+        marketRequestAttempts = 0;
+        currentRowMapped = false;
         ReplaceCurrent(queue[currentIndex] with { Status = "Opening listing" });
         Schedule(AutomationState.WaitingBeforeOpeningListing, $"Opening {queue[currentIndex].Listing.ItemName}.");
     }
@@ -539,11 +552,19 @@ public sealed class AutomationController : IDisposable
 
     private void PrepareCurrentMarket()
     {
-        var entry = queue[currentIndex];
         CaptureSellerFee();
         currentMarket = null;
         currentDecision = null;
         marketTask = null;
+
+        // Mapping immediately when the addon first appears was too early, but after
+        // the stabilization delay it normally succeeds. Doing it before market I/O
+        // keeps duplicate stacks aligned even if the price request later times out.
+        TryMapCurrentPriceEditor(0);
+        var entry = queue[currentIndex];
+
+        if (TryReuseCurrentMarket(entry))
+            return;
 
         var cooldown = TimeSpan.FromMilliseconds(configuration.Current.MarketRequestCooldownMs);
         var earliestRequestAt = lastMarketRequestAt + cooldown;
@@ -581,6 +602,7 @@ public sealed class AutomationController : IDisposable
             return;
         }
         ReplaceCurrent(entry with { Status = "Reading live market" });
+        marketRequestAttempts++;
         marketTask = marketData.GetSnapshotAsync(entry.Listing.ItemId, sessionCancellation!.Token);
         if (!retainerListings.RequestComparePrices())
         {
@@ -601,10 +623,41 @@ public sealed class AutomationController : IDisposable
         {
             var message = marketTask.Exception?.GetBaseException().Message ?? "Live market request timed out.";
             var failedEntry = queue[currentIndex];
+
+            if (marketRequestAttempts <= configuration.Current.MarketRequestRetryCount &&
+                retainerListings.IsPriceEditorOpen)
+            {
+                TryMapCurrentPriceEditor(0);
+                var totalAttempts = configuration.Current.MarketRequestRetryCount + 1;
+                var retryDelay = configuration.Current.MarketRetryBackoffMs * marketRequestAttempts;
+                var cooldownAt = lastMarketRequestAt.AddMilliseconds(configuration.Current.MarketRequestCooldownMs);
+                nextActionAt = DateTimeOffset.UtcNow.AddMilliseconds(retryDelay);
+                if (cooldownAt > nextActionAt)
+                    nextActionAt = cooldownAt;
+                marketData.ClearCache();
+                marketTask = null;
+                currentMarket = null;
+                ReplaceCurrent(failedEntry with
+                {
+                    Status = $"Retrying market data ({marketRequestAttempts + 1}/{totalAttempts})",
+                });
+                log.Add(AutomationLogLevel.Warning,
+                    $"{failedEntry.Listing.ItemName}: market prices did not load on attempt " +
+                    $"{marketRequestAttempts}/{totalAttempts}; retrying this row in " +
+                    $"{Math.Ceiling((nextActionAt - DateTimeOffset.UtcNow).TotalSeconds):N0}s. {message}");
+                Transition(AutomationState.WaitingBeforeMarketRequest,
+                    $"Waiting to retry live prices for {failedEntry.Listing.ItemName}.");
+                return;
+            }
+
+            TryMapCurrentPriceEditor(0);
+            failedEntry = queue[currentIndex];
             ReplaceCurrent(failedEntry with { Status = "Market data failed" });
-            log.Add(AutomationLogLevel.Error, $"{failedEntry.Listing.ItemName}: {message}");
+            log.Add(AutomationLogLevel.Error,
+                $"{failedEntry.Listing.ItemName}: market prices failed after {marketRequestAttempts} attempt(s); skipped. {message}");
             retainerListings.CancelPriceEditor();
-            Schedule(AutomationState.WaitingAfterCommit, "Market data failed; moving to the next listing.");
+            Schedule(AutomationState.WaitingAfterCommit,
+                "Market data failed after retries; moving to the next listing.");
             return;
         }
 
@@ -623,7 +676,7 @@ public sealed class AutomationController : IDisposable
         // RetainerSell's item fields are not consistently populated when the editor
         // first becomes visible. They are stable after Compare Prices has returned,
         // so map the visible row to its backing market slot here instead.
-        if (!retainerListings.TryResolveOpenPriceEditor(currentMarket.ItemId, processedSlots, out var resolved) || resolved is null)
+        if (!TryMapCurrentPriceEditor(currentMarket.ItemId))
         {
             ReplaceCurrent(entry with { Status = "Could not map visible row" });
             log.Add(AutomationLogLevel.Error,
@@ -633,12 +686,50 @@ public sealed class AutomationController : IDisposable
             return;
         }
 
-        queue[currentIndex] = entry with { Listing = resolved, Status = "Matched visible row" };
-        processedSlots.Add(resolved.Slot);
+        var resolved = queue[currentIndex].Listing;
+        queue[currentIndex] = queue[currentIndex] with { Status = "Matched visible row" };
+        reusableMarket = currentMarket;
         log.Add(AutomationLogLevel.Debug,
             $"Matched visible row {currentIndex + 1}, live item #{currentMarket.ItemId}, to {resolved.ItemName}, " +
             $"market slot {resolved.Slot}; aggregated {currentMarket.Listings.Count} live listing(s).");
         Transition(AutomationState.EvaluatingPrice, $"Evaluating {queue[currentIndex].Listing.ItemName}.");
+    }
+
+    private bool TryReuseCurrentMarket(AutomationQueueEntry entry)
+    {
+        var candidate = reusableMarket;
+        if (candidate is null || candidate.ItemId != entry.Listing.ItemId ||
+            DateTimeOffset.UtcNow - candidate.CapturedAt > SameItemMarketReuseWindow)
+            return false;
+
+        // If the stable editor still could not be mapped, fall back to a normal Compare
+        // Prices request; never skip a row merely because the fast path was unavailable.
+        if (!currentRowMapped)
+            return false;
+
+        var resolved = queue[currentIndex].Listing;
+        var cachedMarket = candidate with { IsFromCache = true };
+        currentMarket = cachedMarket;
+        queue[currentIndex] = entry with { Listing = resolved, Status = "Reused same-item market data" };
+        log.Add(AutomationLogLevel.Debug,
+            $"Matched visible row {currentIndex + 1} to {resolved.ItemName}, market slot {resolved.Slot}; " +
+            $"reused {cachedMarket.Listings.Count} listing(s) from the recent same-item search.");
+        Transition(AutomationState.EvaluatingPrice,
+            $"Reusing recent live prices for {resolved.ItemName}.");
+        return true;
+    }
+
+    private bool TryMapCurrentPriceEditor(uint itemId)
+    {
+        if (currentRowMapped)
+            return itemId == 0 || queue[currentIndex].Listing.ItemId == itemId;
+        if (!retainerListings.TryResolveOpenPriceEditor(itemId, processedSlots, out var resolved) || resolved is null)
+            return false;
+
+        queue[currentIndex] = queue[currentIndex] with { Listing = resolved, Status = "Mapped visible row" };
+        processedSlots.Add(resolved.Slot);
+        currentRowMapped = true;
+        return true;
     }
 
     private void EvaluateCurrentListing()
@@ -917,6 +1008,7 @@ public sealed class AutomationController : IDisposable
         AutomationState.WaitingAfterAutoListing or
         AutomationState.WaitingBeforeOpeningListing or
         AutomationState.WaitingBeforeOpeningPriceEditor or
+        AutomationState.WaitingForPriceEditorStable or
         AutomationState.WaitingBeforeMarketRequest or
         AutomationState.WaitingBeforeCommit or
         AutomationState.WaitingAfterCommit or

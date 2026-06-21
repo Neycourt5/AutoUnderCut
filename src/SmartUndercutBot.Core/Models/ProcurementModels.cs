@@ -10,6 +10,7 @@ public sealed class ProcurementRule
     public int TargetStackSize { get; set; } = 99;
     public int MaximumSaleSlots { get; set; } = 8;
     public int MinimumWeeklyUnitsSold { get; set; } = 20;
+    public bool RequireHighQuality { get; set; }
 }
 
 public sealed record ProcurementMarketListing(
