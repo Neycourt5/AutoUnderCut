@@ -4,6 +4,7 @@ using Dalamud.Interface.Utility;
 using Dalamud.Interface.Windowing;
 using SmartUndercutBot.Automation;
 using SmartUndercutBot.Core.Models;
+using SmartUndercutBot.Core.Services;
 using SmartUndercutBot.Services;
 
 namespace SmartUndercutBot.Windows;
@@ -481,7 +482,7 @@ public sealed class DashboardWindow : Window
                 "The current retainer/procurement operation must finish first.");
 
         var stock = bagListing.Stock;
-        if (ImGui.BeginTable("CuratedBagStock", 6,
+        if (ImGui.BeginTable("CuratedBagStock", 7,
                 ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.ScrollY | ImGuiTableFlags.Resizable,
                 new Vector2(0, 220 * ImGuiHelpers.GlobalScale)))
         {
@@ -490,6 +491,7 @@ public sealed class DashboardWindow : Window
             ImGui.TableSetupColumn("Bag total", ImGuiTableColumnFlags.WidthFixed, 80);
             ImGui.TableSetupColumn("Keep", ImGuiTableColumnFlags.WidthFixed, 70);
             ImGui.TableSetupColumn("List", ImGuiTableColumnFlags.WidthFixed, 85);
+            ImGui.TableSetupColumn("Price floor", ImGuiTableColumnFlags.WidthFixed, 85);
             ImGui.TableSetupColumn("Auto price", ImGuiTableColumnFlags.WidthFixed, 90);
             ImGui.TableHeadersRow();
             foreach (var item in stock)
@@ -500,8 +502,11 @@ public sealed class DashboardWindow : Window
                 ImGui.TableNextColumn(); ImGui.TextUnformatted(item.TotalQuantity.ToString("N0"));
                 ImGui.TableNextColumn(); ImGui.TextUnformatted(item.ReservedQuantity.ToString("N0"));
                 ImGui.TableNextColumn(); ImGui.TextUnformatted($"{item.StackCount} x99");
+                ImGui.TableNextColumn(); ImGui.TextUnformatted(item.EffectiveFloor.ToString("N0"));
                 ImGui.TableNextColumn();
-                ImGui.TextUnformatted(item.SuggestedPrice is { } price ? $"{price:N0}" : "scan needed");
+                ImGui.TextUnformatted(item.SuggestedPrice is not { } price
+                    ? "scan needed"
+                    : price == PricingStrategyService.MaximumListingPrice ? "live check" : $"{price:N0}");
             }
             ImGui.EndTable();
         }

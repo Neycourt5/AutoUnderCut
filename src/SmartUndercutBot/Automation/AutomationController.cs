@@ -66,6 +66,7 @@ public sealed class AutomationController : IDisposable
     private readonly AutomationLog log;
     private readonly List<AutomationQueueEntry> queue = [];
     private readonly HashSet<short> processedSlots = [];
+    private readonly HashSet<short> freshlyRepricedAutoListingSlots = [];
     private readonly List<int> retainerRows = [];
     private readonly Dictionary<(ulong RetainerId, short Slot), PortfolioListingEstimate> portfolioListings = [];
     private readonly Dictionary<ulong, PortfolioRetainerBalance> portfolioRetainers = [];
@@ -96,6 +97,7 @@ public sealed class AutomationController : IDisposable
     private bool bellSession;
     private bool handledBell;
     private bool handledSellList;
+    private bool returnToAutoListingAfterCurrent;
     private string detail = "Open a summoning bell to begin.";
 
     public AutomationController(
@@ -381,6 +383,7 @@ public sealed class AutomationController : IDisposable
         sessionCancellation = new CancellationTokenSource();
         queue.Clear();
         processedSlots.Clear();
+        freshlyRepricedAutoListingSlots.Clear();
         retainerRows.Clear();
         currentIndex = 0;
         updatesSubmitted = 0;
@@ -390,6 +393,7 @@ public sealed class AutomationController : IDisposable
         reusableMarket = null;
         currentDecision = null;
         pendingAutoListing = null;
+        returnToAutoListingAfterCurrent = false;
         marketTask = null;
         lastMarketRequestAt = DateTimeOffset.MinValue;
         listingsSeenAcrossRetainers = 0;
@@ -448,8 +452,10 @@ public sealed class AutomationController : IDisposable
         CapturePortfolioListings(listings);
         queue.Clear();
         processedSlots.Clear();
-        queue.AddRange(listings.Select((listing, index) => new AutomationQueueEntry(index, listing, "Queued")));
-        listingsSeenAcrossRetainers += queue.Count;
+        queue.AddRange(listings.Select((listing, index) => (listing, index))
+            .Where(x => !freshlyRepricedAutoListingSlots.Contains(x.listing.Slot))
+            .Select(x => new AutomationQueueEntry(x.index, x.listing, "Queued")));
+        listingsSeenAcrossRetainers += listings.Count;
         currentIndex = 0;
         handledSellList = true;
         log.Add(AutomationLogLevel.Information,
@@ -509,12 +515,28 @@ public sealed class AutomationController : IDisposable
             return;
         }
 
-        procurementLedger.MarkListed(
-            pendingAutoListing.ItemId, pendingAutoListing.IsHighQuality, pendingAutoListing.Quantity);
+        var verified = pendingAutoListing;
+        procurementLedger.MarkListed(verified.ItemId, verified.IsHighQuality, verified.Quantity);
         log.Add(AutomationLogLevel.Information,
-            $"AUTO-LISTED {pendingAutoListing.ItemName} x{pendingAutoListing.Quantity} at {pendingAutoListing.UnitPrice:N0} gil on {retainerListings.ActiveRetainerName}.");
+            $"AUTO-LISTED {verified.ItemName} x{verified.Quantity} at safe placeholder {verified.UnitPrice:N0} gil on {retainerListings.ActiveRetainerName}; opening it for a live price check now.");
         pendingAutoListing = null;
-        Transition(AutomationState.ReadingListings, "Looking for another purchased stack to list.");
+
+        var listings = retainerListings.ReadCurrentListings();
+        var rowIndex = listings.ToList().FindIndex(x => x.Slot == verified.MarketSlot && x.ItemId == verified.ItemId);
+        if (rowIndex < 0)
+        {
+            log.Add(AutomationLogLevel.Error,
+                $"AUTO-LIST LIVE CHECK DEFERRED {verified.ItemName}: could not locate the verified sale row; the full retainer pass will retry it.");
+            Transition(AutomationState.ReadingListings, "Could not isolate the new row; continuing with the full retainer pass.");
+            return;
+        }
+
+        queue.Clear();
+        processedSlots.Clear();
+        queue.Add(new AutomationQueueEntry(rowIndex, listings[rowIndex], "Queued for immediate live pricing"));
+        currentIndex = 0;
+        returnToAutoListingAfterCurrent = true;
+        BeginCurrentListing();
     }
 
     private void BeginCurrentListing()
@@ -525,16 +547,18 @@ public sealed class AutomationController : IDisposable
             return;
         }
         marketRequestAttempts = 0;
-        currentRowMapped = false;
+        currentRowMapped = returnToAutoListingAfterCurrent;
+        if (currentRowMapped)
+            processedSlots.Add(queue[currentIndex].Listing.Slot);
         ReplaceCurrent(queue[currentIndex] with { Status = "Opening listing" });
         Schedule(AutomationState.WaitingBeforeOpeningListing, $"Opening {queue[currentIndex].Listing.ItemName}.");
     }
 
     private void OpenCurrentListing()
     {
-        if (!retainerListings.OpenListingContextMenu(currentIndex))
+        if (!retainerListings.OpenListingContextMenu(queue[currentIndex].Index))
         {
-            Halt($"Could not open listing {currentIndex + 1}.");
+            Halt($"Could not open listing {queue[currentIndex].Index + 1}.");
             return;
         }
         WaitFor(AutomationState.WaitingForContextMenu, "Waiting for the listing menu.");
@@ -735,11 +759,29 @@ public sealed class AutomationController : IDisposable
     private void EvaluateCurrentListing()
     {
         var entry = queue[currentIndex];
+        var rule = configuration.Current.GetEffectiveRule(entry.Listing.ItemId);
+        // A freshly created placeholder must never remain at the game's maximum price
+        // just because the price-war guard fired. Use the guard's protected historical
+        // floor for that first live pricing pass; the configured cost floor still wins.
+        if (returnToAutoListingAfterCurrent && rule.PriceWarAction == PriceWarAction.LeaveUnchanged)
+            rule.PriceWarAction = PriceWarAction.MatchProtectedFloor;
         currentDecision = pricing.Evaluate(new PricingContext(
             entry.Listing,
             currentMarket!,
-            configuration.Current.GetEffectiveRule(entry.Listing.ItemId),
+            rule,
             retainerListings.OwnedRetainerIds));
+
+        if (returnToAutoListingAfterCurrent && currentDecision.Kind == PriceDecisionKind.BelowFloor &&
+            entry.Listing.CurrentPrice != currentDecision.EffectiveFloor)
+        {
+            currentDecision = new PriceDecision(
+                PriceDecisionKind.Update,
+                entry.Listing.CurrentPrice,
+                currentDecision.EffectiveFloor,
+                currentDecision.LowestMarketPrice,
+                currentDecision.EffectiveFloor,
+                "The live competitive target was below the saved purchase-cost floor; using the floor instead.");
+        }
         UpdatePortfolioMarketEstimate(entry.Listing, currentDecision, currentMarket!);
         ReplaceCurrent(entry with { Status = currentDecision.Kind.ToString(), Decision = currentDecision });
 
@@ -887,6 +929,19 @@ public sealed class AutomationController : IDisposable
 
     private void MoveToNextListing()
     {
+        if (returnToAutoListingAfterCurrent)
+        {
+            if (queue[currentIndex].Status.StartsWith("Verified", StringComparison.Ordinal) ||
+                (currentDecision?.Kind is PriceDecisionKind.NoChange or PriceDecisionKind.WithinTolerance &&
+                 queue[currentIndex].Listing.CurrentPrice < PricingStrategyService.MaximumListingPrice))
+                freshlyRepricedAutoListingSlots.Add(queue[currentIndex].Listing.Slot);
+            returnToAutoListingAfterCurrent = false;
+            marketTask = null;
+            currentMarket = null;
+            currentDecision = null;
+            Transition(AutomationState.ReadingListings, "Live price committed; looking for the next eligible 99-stack.");
+            return;
+        }
         currentIndex++;
         marketTask = null;
         currentMarket = null;
@@ -932,6 +987,8 @@ public sealed class AutomationController : IDisposable
     {
         retainerIndex++;
         queue.Clear();
+        freshlyRepricedAutoListingSlots.Clear();
+        returnToAutoListingAfterCurrent = false;
         currentIndex = 0;
         if (retainerIndex >= retainerCount)
         {

@@ -24,6 +24,7 @@ public sealed record CuratedBagStock(
     uint ReservedQuantity,
     uint ListableQuantity,
     int StackCount,
+    uint EffectiveFloor,
     uint? SuggestedPrice);
 
 public sealed class BagListingController : IDisposable
@@ -145,6 +146,7 @@ public sealed class BagListingController : IDisposable
         scanCancellation?.Cancel();
         scanCancellation?.Dispose();
         scanCancellation = new CancellationTokenSource();
+        ScheduleNextAttempt();
         scanTask = universalis.ScanAsync(rules, world, scanCancellation.Token);
         Status = new(BagListingState.ScanningPrices,
             $"Reading current {world} prices for {rules.Count} curated HQ item(s).");
@@ -221,12 +223,10 @@ public sealed class BagListingController : IDisposable
             if (stock.StackCount == 0 || existingProcurement.Contains((stock.ItemId, true)))
                 continue;
             var market = markets.FirstOrDefault(x => x.ItemId == stock.ItemId);
-            if (market is null)
-                continue;
-            var listings = market.Listings
+            var listings = market?.Listings
                 .Select(x => new MarketListing(x.PricePerUnit, x.Quantity, x.IsHighQuality, RetainerId: x.RetainerId))
-                .ToArray();
-            var historicalMedian = Median(market.RecentSales.Where(x => x.IsHighQuality).Select(x => x.PricePerUnit));
+                .ToArray() ?? [];
+            var historicalMedian = Median(market?.RecentSales.Where(x => x.IsHighQuality).Select(x => x.PricePerUnit) ?? []);
             var rule = configuration.Current.GetEffectiveRule(stock.ItemId);
             rule.QualityFilter = QualityFilterMode.HighQualityOnly;
             var placeholder = new RetainerListing(
@@ -237,11 +237,13 @@ public sealed class BagListingController : IDisposable
                 new MarketSnapshot(stock.ItemId, DateTimeOffset.UtcNow, listings, historicalMedian, true),
                 rule,
                 retainerListings.OwnedRetainerIds));
-            if (!decision.ShouldUpdate || decision.TargetPrice is not { } target)
+            var target = decision.ShouldUpdate && decision.TargetPrice is { } marketTarget
+                ? marketTarget
+                : PricingStrategyService.MaximumListingPrice;
+            if (target == PricingStrategyService.MaximumListingPrice)
             {
                 log.Add(AutomationLogLevel.Warning,
-                    $"BAG STOCK SKIPPED {stock.ItemName}: {decision.Reason}");
-                continue;
+                    $"BAG STOCK SAFE-SEED {stock.ItemName}: {decision.Reason} Using a protected placeholder; the in-game Adjust Price screen will determine the real price immediately after listing.");
             }
 
             plannedPrices[stock.ItemId] = target;
@@ -302,6 +304,7 @@ public sealed class BagListingController : IDisposable
                 var completeSourceStacks = (uint)group.Sum(x => x.Quantity / 99);
                 var stackCount = Math.Min(stacksAllowedByReserve, completeSourceStacks);
                 var listable = stackCount * 99;
+                var pricingRule = configuration.Current.GetEffectiveRule(group.Key.ItemId);
                 return new CuratedBagStock(
                     group.Key.ItemId,
                     group.Key.ItemName,
@@ -309,10 +312,20 @@ public sealed class BagListingController : IDisposable
                     Math.Min(total, reserve),
                     listable,
                     (int)stackCount,
+                    CalculateFloor(pricingRule),
                     plannedPrices.GetValueOrDefault(group.Key.ItemId) is var price && price > 0 ? price : null);
             })
             .OrderBy(x => x.ItemName, StringComparer.OrdinalIgnoreCase)
             .ToArray();
+    }
+
+    private static uint CalculateFloor(PricingRule rule)
+    {
+        if (rule.CostBasis == 0)
+            return Math.Max(1, rule.MinimumPrice);
+        var marginFloor = decimal.Ceiling(rule.CostBasis * (1m + rule.MinimumMarginPercent / 100m));
+        return Math.Max(rule.MinimumPrice,
+            (uint)Math.Min(PricingStrategyService.MaximumListingPrice, marginFloor));
     }
 
     private void PollManualVerification()

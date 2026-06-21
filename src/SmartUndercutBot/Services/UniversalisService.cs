@@ -173,8 +173,17 @@ public sealed class UniversalisService : IUniversalisService, IDisposable
         return value.ValueKind == JsonValueKind.String &&
                long.TryParse(value.GetString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out number) ? number : 0;
     }
-    private static bool GetBoolean(JsonElement element, string name) =>
-        element.TryGetProperty(name, out var value) && value.ValueKind is JsonValueKind.True;
+    private static bool GetBoolean(JsonElement element, string name)
+    {
+        if (!element.TryGetProperty(name, out var value))
+            return false;
+        if (value.ValueKind == JsonValueKind.True)
+            return true;
+        if (value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var number))
+            return number != 0;
+        return value.ValueKind == JsonValueKind.String &&
+               (bool.TryParse(value.GetString(), out var boolean) ? boolean : value.GetString() == "1");
+    }
 
     public void Dispose() => httpClient.Dispose();
 }
