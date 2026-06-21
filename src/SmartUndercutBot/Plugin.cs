@@ -32,6 +32,8 @@ public sealed class Plugin : IDalamudPlugin
     private readonly UniversalisService universalis;
     private readonly ProcurementController procurement;
     private readonly DashboardWindow dashboard;
+    private readonly GuidedProcurementWindow guidedProcurement;
+    private readonly TaskbarAttentionService taskbarAttention;
 
     public Plugin()
     {
@@ -55,6 +57,7 @@ public sealed class Plugin : IDalamudPlugin
             configuration.Current.ProcurementRules.AddRange(universalis.CreateFavoriteRules());
             configuration.Save();
         }
+        taskbarAttention = new TaskbarAttentionService();
         procurement = new ProcurementController(
             Framework,
             PlayerState,
@@ -64,21 +67,25 @@ public sealed class Plugin : IDalamudPlugin
             new ProcurementPlannerService(),
             new MarketPurchaseService(ObjectTable, GameGui),
             new VnavmeshService(PluginInterface),
+            taskbarAttention,
             procurementLedger,
             automation,
             configuration,
             automationLog);
         dashboard = new DashboardWindow(
             configuration, automation, procurement, universalis, procurementLedger, marketData, automationLog);
+        guidedProcurement = new GuidedProcurementWindow(procurement);
         automation.RetainerInterfaceOpened += OnRetainerInterfaceOpened;
+        procurement.GuidedReviewRequested += OnGuidedReviewRequested;
 
         windowSystem.AddWindow(dashboard);
+        windowSystem.AddWindow(guidedProcurement);
         PluginInterface.UiBuilder.Draw += windowSystem.Draw;
         PluginInterface.UiBuilder.OpenMainUi += ToggleDashboard;
         PluginInterface.UiBuilder.OpenConfigUi += ToggleDashboard;
         CommandManager.AddHandler(CommandName, new CommandInfo(OnCommand)
         {
-            HelpMessage = "Open the Smart Undercutter dashboard.",
+            HelpMessage = "Open Smart Undercutter. Use /sub guided for a manual deal route or /sub stop to abort.",
         });
         PluginLog.Information("Smart Undercutter initialized.");
     }
@@ -90,6 +97,8 @@ public sealed class Plugin : IDalamudPlugin
             automation.Halt("Stopped with /sub stop.");
             procurement.Halt("Procurement stopped with /sub stop.");
         }
+        else if (arguments.Trim().Equals("guided", StringComparison.OrdinalIgnoreCase))
+            procurement.RunGuidedNow();
         else
             ToggleDashboard();
     }
@@ -100,12 +109,20 @@ public sealed class Plugin : IDalamudPlugin
             dashboard.IsOpen = true;
     }
 
+    private void OnGuidedReviewRequested()
+    {
+        guidedProcurement.IsOpen = true;
+        guidedProcurement.BringToFront();
+    }
+
     private void ToggleDashboard() => dashboard.Toggle();
 
     public void Dispose()
     {
         automation.RetainerInterfaceOpened -= OnRetainerInterfaceOpened;
+        procurement.GuidedReviewRequested -= OnGuidedReviewRequested;
         procurement.Dispose();
+        taskbarAttention.Dispose();
         automation.Dispose();
         universalis.Dispose();
         marketData.Dispose();

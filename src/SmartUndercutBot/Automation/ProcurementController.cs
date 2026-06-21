@@ -15,6 +15,7 @@ public enum ProcurementState
     FindingMarketBoard,
     MovingToMarketBoard,
     WaitingForMarketBoard,
+    AwaitingManualReview,
     WaitingForListings,
     WaitingForPurchase,
     WaitingForHomeWorld,
@@ -25,6 +26,13 @@ public enum ProcurementState
     Completed,
     Halted,
     Faulted,
+}
+
+public enum ProcurementRunMode
+{
+    None,
+    AutomaticPurchase,
+    GuidedReview,
 }
 
 public sealed record ProcurementStatus(
@@ -45,6 +53,7 @@ public sealed class ProcurementController : IDisposable
     private readonly IProcurementPlannerService planner;
     private readonly IMarketPurchaseService market;
     private readonly IVnavmeshService vnavmesh;
+    private readonly ITaskbarAttentionService taskbarAttention;
     private readonly ProcurementLedger ledger;
     private readonly AutomationController repricing;
     private readonly ConfigurationService configuration;
@@ -62,7 +71,8 @@ public sealed class ProcurementController : IDisposable
     private int orderIndex;
     private int inventoryBefore;
     private int lastScannedFreeSaleSlots = -1;
-    private bool executeAfterScan;
+    private ProcurementRunMode runAfterScan;
+    private ProcurementRunMode activeRunMode;
     private string homeWorld = string.Empty;
     private string detail = "Procurement is idle.";
     private uint gilSpent;
@@ -76,6 +86,7 @@ public sealed class ProcurementController : IDisposable
         IProcurementPlannerService planner,
         IMarketPurchaseService market,
         IVnavmeshService vnavmesh,
+        ITaskbarAttentionService taskbarAttention,
         ProcurementLedger ledger,
         AutomationController repricing,
         ConfigurationService configuration,
@@ -89,6 +100,7 @@ public sealed class ProcurementController : IDisposable
         this.planner = planner;
         this.market = market;
         this.vnavmesh = vnavmesh;
+        this.taskbarAttention = taskbarAttention;
         this.ledger = ledger;
         this.repricing = repricing;
         this.configuration = configuration;
@@ -99,19 +111,39 @@ public sealed class ProcurementController : IDisposable
 
     public ProcurementState State { get; private set; } = ProcurementState.Idle;
     public ProcurementPlan Plan { get; private set; } = ProcurementPlan.Empty;
+    public event Action? GuidedReviewRequested;
     public bool IsActive => State is not (ProcurementState.Idle or ProcurementState.PlanReady or ProcurementState.Completed or ProcurementState.Halted or ProcurementState.Faulted);
+    public bool IsGuidedReviewPending => State == ProcurementState.AwaitingManualReview;
+    public string CurrentGuidedWorld => IsGuidedReviewPending ? WorldName : string.Empty;
+    public int CurrentGuidedWorldNumber => IsGuidedReviewPending ? worldIndex + 1 : 0;
+    public int GuidedWorldCount => worldGroups.Count;
+    public IReadOnlyList<ProcurementOrder> CurrentGuidedWorldOrders =>
+        IsGuidedReviewPending && worldIndex < worldGroups.Count ? worldGroups[worldIndex].ToArray() : [];
     public ProcurementStatus Status => new(
         State, detail, Math.Min(orderIndex + 1, Plan.Orders.Count), Plan.Orders.Count, gilSpent,
         configuration.Current.AutomaticProcurementEnabled ? nextAutomaticScan : null);
 
-    public void ScanNow() => StartScan(false);
+    public void ScanNow() => StartScan(ProcurementRunMode.None);
 
     public void RunNow()
     {
         if (Plan.Orders.Count == 0)
-            StartScan(true);
+            StartScan(ProcurementRunMode.AutomaticPurchase);
         else
-            BeginExecution();
+            BeginExecution(ProcurementRunMode.AutomaticPurchase);
+    }
+
+    public void RunGuidedNow() => StartScan(ProcurementRunMode.GuidedReview);
+
+    public void CompleteGuidedWorldReview()
+    {
+        if (State != ProcurementState.AwaitingManualReview)
+            return;
+        taskbarAttention.StopFlashing();
+        market.CloseMarketBoard();
+        worldIndex++;
+        orderIndex = 0;
+        TravelToCurrentWorld();
     }
 
     public void Halt(string reason = "Procurement stopped by user.")
@@ -119,12 +151,13 @@ public sealed class ProcurementController : IDisposable
         cancellation?.Cancel();
         scanTask = null;
         vnavmesh.Stop();
+        taskbarAttention.StopFlashing();
         State = ProcurementState.Halted;
         detail = reason;
         log.Add(AutomationLogLevel.Warning, reason);
     }
 
-    private void StartScan(bool execute)
+    private void StartScan(ProcurementRunMode mode)
     {
         if (IsActive)
             return;
@@ -143,7 +176,7 @@ public sealed class ProcurementController : IDisposable
         cancellation?.Cancel();
         cancellation?.Dispose();
         cancellation = new CancellationTokenSource();
-        executeAfterScan = execute;
+        runAfterScan = mode;
         scanTask = universalis.ScanAsync(configuration.Current.ProcurementRules, dataCenter, cancellation.Token);
         State = ProcurementState.ScanningUniversalis;
         detail = $"Scanning {dataCenter} on Universalis.";
@@ -161,6 +194,7 @@ public sealed class ProcurementController : IDisposable
             State = ProcurementState.Faulted;
             detail = ex.Message;
             vnavmesh.Stop();
+            taskbarAttention.StopFlashing();
             log.Add(AutomationLogLevel.Error, $"Procurement faulted: {ex}");
         }
     }
@@ -200,9 +234,16 @@ public sealed class ProcurementController : IDisposable
                 break;
             case ProcurementState.WaitingForMarketBoard:
                 if (market.IsMarketBoardOpen)
-                    BeginCurrentOrder();
+                {
+                    if (activeRunMode == ProcurementRunMode.GuidedReview)
+                        BeginGuidedReview();
+                    else
+                        BeginCurrentOrder();
+                }
                 else
                     CheckTimeout("Timed out opening the Market Board.");
+                break;
+            case ProcurementState.AwaitingManualReview:
                 break;
             case ProcurementState.WaitingForListings:
                 PollListings();
@@ -228,7 +269,10 @@ public sealed class ProcurementController : IDisposable
             case ProcurementState.WaitingForSummoningBell:
                 if (retainerListings.IsRetainerListOpen)
                 {
-                    Complete("Purchasing finished; the retainer run will distribute and list purchased stacks.");
+                    var message = activeRunMode == ProcurementRunMode.GuidedReview
+                        ? "Guided route finished and returned home; starting the normal retainer pass. Manually purchased bag items remain under your control."
+                        : "Purchasing finished; the retainer run will distribute and list purchased stacks.";
+                    Complete(message);
                     // AutomationController observes the bell first in the framework
                     // update order and may already have started this pass.
                     if (!repricing.IsActive)
@@ -269,13 +313,13 @@ public sealed class ProcurementController : IDisposable
             ? "No deals passed the volume, margin, budget, bag-slot, and sale-slot guards."
             : $"Plan ready: {Plan.Orders.Count} stack(s), {Plan.TotalCost:N0} gil, about {Plan.ExpectedProfit:N0} gil expected profit.";
         log.Add(AutomationLogLevel.Information, detail);
-        if (executeAfterScan && Plan.Orders.Count > 0)
-            BeginExecution();
+        if (runAfterScan != ProcurementRunMode.None && Plan.Orders.Count > 0)
+            BeginExecution(runAfterScan);
     }
 
-    private void BeginExecution()
+    private void BeginExecution(ProcurementRunMode mode)
     {
-        if (!configuration.Current.AllowAutomaticPurchases)
+        if (mode == ProcurementRunMode.AutomaticPurchase && !configuration.Current.AllowAutomaticPurchases)
         {
             State = ProcurementState.PlanReady;
             detail = "Purchase writes are disarmed; review the plan and arm them before running.";
@@ -294,6 +338,8 @@ public sealed class ProcurementController : IDisposable
         }
 
         repricing.Halt("Paused while procurement runs.");
+        activeRunMode = mode;
+        runAfterScan = ProcurementRunMode.None;
         market.CloseRetainerList();
         worldGroups = Plan.Orders.GroupBy(x => x.WorldName, StringComparer.OrdinalIgnoreCase)
             .OrderByDescending(x => x.Sum(y => (long)y.ExpectedProfit)).ToList();
@@ -301,6 +347,23 @@ public sealed class ProcurementController : IDisposable
         orderIndex = 0;
         gilSpent = 0;
         TravelToCurrentWorld();
+    }
+
+    private void BeginGuidedReview()
+    {
+        if (worldIndex >= worldGroups.Count)
+        {
+            ReturnHome();
+            return;
+        }
+
+        State = ProcurementState.AwaitingManualReview;
+        detail = $"Reviewing {worldGroups[worldIndex].Count()} expected deal(s) on {WorldName}; waiting for Done / Next.";
+        taskbarAttention.FlashUntilForeground();
+        GuidedReviewRequested?.Invoke();
+        log.Add(AutomationLogLevel.Information,
+            $"GUIDED ROUTE READY on {WorldName}: {worldGroups[worldIndex].Count()} expected listing(s). " +
+            "Review the live board, then choose Done here / Next world.");
     }
 
     private string WorldName => worldIndex < worldGroups.Count ? worldGroups[worldIndex].Key : string.Empty;
@@ -544,7 +607,7 @@ public sealed class ProcurementController : IDisposable
         if (!newlyAvailableCapacity && DateTimeOffset.UtcNow < nextAutomaticScan)
             return;
         nextAutomaticScan = DateTimeOffset.UtcNow.AddMinutes(configuration.Current.ProcurementIntervalMinutes);
-        StartScan(true);
+        StartScan(ProcurementRunMode.AutomaticPurchase);
     }
 
     private bool IsOnWorld(string world) => playerState.IsLoaded && string.Equals(
@@ -552,6 +615,8 @@ public sealed class ProcurementController : IDisposable
 
     private void Complete(string message)
     {
+        activeRunMode = ProcurementRunMode.None;
+        taskbarAttention.StopFlashing();
         State = ProcurementState.Completed;
         detail = message;
         nextAutomaticScan = DateTimeOffset.UtcNow.AddMinutes(configuration.Current.ProcurementIntervalMinutes);
@@ -586,5 +651,6 @@ public sealed class ProcurementController : IDisposable
         cancellation?.Cancel();
         cancellation?.Dispose();
         vnavmesh.Stop();
+        taskbarAttention.StopFlashing();
     }
 }

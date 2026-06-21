@@ -443,6 +443,9 @@ public sealed class DashboardWindow : Window
         if (ImGui.Button("Run guarded purchase plan"))
             procurement.RunNow();
         ImGui.SameLine();
+        if (ImGui.Button("Run guided deal route"))
+            procurement.RunGuidedNow();
+        ImGui.SameLine();
         if (ImGui.Button("Stop procurement"))
             procurement.Halt();
 
