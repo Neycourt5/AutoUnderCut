@@ -97,7 +97,7 @@ public sealed class UniversalisService : IUniversalisService, IDisposable
                     results.Add(ParseItem(itemId, ruleNames.GetValueOrDefault(itemId) ?? $"Item #{itemId}", item.Value));
             }
         }
-        else if (root.TryGetProperty("itemID", out var itemIdElement) && itemIdElement.TryGetUInt32(out var itemId))
+        else if (GetUInt32(root, "itemID") is var itemId && itemId != 0)
         {
             results.Add(ParseItem(itemId, ruleNames.GetValueOrDefault(itemId) ?? $"Item #{itemId}", root));
         }
@@ -150,7 +150,7 @@ public sealed class UniversalisService : IUniversalisService, IDisposable
     {
         if (!element.TryGetProperty(name, out var value))
             return 0;
-        if (value.TryGetUInt32(out var number))
+        if (value.ValueKind == JsonValueKind.Number && value.TryGetUInt32(out var number))
             return number;
         return value.ValueKind == JsonValueKind.String &&
                uint.TryParse(value.GetString(), NumberStyles.None, CultureInfo.InvariantCulture, out number) ? number : 0;
@@ -159,7 +159,7 @@ public sealed class UniversalisService : IUniversalisService, IDisposable
     {
         if (!element.TryGetProperty(name, out var value))
             return 0;
-        if (value.TryGetUInt64(out var number))
+        if (value.ValueKind == JsonValueKind.Number && value.TryGetUInt64(out var number))
             return number;
         return value.ValueKind == JsonValueKind.String &&
                ulong.TryParse(value.GetString(), NumberStyles.None, CultureInfo.InvariantCulture, out number) ? number : 0;
@@ -168,7 +168,7 @@ public sealed class UniversalisService : IUniversalisService, IDisposable
     {
         if (!element.TryGetProperty(name, out var value))
             return 0;
-        if (value.TryGetInt64(out var number))
+        if (value.ValueKind == JsonValueKind.Number && value.TryGetInt64(out var number))
             return number;
         return value.ValueKind == JsonValueKind.String &&
                long.TryParse(value.GetString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out number) ? number : 0;

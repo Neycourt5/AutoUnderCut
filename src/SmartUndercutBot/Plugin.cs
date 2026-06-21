@@ -31,6 +31,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly AutomationController automation;
     private readonly UniversalisService universalis;
     private readonly ProcurementController procurement;
+    private readonly BagListingController bagListing;
     private readonly DashboardWindow dashboard;
     private readonly GuidedProcurementWindow guidedProcurement;
     private readonly TaskbarAttentionService taskbarAttention;
@@ -51,6 +52,7 @@ public sealed class Plugin : IDalamudPlugin
             configuration,
             procurementLedger,
             automationLog);
+        bagListing = new BagListingController(Framework, retainerListings, automationLog);
         universalis = new UniversalisService(PlayerState, DataManager);
         if (configuration.Current.ProcurementRules.Count == 0)
         {
@@ -73,7 +75,8 @@ public sealed class Plugin : IDalamudPlugin
             configuration,
             automationLog);
         dashboard = new DashboardWindow(
-            configuration, automation, procurement, universalis, procurementLedger, marketData, automationLog);
+            configuration, automation, procurement, bagListing, universalis, procurementLedger, marketData,
+            automationLog);
         guidedProcurement = new GuidedProcurementWindow(procurement);
         automation.RetainerInterfaceOpened += OnRetainerInterfaceOpened;
         procurement.GuidedReviewRequested += OnGuidedReviewRequested;
@@ -123,6 +126,7 @@ public sealed class Plugin : IDalamudPlugin
         procurement.GuidedReviewRequested -= OnGuidedReviewRequested;
         procurement.Dispose();
         taskbarAttention.Dispose();
+        bagListing.Dispose();
         automation.Dispose();
         universalis.Dispose();
         marketData.Dispose();

@@ -13,6 +13,7 @@ public sealed class DashboardWindow : Window
     private readonly ConfigurationService configuration;
     private readonly AutomationController automation;
     private readonly ProcurementController procurement;
+    private readonly BagListingController bagListing;
     private readonly IUniversalisService universalis;
     private readonly ProcurementLedger procurementLedger;
     private readonly IMarketDataService marketData;
@@ -20,12 +21,18 @@ public sealed class DashboardWindow : Window
     private int newItemId;
     private uint? selectedItemId;
     private int newProcurementItemId;
+    private BagListingCandidate? selectedBagListing;
+    private int bagListingQuantity = 1;
+    private uint bagListingUnitPrice;
+    private bool bagListingHqOnly = true;
+    private string bagListingSearch = string.Empty;
     private bool configurationDirty;
 
     public DashboardWindow(
         ConfigurationService configuration,
         AutomationController automation,
         ProcurementController procurement,
+        BagListingController bagListing,
         IUniversalisService universalis,
         ProcurementLedger procurementLedger,
         IMarketDataService marketData,
@@ -35,6 +42,7 @@ public sealed class DashboardWindow : Window
         this.configuration = configuration;
         this.automation = automation;
         this.procurement = procurement;
+        this.bagListing = bagListing;
         this.universalis = universalis;
         this.procurementLedger = procurementLedger;
         this.marketData = marketData;
@@ -64,6 +72,11 @@ public sealed class DashboardWindow : Window
         if (ImGui.BeginTabItem("Portfolio"))
         {
             DrawPortfolio();
+            ImGui.EndTabItem();
+        }
+        if (ImGui.BeginTabItem("Bag Listing"))
+        {
+            DrawBagListing();
             ImGui.EndTabItem();
         }
         if (ImGui.BeginTabItem("Pricing Rules"))
@@ -419,6 +432,114 @@ public sealed class DashboardWindow : Window
         }
         ImGui.PopID();
         return changed;
+    }
+
+    private void DrawBagListing()
+    {
+        var status = bagListing.Status;
+        var statusColor = status.State switch
+        {
+            BagListingState.Failed => new Vector4(1f, 0.35f, 0.3f, 1f),
+            BagListingState.Completed => new Vector4(0.35f, 0.9f, 0.45f, 1f),
+            BagListingState.WaitingForVerification => new Vector4(0.35f, 0.75f, 1f, 1f),
+            _ => new Vector4(0.75f, 0.75f, 0.75f, 1f),
+        };
+        ImGui.TextColored(statusColor, status.State.ToString());
+        ImGui.SameLine();
+        ImGui.TextWrapped(status.Detail);
+
+        if (ImGui.Button("Refresh bag items"))
+            bagListing.Refresh();
+        ImGui.SameLine();
+        ImGui.Checkbox("HQ only", ref bagListingHqOnly);
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(220 * ImGuiHelpers.GlobalScale);
+        ImGui.InputTextWithHint("##bag-search", "Search bag items", ref bagListingSearch, 128);
+
+        var candidates = bagListing.Candidates;
+        if (selectedBagListing is not null)
+        {
+            selectedBagListing = candidates.FirstOrDefault(x =>
+                x.SourceType == selectedBagListing.SourceType &&
+                x.SourceSlot == selectedBagListing.SourceSlot &&
+                x.ItemId == selectedBagListing.ItemId &&
+                x.IsHighQuality == selectedBagListing.IsHighQuality);
+        }
+
+        if (ImGui.BeginTable("BagListingCandidates", 4,
+                ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.ScrollY | ImGuiTableFlags.Resizable,
+                new Vector2(0, 220 * ImGuiHelpers.GlobalScale)))
+        {
+            ImGui.TableSetupColumn("Item");
+            ImGui.TableSetupColumn("Quality", ImGuiTableColumnFlags.WidthFixed, 65);
+            ImGui.TableSetupColumn("Bag qty", ImGuiTableColumnFlags.WidthFixed, 75);
+            ImGui.TableSetupColumn("Stack max", ImGuiTableColumnFlags.WidthFixed, 75);
+            ImGui.TableHeadersRow();
+            foreach (var candidate in candidates.Where(x => !bagListingHqOnly || x.IsHighQuality)
+                         .Where(x => string.IsNullOrWhiteSpace(bagListingSearch) ||
+                                     x.ItemName.Contains(bagListingSearch, StringComparison.OrdinalIgnoreCase)))
+            {
+                ImGui.PushID($"bag-{(int)candidate.SourceType}-{candidate.SourceSlot}-{candidate.ItemId}-{candidate.IsHighQuality}");
+                ImGui.TableNextRow();
+                ImGui.TableNextColumn();
+                var selected = selectedBagListing == candidate;
+                if (ImGui.Selectable(candidate.ItemName, selected, ImGuiSelectableFlags.SpanAllColumns))
+                {
+                    selectedBagListing = candidate;
+                    bagListingQuantity = (int)Math.Min(candidate.Quantity, candidate.StackSize);
+                    bagListingUnitPrice = 0;
+                }
+                ImGui.TableNextColumn(); ImGui.TextUnformatted(candidate.IsHighQuality ? "HQ" : "NQ");
+                ImGui.TableNextColumn(); ImGui.TextUnformatted(candidate.Quantity.ToString("N0"));
+                ImGui.TableNextColumn(); ImGui.TextUnformatted(candidate.StackSize.ToString("N0"));
+                ImGui.PopID();
+            }
+            ImGui.EndTable();
+        }
+
+        ImGui.Separator();
+        if (selectedBagListing is null)
+        {
+            ImGui.TextWrapped("Select a marketable bag stack. Nothing is listed until you enter a price and press the listing button.");
+            return;
+        }
+
+        var selectedItem = selectedBagListing;
+        ImGui.TextUnformatted($"Selected: {selectedItem.ItemName}{(selectedItem.IsHighQuality ? " HQ" : string.Empty)}");
+        var maximumQuantity = (int)Math.Min(selectedItem.Quantity, selectedItem.StackSize);
+        ImGui.SetNextItemWidth(180 * ImGuiHelpers.GlobalScale);
+        if (InputInt("Listing quantity", ref bagListingQuantity, 1, maximumQuantity))
+            bagListingQuantity = Math.Clamp(bagListingQuantity, 1, maximumQuantity);
+        ImGui.SetNextItemWidth(180 * ImGuiHelpers.GlobalScale);
+        InputUInt("Unit price", ref bagListingUnitPrice, 0, 999_999_999);
+
+        var pricingRule = configuration.Current.GetEffectiveRule(selectedItem.ItemId);
+        var configuredFloor = Math.Max(pricingRule.MinimumPrice,
+            pricingRule.CostBasis == 0
+                ? 0
+                : (uint)Math.Min(999_999_999m,
+                    decimal.Ceiling(pricingRule.CostBasis * (1m + pricingRule.MinimumMarginPercent / 100m))));
+        var belowFloor = bagListingUnitPrice > 0 && bagListingUnitPrice < configuredFloor;
+        if (belowFloor)
+            ImGui.TextColored(new Vector4(1f, 0.45f, 0.25f, 1f),
+                $"Price is below the configured floor of {configuredFloor:N0} gil.");
+        if (!bagListing.IsRetainerSellListOpen)
+            ImGui.TextColored(new Vector4(1f, 0.72f, 0.2f, 1f),
+                "Open a retainer's Sell Items / Markets list before submitting.");
+        if (automation.IsActive)
+        {
+            ImGui.TextColored(new Vector4(1f, 0.72f, 0.2f, 1f),
+                "Wait for the current repricing run to finish before listing a bag item.");
+            if (ImGui.Button("Pause repricing for bag listing"))
+                automation.Halt("Paused by user for manual bag listing.");
+        }
+
+        var disabled = bagListing.IsBusy || automation.IsActive || !bagListing.IsRetainerSellListOpen ||
+                       bagListingUnitPrice == 0 || belowFloor;
+        ImGui.BeginDisabled(disabled);
+        if (ImGui.Button("List selected stack on this retainer"))
+            bagListing.List(selectedItem, (uint)bagListingQuantity, bagListingUnitPrice);
+        ImGui.EndDisabled();
     }
 
     private void DrawProcurement()

@@ -20,6 +20,14 @@ public sealed record PendingAutoListing(
     uint UnitPrice,
     short MarketSlot,
     bool IsHighQuality);
+public sealed record BagListingCandidate(
+    InventoryType SourceType,
+    ushort SourceSlot,
+    uint ItemId,
+    string ItemName,
+    uint Quantity,
+    bool IsHighQuality,
+    uint StackSize);
 
 public interface IRetainerListingService
 {
@@ -53,6 +61,13 @@ public interface IRetainerListingService
     bool CloseRetainerMenu();
     bool AdvanceTalk();
     bool TryAutoListPurchase(ProcurementLedger ledger, out PendingAutoListing? pending);
+    IReadOnlyList<BagListingCandidate> ReadBagListingCandidates();
+    bool TryListBagItem(
+        BagListingCandidate candidate,
+        uint quantity,
+        uint unitPrice,
+        out PendingAutoListing? pending,
+        out string message);
     bool VerifyAutoListing(PendingAutoListing pending);
     Vector3? GetPlayerPosition();
 }
@@ -475,6 +490,110 @@ public sealed unsafe class RetainerListingService : IRetainerListingService
         return false;
     }
 
+    public IReadOnlyList<BagListingCandidate> ReadBagListingCandidates()
+    {
+        var manager = InventoryManager.Instance();
+        if (manager == null)
+            return [];
+
+        var results = new List<BagListingCandidate>();
+        var itemSheet = dataManager.GetExcelSheet<Item>();
+        foreach (var type in PlayerInventoryTypes)
+        {
+            var inventory = manager->GetInventoryContainer(type);
+            if (inventory == null || !inventory->IsLoaded)
+                continue;
+            for (ushort slot = 0; slot < inventory->Size; slot++)
+            {
+                var item = inventory->GetInventorySlot(slot);
+                if (item == null || item->ItemId == 0 || item->Quantity <= 0 ||
+                    !itemSheet.TryGetRow(item->ItemId, out var row) || row.StackSize == 0 ||
+                    row.IsUntradable || row.ItemSearchCategory.RowId == 0)
+                    continue;
+                results.Add(new(
+                    type,
+                    slot,
+                    item->ItemId,
+                    row.Name.ToString(),
+                    (uint)item->Quantity,
+                    (item->Flags & InventoryItem.ItemFlags.HighQuality) != 0,
+                    row.StackSize));
+            }
+        }
+        return results
+            .OrderBy(x => x.ItemName, StringComparer.OrdinalIgnoreCase)
+            .ThenByDescending(x => x.IsHighQuality)
+            .ThenBy(x => x.SourceType)
+            .ThenBy(x => x.SourceSlot)
+            .ToArray();
+    }
+
+    public bool TryListBagItem(
+        BagListingCandidate candidate,
+        uint quantity,
+        uint unitPrice,
+        out PendingAutoListing? pending,
+        out string message)
+    {
+        pending = null;
+        message = string.Empty;
+        if (!IsSellListOpen)
+        {
+            message = "Open a retainer's market sell list first.";
+            return false;
+        }
+        if (quantity == 0 || quantity > candidate.Quantity || quantity > candidate.StackSize)
+        {
+            message = "Quantity is outside the selected stack's valid range.";
+            return false;
+        }
+        if (unitPrice is 0 or > PricingStrategyService.MaximumListingPrice)
+        {
+            message = "Unit price is outside the market-board range.";
+            return false;
+        }
+
+        var manager = InventoryManager.Instance();
+        var source = manager == null ? null : manager->GetInventoryContainer(candidate.SourceType);
+        var market = manager == null ? null : manager->GetInventoryContainer(InventoryType.RetainerMarket);
+        if (manager == null || source == null || !source->IsLoaded || market == null || !market->IsLoaded ||
+            candidate.SourceSlot >= source->Size)
+        {
+            message = "The bag or retainer inventory is not currently available.";
+            return false;
+        }
+        var item = source->GetInventorySlot(candidate.SourceSlot);
+        if (item == null || item->ItemId != candidate.ItemId || item->Quantity < quantity ||
+            ((item->Flags & InventoryItem.ItemFlags.HighQuality) != 0) != candidate.IsHighQuality)
+        {
+            message = "The selected bag stack changed; refresh and select it again.";
+            return false;
+        }
+
+        short destinationSlot = -1;
+        for (short slot = 0; slot < market->Size; slot++)
+        {
+            var destination = market->GetInventorySlot(slot);
+            if (destination != null && destination->ItemId == 0)
+            {
+                destinationSlot = slot;
+                break;
+            }
+        }
+        if (destinationSlot < 0)
+        {
+            message = "This retainer has no free market sale slots.";
+            return false;
+        }
+
+        manager->MoveToRetainerMarket(candidate.SourceType, candidate.SourceSlot, InventoryType.RetainerMarket,
+            (ushort)destinationSlot, quantity, unitPrice);
+        pending = new(candidate.ItemId, candidate.ItemName, quantity, unitPrice, destinationSlot,
+            candidate.IsHighQuality);
+        message = $"Submitted {candidate.ItemName} x{quantity:N0} at {unitPrice:N0} gil.";
+        return true;
+    }
+
     public bool VerifyAutoListing(PendingAutoListing pending)
     {
         var manager = InventoryManager.Instance();
@@ -494,6 +613,14 @@ public sealed unsafe class RetainerListingService : IRetainerListingService
     }
 
     private bool IsAddonVisible(string name) => GetAddon(name) != null;
+
+    private static readonly InventoryType[] PlayerInventoryTypes =
+    [
+        InventoryType.Inventory1,
+        InventoryType.Inventory2,
+        InventoryType.Inventory3,
+        InventoryType.Inventory4,
+    ];
 
     private static void FireCallback(AtkUnitBase* addon, params int[] values)
     {
