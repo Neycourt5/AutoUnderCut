@@ -48,6 +48,7 @@ public interface IRetainerListingService
     IReadOnlyList<RetainerListing> ReadCurrentListings();
     bool TryReadListing(short slot, out RetainerListing? listing);
     bool TryResolveOpenPriceEditor(uint itemId, IReadOnlySet<short> excludedSlots, out RetainerListing? listing);
+    bool IsOpenPriceEditorFor(RetainerListing expected, bool requirePriceMatch);
     bool SelectRetainer(int index);
     bool SelectSellItems();
     bool OpenListingContextMenu(int rowIndex);
@@ -55,6 +56,7 @@ public interface IRetainerListingService
     bool RequestComparePrices();
     bool TryReadSellerFeePercent(out decimal feePercent);
     void CloseComparePrices();
+    void CloseContextMenu();
     void CancelPriceEditor();
     PriceUpdateResult CommitPrice(RetainerListing expected, uint targetPrice);
     bool CloseSellList();
@@ -270,6 +272,22 @@ public sealed unsafe class RetainerListingService : IRetainerListingService
         return true;
     }
 
+    public bool IsOpenPriceEditorFor(RetainerListing expected, bool requirePriceMatch)
+    {
+        var addon = gameGui.GetAddonByName<AddonRetainerSell>("RetainerSell");
+        if (addon == null || !addon->AtkUnitBase.IsVisible || addon->ItemName == null ||
+            addon->Quantity == null || addon->AskingPrice == null)
+            return false;
+
+        var visibleName = addon->ItemName->NodeText.ToString();
+        var visibleQuantity = (uint)Math.Max(0, addon->Quantity->Value);
+        var visiblePrice = (uint)Math.Max(0, addon->AskingPrice->Value);
+        var visibleHq = visibleName.Contains('\uE03C');
+        return visibleName.Contains(expected.ItemName, StringComparison.OrdinalIgnoreCase) &&
+               visibleQuantity == expected.Quantity && visibleHq == expected.IsHighQuality &&
+               (!requirePriceMatch || visiblePrice == expected.CurrentPrice);
+    }
+
     public bool SelectRetainer(int index)
     {
         var addon = GetAddon("RetainerList");
@@ -341,6 +359,13 @@ public sealed unsafe class RetainerListingService : IRetainerListingService
     public void CloseComparePrices()
     {
         var addon = GetAddon("ItemSearchResult");
+        if (addon != null)
+            addon->Close(true);
+    }
+
+    public void CloseContextMenu()
+    {
+        var addon = GetAddon("ContextMenu");
         if (addon != null)
             addon->Close(true);
     }

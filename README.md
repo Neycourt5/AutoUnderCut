@@ -18,7 +18,9 @@ Smart Undercutter is a Dalamud SDK 15 plugin for guarded retainer-market reprici
 - Provides an ImGui status dashboard, per-retainer progress, queue with live/target prices, configuration, and audit log.
 - Shows a Portfolio estimate with wallet and retainer gil, gross asking value, live market-aligned value, per-retainer seller tax, estimated net proceeds, markdown risk, and projected total wealth.
 - Automatically filters bag stock to HQ Grade 4 gemdraughts and HQ Caramel Popcorn, prices them from the current-world market, and fills free retainer slots with complete 99-stacks while preserving 100 of each item for personal use by default.
+- Consolidates inventory stacks before bag filling, skips retainers already at 20/20 during fill-only runs, validates the exact visible safety-seeded row before every write, and returns to the main bell list before idling.
 - Builds diversified purchase plans from Universalis sale history and current listings, constrained by gil, bag slots, retainer sale slots, weekly sales, ROI, and per-item limits.
+- Scans all North American worlds plus Oceania by default and merges them into one travel-ready procurement plan.
 - Uses Lifestream and vnavmesh to visit same-data-center worlds, then revalidates every candidate against the live in-game listing before submitting a purchase.
 - Offers a guided deal route that prioritizes Universalis opportunities by world, travels to each market board, flashes the FFXIV taskbar icon, shows expected prices and guarded ceilings, and waits for a manual Done / Next command.
 - Returns home, opens a summoning bell, distributes purchased stacks into open retainer slots, and feeds them through the normal live repricing pass.

@@ -56,6 +56,14 @@ public sealed record AutomationStatus(
 public sealed class AutomationController : IDisposable
 {
     private static readonly TimeSpan SameItemMarketReuseWindow = TimeSpan.FromSeconds(30);
+    private static readonly HashSet<string> CuratedAutoListItems = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Grade 4 Gemdraught of Strength",
+        "Grade 4 Gemdraught of Dexterity",
+        "Grade 4 Gemdraught of Intelligence",
+        "Grade 4 Gemdraught of Mind",
+        "Caramel Popcorn",
+    };
     private readonly IFramework framework;
     private readonly IRetainerListingService retainerListings;
     private readonly IMarketDataService marketData;
@@ -70,6 +78,7 @@ public sealed class AutomationController : IDisposable
     private readonly List<int> retainerRows = [];
     private readonly Dictionary<(ulong RetainerId, short Slot), PortfolioListingEstimate> portfolioListings = [];
     private readonly Dictionary<ulong, PortfolioRetainerBalance> portfolioRetainers = [];
+    private readonly Dictionary<ulong, int> fillListingCounts = [];
 
     private CancellationTokenSource? sessionCancellation;
     private Task<MarketSnapshot>? marketTask;
@@ -98,6 +107,11 @@ public sealed class AutomationController : IDisposable
     private bool handledBell;
     private bool handledSellList;
     private bool returnToAutoListingAfterCurrent;
+    private bool requestedFillOnlyRun;
+    private bool fillOnlyRun;
+    private bool abortFillRunAtBell;
+    private int autoListingProbeRowLimit;
+    private string abortFillReason = string.Empty;
     private string detail = "Open a summoning bell to begin.";
 
     public AutomationController(
@@ -150,12 +164,22 @@ public sealed class AutomationController : IDisposable
 
     public void StartNow()
     {
+        requestedFillOnlyRun = false;
         if (retainerListings.IsRetainerListOpen)
             BeginBellSession();
         else if (retainerListings.IsSellListOpen)
             BeginCurrentRetainerSession();
         else
             Halt("Cannot start: open the summoning-bell retainer list or a retainer sell list first.");
+    }
+
+    public void StartBagListingNow()
+    {
+        requestedFillOnlyRun = true;
+        if (retainerListings.IsRetainerListOpen)
+            BeginBellSession();
+        else
+            Halt("Cannot start bag filling: open the main summoning-bell retainer list first.");
     }
 
     public void Halt(string reason = "Stopped by user.")
@@ -165,6 +189,7 @@ public sealed class AutomationController : IDisposable
         currentMarket = null;
         currentDecision = null;
         retainerListings.CloseComparePrices();
+        retainerListings.CloseContextMenu();
         if (retainerListings.IsPriceEditorOpen)
             retainerListings.CancelPriceEditor();
         State = AutomationState.Halted;
@@ -394,9 +419,14 @@ public sealed class AutomationController : IDisposable
         currentDecision = null;
         pendingAutoListing = null;
         returnToAutoListingAfterCurrent = false;
+        fillOnlyRun = requestedFillOnlyRun;
+        abortFillRunAtBell = false;
+        autoListingProbeRowLimit = 0;
+        abortFillReason = string.Empty;
         marketTask = null;
         lastMarketRequestAt = DateTimeOffset.MinValue;
         listingsSeenAcrossRetainers = 0;
+        fillListingCounts.Clear();
         sessionPosition = retainerListings.GetPlayerPosition() ?? Vector3.Zero;
     }
 
@@ -438,6 +468,42 @@ public sealed class AutomationController : IDisposable
 
     private void ReadListings()
     {
+        if (fillOnlyRun)
+        {
+            var currentListings = retainerListings.ReadCurrentListings();
+            var countKey = retainerListings.ActiveRetainerId != 0
+                ? retainerListings.ActiveRetainerId
+                : (ulong)(retainerIndex + 1);
+            fillListingCounts[countKey] = currentListings.Count;
+            var unresolvedSeed = currentListings.FirstOrDefault(x =>
+                x.CurrentPrice == PricingStrategyService.MaximumListingPrice &&
+                CuratedAutoListItems.Contains(x.ItemName));
+            if (unresolvedSeed is not null)
+            {
+                log.Add(AutomationLogLevel.Warning,
+                    $"{retainerListings.ActiveRetainerName}: repairing existing safety-seeded {unresolvedSeed.ItemName} before placing more stock.");
+                BeginSafetySeedPricing(unresolvedSeed, currentListings.Count);
+                return;
+            }
+
+            if (configuration.Current.AllowAutomaticListing &&
+                retainerListings.TryAutoListPurchase(procurementLedger, out var fillListing) && fillListing is not null)
+            {
+                pendingAutoListing = fillListing;
+                verificationDeadline = DateTimeOffset.UtcNow.AddSeconds(10);
+                Schedule(AutomationState.WaitingAfterAutoListing,
+                    $"Listing {fillListing.ItemName} x{fillListing.Quantity} on {retainerListings.ActiveRetainerName}.");
+                return;
+            }
+
+            log.Add(AutomationLogLevel.Information,
+                currentListings.Count >= 20
+                    ? $"{retainerListings.ActiveRetainerName}: already has 20/20 listings; skipped."
+                    : $"{retainerListings.ActiveRetainerName}: no additional eligible 99-stack could be placed; skipped existing-price scan.");
+            FinishCurrentRetainer();
+            return;
+        }
+
         if (configuration.Current.AllowAutomaticListing &&
             retainerListings.TryAutoListPurchase(procurementLedger, out var autoListing) && autoListing is not null)
         {
@@ -511,6 +577,11 @@ public sealed class AutomationController : IDisposable
             log.Add(AutomationLogLevel.Error,
                 $"AUTO-LIST FAILED {pendingAutoListing.ItemName} x{pendingAutoListing.Quantity}; continuing without recording it.");
             pendingAutoListing = null;
+            if (fillOnlyRun)
+            {
+                AbortFreshAutoListing("The game did not verify the newly created retainer listing.");
+                return;
+            }
             Transition(AutomationState.ReadingListings, "Automatic listing verification failed; reading listings.");
             return;
         }
@@ -522,19 +593,24 @@ public sealed class AutomationController : IDisposable
         pendingAutoListing = null;
 
         var listings = retainerListings.ReadCurrentListings();
-        var rowIndex = listings.ToList().FindIndex(x => x.Slot == verified.MarketSlot && x.ItemId == verified.ItemId);
-        if (rowIndex < 0)
+        var verifiedListing = listings.FirstOrDefault(x => x.Slot == verified.MarketSlot && x.ItemId == verified.ItemId);
+        if (verifiedListing is null)
         {
-            log.Add(AutomationLogLevel.Error,
-                $"AUTO-LIST LIVE CHECK DEFERRED {verified.ItemName}: could not locate the verified sale row; the full retainer pass will retry it.");
-            Transition(AutomationState.ReadingListings, "Could not isolate the new row; continuing with the full retainer pass.");
+            AbortFreshAutoListing(
+                $"Could not locate the verified {verified.ItemName} market slot after creating it.");
             return;
         }
 
+        BeginSafetySeedPricing(verifiedListing, listings.Count);
+    }
+
+    private void BeginSafetySeedPricing(RetainerListing listing, int visibleRowCount)
+    {
         queue.Clear();
         processedSlots.Clear();
-        queue.Add(new AutomationQueueEntry(rowIndex, listings[rowIndex], "Queued for immediate live pricing"));
+        queue.Add(new AutomationQueueEntry(0, listing, "Probing visible rows for the exact safety seed"));
         currentIndex = 0;
+        autoListingProbeRowLimit = visibleRowCount;
         returnToAutoListingAfterCurrent = true;
         BeginCurrentListing();
     }
@@ -547,9 +623,7 @@ public sealed class AutomationController : IDisposable
             return;
         }
         marketRequestAttempts = 0;
-        currentRowMapped = returnToAutoListingAfterCurrent;
-        if (currentRowMapped)
-            processedSlots.Add(queue[currentIndex].Listing.Slot);
+        currentRowMapped = false;
         ReplaceCurrent(queue[currentIndex] with { Status = "Opening listing" });
         Schedule(AutomationState.WaitingBeforeOpeningListing, $"Opening {queue[currentIndex].Listing.ItemName}.");
     }
@@ -558,6 +632,12 @@ public sealed class AutomationController : IDisposable
     {
         if (!retainerListings.OpenListingContextMenu(queue[currentIndex].Index))
         {
+            if (returnToAutoListingAfterCurrent)
+            {
+                AbortFreshAutoListing(
+                    $"Could not open visible row {queue[currentIndex].Index + 1} while locating the safety seed.");
+                return;
+            }
             Halt($"Could not open listing {queue[currentIndex].Index + 1}.");
             return;
         }
@@ -568,6 +648,11 @@ public sealed class AutomationController : IDisposable
     {
         if (!retainerListings.SelectAdjustPrice())
         {
+            if (returnToAutoListingAfterCurrent)
+            {
+                AbortFreshAutoListing("Could not open Adjust Price while locating the new safety seed.");
+                return;
+            }
             Halt("Could not select Adjust Price.");
             return;
         }
@@ -580,6 +665,36 @@ public sealed class AutomationController : IDisposable
         currentMarket = null;
         currentDecision = null;
         marketTask = null;
+
+        if (returnToAutoListingAfterCurrent)
+        {
+            var seedEntry = queue[currentIndex];
+            if (!retainerListings.IsOpenPriceEditorFor(seedEntry.Listing, requirePriceMatch: true))
+            {
+                retainerListings.CancelPriceEditor();
+                var nextRow = seedEntry.Index + 1;
+                if (nextRow >= autoListingProbeRowLimit)
+                {
+                    AbortFreshAutoListing(
+                        $"Could not find the exact safety-seeded {seedEntry.Listing.ItemName} row after checking {autoListingProbeRowLimit} visible listing(s).");
+                    return;
+                }
+
+                queue[currentIndex] = seedEntry with
+                {
+                    Index = nextRow,
+                    Status = $"Row {seedEntry.Index + 1} was a different item; probing row {nextRow + 1}",
+                };
+                Schedule(AutomationState.WaitingBeforeOpeningListing,
+                    $"The opened row was not the new {seedEntry.Listing.ItemName}; trying visible row {nextRow + 1}.");
+                return;
+            }
+
+            currentRowMapped = true;
+            processedSlots.Add(seedEntry.Listing.Slot);
+            log.Add(AutomationLogLevel.Debug,
+                $"Validated visible row {seedEntry.Index + 1} as exact safety-seeded {seedEntry.Listing.ItemName}, market slot {seedEntry.Listing.Slot}.");
+        }
 
         // Mapping immediately when the addon first appears was too early, but after
         // the stabilization delay it normally succeeds. Doing it before market I/O
@@ -622,6 +737,11 @@ public sealed class AutomationController : IDisposable
         var entry = queue[currentIndex];
         if (!retainerListings.IsPriceEditorOpen)
         {
+            if (returnToAutoListingAfterCurrent)
+            {
+                AbortFreshAutoListing("The Adjust Price window closed before the guarded live request could run.");
+                return;
+            }
             Halt("The Adjust Price window closed before the market cooldown elapsed.");
             return;
         }
@@ -630,6 +750,11 @@ public sealed class AutomationController : IDisposable
         marketTask = marketData.GetSnapshotAsync(entry.Listing.ItemId, sessionCancellation!.Token);
         if (!retainerListings.RequestComparePrices())
         {
+            if (returnToAutoListingAfterCurrent)
+            {
+                AbortFreshAutoListing("Could not request live prices for the safety-seeded listing.");
+                return;
+            }
             Halt("Could not click Compare Prices.");
             return;
         }
@@ -680,6 +805,12 @@ public sealed class AutomationController : IDisposable
             log.Add(AutomationLogLevel.Error,
                 $"{failedEntry.Listing.ItemName}: market prices failed after {marketRequestAttempts} attempt(s); skipped. {message}");
             retainerListings.CancelPriceEditor();
+            if (returnToAutoListingAfterCurrent)
+            {
+                AbortFreshAutoListing(
+                    $"Live prices failed for safety-seeded {failedEntry.Listing.ItemName}; it was left at the protected placeholder.");
+                return;
+            }
             Schedule(AutomationState.WaitingAfterCommit,
                 "Market data failed after retries; moving to the next listing.");
             return;
@@ -693,6 +824,11 @@ public sealed class AutomationController : IDisposable
             log.Add(AutomationLogLevel.Error,
                 $"{entry.Listing.ItemName}: ignored stale market packet for item #{currentMarket.ItemId}; expected #{entry.Listing.ItemId}.");
             retainerListings.CancelPriceEditor();
+            if (returnToAutoListingAfterCurrent)
+            {
+                AbortFreshAutoListing("A stale or mismatched market packet was received for the safety seed.");
+                return;
+            }
             Schedule(AutomationState.WaitingAfterCommit, "Stale market data was rejected; continuing safely.");
             return;
         }
@@ -706,6 +842,11 @@ public sealed class AutomationController : IDisposable
             log.Add(AutomationLogLevel.Error,
                 $"Visible row {currentIndex + 1}: live item #{currentMarket.ItemId} could not be mapped to an unused retainer market slot; skipped.");
             retainerListings.CancelPriceEditor();
+            if (returnToAutoListingAfterCurrent)
+            {
+                AbortFreshAutoListing("The open Adjust Price item could not be proven to be the safety-seeded listing.");
+                return;
+            }
             Schedule(AutomationState.WaitingAfterCommit, "Could not map this row; continuing to the next listing.");
             return;
         }
@@ -873,6 +1014,12 @@ public sealed class AutomationController : IDisposable
                 $"{entry.Listing.ItemName}: update was skipped because the Adjust Price commit failed. {result.Message}");
             if (retainerListings.IsPriceEditorOpen)
                 retainerListings.CancelPriceEditor();
+            if (returnToAutoListingAfterCurrent)
+            {
+                AbortFreshAutoListing(
+                    $"The live price write for safety-seeded {entry.Listing.ItemName} was rejected: {result.Message}");
+                return;
+            }
             Schedule(AutomationState.WaitingAfterCommit, "Commit failed; continuing to the next listing.");
             return;
         }
@@ -906,6 +1053,12 @@ public sealed class AutomationController : IDisposable
                     $"{entry.Listing.ItemName}: server verification did not reach {target:N0} gil; skipped and continuing.");
                 if (retainerListings.IsPriceEditorOpen)
                     retainerListings.CancelPriceEditor();
+                if (returnToAutoListingAfterCurrent)
+                {
+                    AbortFreshAutoListing(
+                        $"Server verification failed for safety-seeded {entry.Listing.ItemName}; no more stock will be listed.");
+                    return;
+                }
                 MoveToNextListing();
                 return;
             }
@@ -949,6 +1102,23 @@ public sealed class AutomationController : IDisposable
         BeginCurrentListing();
     }
 
+    private void AbortFreshAutoListing(string reason)
+    {
+        retainerListings.CloseComparePrices();
+        if (retainerListings.IsPriceEditorOpen)
+            retainerListings.CancelPriceEditor();
+        procurementLedger.ClearBagStockQueue();
+        pendingAutoListing = null;
+        returnToAutoListingAfterCurrent = false;
+        requestedFillOnlyRun = false;
+        abortFillRunAtBell = true;
+        abortFillReason = reason;
+        log.Add(AutomationLogLevel.Error,
+            $"AUTO-LIST ABORTED: {reason} Returning to the main summoning-bell list. Any 999,999,999 gil safety seed remains unsellable and needs the next guarded repair pass.");
+        Schedule(AutomationState.WaitingBeforeClosingSellList,
+            "Stopping bag filling and returning safely to the main summoning-bell list.");
+    }
+
     private void FinishCurrentRetainer()
     {
         log.Add(AutomationLogLevel.Information,
@@ -985,6 +1155,16 @@ public sealed class AutomationController : IDisposable
 
     private void ContinueWithNextRetainer()
     {
+        if (abortFillRunAtBell)
+        {
+            var message = $"Bag filling stopped safely: {abortFillReason} Returned to the main summoning-bell list.";
+            abortFillRunAtBell = false;
+            fillOnlyRun = false;
+            requestedFillOnlyRun = false;
+            Complete(message);
+            return;
+        }
+
         retainerIndex++;
         queue.Clear();
         freshlyRepricedAutoListingSlots.Clear();
@@ -994,9 +1174,15 @@ public sealed class AutomationController : IDisposable
         {
             portfolioComplete = true;
             portfolioCompletedAt = DateTimeOffset.UtcNow;
-            LastKnownFreeSaleSlots = Math.Max(0, retainerCount * 20 - listingsSeenAcrossRetainers);
+            var finalListingCount = fillOnlyRun ? fillListingCounts.Values.Sum() : listingsSeenAcrossRetainers;
+            LastKnownFreeSaleSlots = Math.Max(0, retainerCount * 20 - finalListingCount);
             procurementLedger.ClearCompleted();
             var message = $"Finished {retainerCount} retainer(s); submitted {updatesSubmitted} update(s).";
+            if (fillOnlyRun)
+            {
+                fillOnlyRun = false;
+                requestedFillOnlyRun = false;
+            }
             if (configuration.Current.RepeatBellRuns)
                 ScheduleNextBellRun(message);
             else
@@ -1043,7 +1229,12 @@ public sealed class AutomationController : IDisposable
     private void CheckTimeout(string message)
     {
         if (DateTimeOffset.UtcNow >= stateDeadline)
-            Halt(message);
+        {
+            if (returnToAutoListingAfterCurrent)
+                AbortFreshAutoListing(message);
+            else
+                Halt(message);
+        }
     }
 
     private bool DelayElapsed() => DateTimeOffset.UtcNow >= nextActionAt;

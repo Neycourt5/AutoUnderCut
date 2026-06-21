@@ -6,7 +6,7 @@ namespace SmartUndercutBot;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 13;
+    public int Version { get; set; } = 14;
     public bool AutomationEnabled { get; set; }
     public bool ProcessAllRetainers { get; set; } = true;
     public bool RepeatBellRuns { get; set; }
@@ -32,7 +32,7 @@ public sealed class Configuration : IPluginConfiguration
     public int ProcurementInventoryReserve { get; set; } = 10;
     public decimal ProcurementMinimumRoiPercent { get; set; } = 20m;
     public uint ProcurementMinimumProfitPerUnit { get; set; } = 100;
-    public string ProcurementDataCenter { get; set; } = string.Empty;
+    public string ProcurementDataCenter { get; set; } = "North-America,Oceania";
     public string MarketBoardTravelCommand { get; set; } = "/li mb";
     public List<ProcurementRule> ProcurementRules { get; set; } = [];
     public PricingRule GlobalRule { get; set; } = new();
@@ -173,6 +173,13 @@ public sealed class Configuration : IPluginConfiguration
             AutomaticCuratedBagListingEnabled = true;
             Version = 13;
         }
+        if (Version < 14)
+        {
+            if (string.IsNullOrWhiteSpace(ProcurementDataCenter) ||
+                string.Equals(ProcurementDataCenter.Trim(), "Aether", StringComparison.OrdinalIgnoreCase))
+                ProcurementDataCenter = "North-America,Oceania";
+            Version = 14;
+        }
         MinimumDelayMs = Math.Clamp(MinimumDelayMs, 100, 60_000);
         MaximumDelayMs = Math.Clamp(MaximumDelayMs, MinimumDelayMs, 60_000);
         MarketRequestTimeoutSeconds = Math.Clamp(MarketRequestTimeoutSeconds, 2, 60);
@@ -189,7 +196,9 @@ public sealed class Configuration : IPluginConfiguration
         BagListingReservePerItem = Math.Clamp(BagListingReservePerItem, 0, 9999);
         ProcurementMinimumRoiPercent = Math.Clamp(ProcurementMinimumRoiPercent, 0m, 1_000m);
         ProcurementMinimumProfitPerUnit = Math.Clamp(ProcurementMinimumProfitPerUnit, 0u, 100_000_000u);
-        ProcurementDataCenter ??= string.Empty;
+        ProcurementDataCenter = string.IsNullOrWhiteSpace(ProcurementDataCenter)
+            ? "North-America,Oceania"
+            : ProcurementDataCenter.Trim();
         MarketBoardTravelCommand = string.IsNullOrWhiteSpace(MarketBoardTravelCommand)
             ? "/li mb"
             : MarketBoardTravelCommand.Trim();

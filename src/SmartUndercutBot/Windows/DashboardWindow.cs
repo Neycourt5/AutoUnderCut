@@ -437,7 +437,7 @@ public sealed class DashboardWindow : Window
         {
             BagListingState.Failed => new Vector4(1f, 0.35f, 0.3f, 1f),
             BagListingState.Completed => new Vector4(0.35f, 0.9f, 0.45f, 1f),
-            BagListingState.ScanningPrices or BagListingState.QueuePrepared or BagListingState.WaitingForVerification =>
+            BagListingState.ConsolidatingBags or BagListingState.ScanningPrices or BagListingState.QueuePrepared or BagListingState.WaitingForVerification =>
                 new Vector4(0.35f, 0.75f, 1f, 1f),
             _ => new Vector4(0.75f, 0.75f, 0.75f, 1f),
         };
@@ -617,11 +617,12 @@ public sealed class DashboardWindow : Window
             configurationDirty = true;
         }
         var dataCenter = config.ProcurementDataCenter;
-        if (ImGui.InputText("Universalis data center (blank = home DC)", ref dataCenter, 64))
+        if (ImGui.InputText("Universalis scopes (comma separated)", ref dataCenter, 128))
         {
             config.ProcurementDataCenter = dataCenter;
             configurationDirty = true;
         }
+        ImGui.TextDisabled("Default scans every North American world plus Oceania: North-America,Oceania");
         var travelCommand = config.MarketBoardTravelCommand;
         if (ImGui.InputText("Lifestream market-board command", ref travelCommand, 128))
         {

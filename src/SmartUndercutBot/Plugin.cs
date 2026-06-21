@@ -76,6 +76,7 @@ public sealed class Plugin : IDalamudPlugin
             automationLog);
         bagListing = new BagListingController(
             Framework,
+            CommandManager,
             PlayerState,
             retainerListings,
             universalis,

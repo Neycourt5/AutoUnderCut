@@ -42,12 +42,7 @@ public sealed class UniversalisService : IUniversalisService, IDisposable
     {
         if (!string.IsNullOrWhiteSpace(configuredDataCenter))
             return configuredDataCenter.Trim();
-        if (!playerState.IsLoaded)
-            return string.Empty;
-        var homeWorldId = playerState.HomeWorld.RowId;
-        if (homeWorldId == 0 || !dataManager.GetExcelSheet<World>().TryGetRow(homeWorldId, out var world))
-            return string.Empty;
-        return world.DataCenter.Value.Name.ToString();
+        return "North-America,Oceania";
     }
 
     public IReadOnlyList<ProcurementRule> CreateFavoriteRules()
@@ -78,8 +73,32 @@ public sealed class UniversalisService : IUniversalisService, IDisposable
         if (enabled.Length == 0 || string.IsNullOrWhiteSpace(dataCenter))
             return [];
 
+        var scopes = dataCenter.Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        var scans = await Task.WhenAll(scopes.Select(scope =>
+            ScanScopeAsync(enabled, scope, cancellationToken))).ConfigureAwait(false);
+        return scans.SelectMany(x => x)
+            .GroupBy(x => x.ItemId)
+            .Select(group => new ProcurementMarketItem(
+                group.Key,
+                group.First().ItemName,
+                group.SelectMany(x => x.Listings)
+                    .DistinctBy(x => (x.WorldId, x.ListingId, x.RetainerId))
+                    .ToArray(),
+                group.SelectMany(x => x.RecentSales)
+                    .DistinctBy(x => (x.SoldAt, x.PricePerUnit, x.Quantity, x.IsHighQuality))
+                    .ToArray()))
+            .ToArray();
+    }
+
+    private async Task<IReadOnlyList<ProcurementMarketItem>> ScanScopeAsync(
+        IReadOnlyList<ProcurementRule> enabled,
+        string scope,
+        CancellationToken cancellationToken)
+    {
         var itemIds = string.Join(',', enabled.Select(x => x.ItemId));
-        var endpoint = $"https://universalis.app/api/v2/{Uri.EscapeDataString(dataCenter)}/{itemIds}" +
+        var endpoint = $"https://universalis.app/api/v2/{Uri.EscapeDataString(scope)}/{itemIds}" +
                        "?listings=100&entries=100&statsWithin=604800";
         using var response = await httpClient.GetAsync(endpoint, cancellationToken).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();

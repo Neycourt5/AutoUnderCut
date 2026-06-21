@@ -1,3 +1,4 @@
+using Dalamud.Game.Command;
 using Dalamud.Plugin.Services;
 using SmartUndercutBot.Core.Models;
 using SmartUndercutBot.Core.Services;
@@ -8,6 +9,7 @@ namespace SmartUndercutBot.Automation;
 public enum BagListingState
 {
     Idle,
+    ConsolidatingBags,
     ScanningPrices,
     QueuePrepared,
     WaitingForVerification,
@@ -39,6 +41,7 @@ public sealed class BagListingController : IDisposable
     };
 
     private readonly IFramework framework;
+    private readonly ICommandManager commandManager;
     private readonly IPlayerState playerState;
     private readonly IRetainerListingService retainerListings;
     private readonly IUniversalisService universalis;
@@ -55,9 +58,11 @@ public sealed class BagListingController : IDisposable
     private PendingAutoListing? pending;
     private DateTimeOffset deadline;
     private DateTimeOffset nextAutomaticAttempt;
+    private DateTimeOffset bagSortReadyAt;
 
     public BagListingController(
         IFramework framework,
+        ICommandManager commandManager,
         IPlayerState playerState,
         IRetainerListingService retainerListings,
         IUniversalisService universalis,
@@ -69,6 +74,7 @@ public sealed class BagListingController : IDisposable
         AutomationLog log)
     {
         this.framework = framework;
+        this.commandManager = commandManager;
         this.playerState = playerState;
         this.retainerListings = retainerListings;
         this.universalis = universalis;
@@ -87,7 +93,7 @@ public sealed class BagListingController : IDisposable
         "Only curated HQ raid consumables are eligible for automatic listing.");
     public IReadOnlyList<BagListingCandidate> Candidates => candidates;
     public IReadOnlyList<CuratedBagStock> Stock => BuildStockSummary();
-    public bool IsBusy => State is BagListingState.ScanningPrices or BagListingState.WaitingForVerification;
+    public bool IsBusy => State is BagListingState.ConsolidatingBags or BagListingState.ScanningPrices or BagListingState.WaitingForVerification;
     public bool IsRetainerSellListOpen => retainerListings.IsSellListOpen;
     public bool IsRetainerListOpen => retainerListings.IsRetainerListOpen;
     private BagListingState State => Status.State;
@@ -121,6 +127,22 @@ public sealed class BagListingController : IDisposable
             return;
         }
 
+        ScheduleNextAttempt();
+        if (commandManager.ProcessCommand("/isort execute inventory"))
+        {
+            bagSortReadyAt = DateTimeOffset.UtcNow.AddMilliseconds(900);
+            Status = new(BagListingState.ConsolidatingBags,
+                "Consolidating inventory stacks before calculating the protected reserve and 99-stacks.");
+            log.Add(AutomationLogLevel.Information, Status.Detail);
+            return;
+        }
+
+        BeginPriceScan();
+    }
+
+    private void BeginPriceScan()
+    {
+        Status = new(BagListingState.Idle, "Inventory consolidation finished; refreshing curated stock.");
         Refresh();
         var rules = BuildScanRules();
         if (rules.Count == 0)
@@ -146,7 +168,6 @@ public sealed class BagListingController : IDisposable
         scanCancellation?.Cancel();
         scanCancellation?.Dispose();
         scanCancellation = new CancellationTokenSource();
-        ScheduleNextAttempt();
         scanTask = universalis.ScanAsync(rules, world, scanCancellation.Token);
         Status = new(BagListingState.ScanningPrices,
             $"Reading current {world} prices for {rules.Count} curated HQ item(s).");
@@ -172,6 +193,12 @@ public sealed class BagListingController : IDisposable
 
     private void OnFrameworkUpdate(IFramework _)
     {
+        if (State == BagListingState.ConsolidatingBags)
+        {
+            if (DateTimeOffset.UtcNow >= bagSortReadyAt)
+                BeginPriceScan();
+            return;
+        }
         if (State == BagListingState.ScanningPrices)
         {
             PollPriceScan();
@@ -267,7 +294,7 @@ public sealed class BagListingController : IDisposable
         Status = new(BagListingState.QueuePrepared,
             $"Queued {queuedStacks} curated 99-stack(s). Starting the all-retainer listing and live repricing pass.");
         log.Add(AutomationLogLevel.Information, Status.Detail);
-        automation.StartNow();
+        automation.StartBagListingNow();
     }
 
     private void TryAutomaticStart()
