@@ -337,6 +337,9 @@ public sealed class ProcurementController : IDisposable
             return;
         }
 
+        // Purchased stock owns its landed-cost ledger entries. Drop an older bag-refill
+        // queue first so the two sources cannot merge under the same item key.
+        ledger.ClearBagStockQueue();
         repricing.Halt("Paused while procurement runs.");
         activeRunMode = mode;
         runAfterScan = ProcurementRunMode.None;

@@ -21,11 +21,6 @@ public sealed class DashboardWindow : Window
     private int newItemId;
     private uint? selectedItemId;
     private int newProcurementItemId;
-    private BagListingCandidate? selectedBagListing;
-    private int bagListingQuantity = 1;
-    private uint bagListingUnitPrice;
-    private bool bagListingHqOnly = true;
-    private string bagListingSearch = string.Empty;
     private bool configurationDirty;
 
     public DashboardWindow(
@@ -441,105 +436,75 @@ public sealed class DashboardWindow : Window
         {
             BagListingState.Failed => new Vector4(1f, 0.35f, 0.3f, 1f),
             BagListingState.Completed => new Vector4(0.35f, 0.9f, 0.45f, 1f),
-            BagListingState.WaitingForVerification => new Vector4(0.35f, 0.75f, 1f, 1f),
+            BagListingState.ScanningPrices or BagListingState.QueuePrepared or BagListingState.WaitingForVerification =>
+                new Vector4(0.35f, 0.75f, 1f, 1f),
             _ => new Vector4(0.75f, 0.75f, 0.75f, 1f),
         };
         ImGui.TextColored(statusColor, status.State.ToString());
         ImGui.SameLine();
         ImGui.TextWrapped(status.Detail);
 
-        if (ImGui.Button("Refresh bag items"))
+        ImGui.TextWrapped(
+            "Eligible stock is intentionally limited to HQ Grade 4 gemdraughts and HQ Caramel Popcorn. " +
+            "Every sale uses a 99-stack; other bag items are ignored.");
+
+        var automatic = configuration.Current.AutomaticCuratedBagListingEnabled;
+        if (ImGui.Checkbox("Automatically refill empty retainer slots during idle bell runs", ref automatic))
+        {
+            configuration.Current.AutomaticCuratedBagListingEnabled = automatic;
+            configurationDirty = true;
+        }
+        var reserve = configuration.Current.BagListingReservePerItem;
+        ImGui.SetNextItemWidth(180 * ImGuiHelpers.GlobalScale);
+        if (InputInt("Keep in bags per item", ref reserve, 0, 9_999))
+        {
+            configuration.Current.BagListingReservePerItem = reserve;
+            configurationDirty = true;
+            bagListing.Refresh();
+        }
+        ImGui.TextDisabled("Default: keep 100 of each item for personal use. The reserve is checked again before every listing.");
+
+        if (ImGui.Button("Refresh curated stock"))
             bagListing.Refresh();
         ImGui.SameLine();
-        ImGui.Checkbox("HQ only", ref bagListingHqOnly);
-        ImGui.SameLine();
-        ImGui.SetNextItemWidth(220 * ImGuiHelpers.GlobalScale);
-        ImGui.InputTextWithHint("##bag-search", "Search bag items", ref bagListingSearch, 128);
+        var cannotRun = bagListing.IsBusy || automation.IsActive || procurement.IsActive || !bagListing.IsRetainerListOpen;
+        ImGui.BeginDisabled(cannotRun);
+        if (ImGui.Button("Auto-price and list all eligible 99-stacks"))
+            bagListing.PrepareAutomaticRun();
+        ImGui.EndDisabled();
 
-        var candidates = bagListing.Candidates;
-        if (selectedBagListing is not null)
-        {
-            selectedBagListing = candidates.FirstOrDefault(x =>
-                x.SourceType == selectedBagListing.SourceType &&
-                x.SourceSlot == selectedBagListing.SourceSlot &&
-                x.ItemId == selectedBagListing.ItemId &&
-                x.IsHighQuality == selectedBagListing.IsHighQuality);
-        }
+        if (!bagListing.IsRetainerListOpen)
+            ImGui.TextColored(new Vector4(1f, 0.72f, 0.2f, 1f),
+                "Open the main summoning-bell retainer list to run across every available retainer.");
+        else if (automation.IsActive || procurement.IsActive)
+            ImGui.TextColored(new Vector4(1f, 0.72f, 0.2f, 1f),
+                "The current retainer/procurement operation must finish first.");
 
-        if (ImGui.BeginTable("BagListingCandidates", 4,
+        var stock = bagListing.Stock;
+        if (ImGui.BeginTable("CuratedBagStock", 6,
                 ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.ScrollY | ImGuiTableFlags.Resizable,
                 new Vector2(0, 220 * ImGuiHelpers.GlobalScale)))
         {
             ImGui.TableSetupColumn("Item");
-            ImGui.TableSetupColumn("Quality", ImGuiTableColumnFlags.WidthFixed, 65);
-            ImGui.TableSetupColumn("Bag qty", ImGuiTableColumnFlags.WidthFixed, 75);
-            ImGui.TableSetupColumn("Stack max", ImGuiTableColumnFlags.WidthFixed, 75);
+            ImGui.TableSetupColumn("Quality", ImGuiTableColumnFlags.WidthFixed, 60);
+            ImGui.TableSetupColumn("Bag total", ImGuiTableColumnFlags.WidthFixed, 80);
+            ImGui.TableSetupColumn("Keep", ImGuiTableColumnFlags.WidthFixed, 70);
+            ImGui.TableSetupColumn("List", ImGuiTableColumnFlags.WidthFixed, 85);
+            ImGui.TableSetupColumn("Auto price", ImGuiTableColumnFlags.WidthFixed, 90);
             ImGui.TableHeadersRow();
-            foreach (var candidate in candidates.Where(x => !bagListingHqOnly || x.IsHighQuality)
-                         .Where(x => string.IsNullOrWhiteSpace(bagListingSearch) ||
-                                     x.ItemName.Contains(bagListingSearch, StringComparison.OrdinalIgnoreCase)))
+            foreach (var item in stock)
             {
-                ImGui.PushID($"bag-{(int)candidate.SourceType}-{candidate.SourceSlot}-{candidate.ItemId}-{candidate.IsHighQuality}");
                 ImGui.TableNextRow();
+                ImGui.TableNextColumn(); ImGui.TextUnformatted(item.ItemName);
+                ImGui.TableNextColumn(); ImGui.TextUnformatted("HQ");
+                ImGui.TableNextColumn(); ImGui.TextUnformatted(item.TotalQuantity.ToString("N0"));
+                ImGui.TableNextColumn(); ImGui.TextUnformatted(item.ReservedQuantity.ToString("N0"));
+                ImGui.TableNextColumn(); ImGui.TextUnformatted($"{item.StackCount} x99");
                 ImGui.TableNextColumn();
-                var selected = selectedBagListing == candidate;
-                if (ImGui.Selectable(candidate.ItemName, selected, ImGuiSelectableFlags.SpanAllColumns))
-                {
-                    selectedBagListing = candidate;
-                    bagListingQuantity = (int)Math.Min(candidate.Quantity, candidate.StackSize);
-                    bagListingUnitPrice = 0;
-                }
-                ImGui.TableNextColumn(); ImGui.TextUnformatted(candidate.IsHighQuality ? "HQ" : "NQ");
-                ImGui.TableNextColumn(); ImGui.TextUnformatted(candidate.Quantity.ToString("N0"));
-                ImGui.TableNextColumn(); ImGui.TextUnformatted(candidate.StackSize.ToString("N0"));
-                ImGui.PopID();
+                ImGui.TextUnformatted(item.SuggestedPrice is { } price ? $"{price:N0}" : "scan needed");
             }
             ImGui.EndTable();
         }
-
-        ImGui.Separator();
-        if (selectedBagListing is null)
-        {
-            ImGui.TextWrapped("Select a marketable bag stack. Nothing is listed until you enter a price and press the listing button.");
-            return;
-        }
-
-        var selectedItem = selectedBagListing;
-        ImGui.TextUnformatted($"Selected: {selectedItem.ItemName}{(selectedItem.IsHighQuality ? " HQ" : string.Empty)}");
-        var maximumQuantity = (int)Math.Min(selectedItem.Quantity, selectedItem.StackSize);
-        ImGui.SetNextItemWidth(180 * ImGuiHelpers.GlobalScale);
-        if (InputInt("Listing quantity", ref bagListingQuantity, 1, maximumQuantity))
-            bagListingQuantity = Math.Clamp(bagListingQuantity, 1, maximumQuantity);
-        ImGui.SetNextItemWidth(180 * ImGuiHelpers.GlobalScale);
-        InputUInt("Unit price", ref bagListingUnitPrice, 0, 999_999_999);
-
-        var pricingRule = configuration.Current.GetEffectiveRule(selectedItem.ItemId);
-        var configuredFloor = Math.Max(pricingRule.MinimumPrice,
-            pricingRule.CostBasis == 0
-                ? 0
-                : (uint)Math.Min(999_999_999m,
-                    decimal.Ceiling(pricingRule.CostBasis * (1m + pricingRule.MinimumMarginPercent / 100m))));
-        var belowFloor = bagListingUnitPrice > 0 && bagListingUnitPrice < configuredFloor;
-        if (belowFloor)
-            ImGui.TextColored(new Vector4(1f, 0.45f, 0.25f, 1f),
-                $"Price is below the configured floor of {configuredFloor:N0} gil.");
-        if (!bagListing.IsRetainerSellListOpen)
-            ImGui.TextColored(new Vector4(1f, 0.72f, 0.2f, 1f),
-                "Open a retainer's Sell Items / Markets list before submitting.");
-        if (automation.IsActive)
-        {
-            ImGui.TextColored(new Vector4(1f, 0.72f, 0.2f, 1f),
-                "Wait for the current repricing run to finish before listing a bag item.");
-            if (ImGui.Button("Pause repricing for bag listing"))
-                automation.Halt("Paused by user for manual bag listing.");
-        }
-
-        var disabled = bagListing.IsBusy || automation.IsActive || !bagListing.IsRetainerSellListOpen ||
-                       bagListingUnitPrice == 0 || belowFloor;
-        ImGui.BeginDisabled(disabled);
-        if (ImGui.Button("List selected stack on this retainer"))
-            bagListing.List(selectedItem, (uint)bagListingQuantity, bagListingUnitPrice);
-        ImGui.EndDisabled();
     }
 
     private void DrawProcurement()

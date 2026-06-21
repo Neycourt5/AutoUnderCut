@@ -6,7 +6,7 @@ namespace SmartUndercutBot;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 12;
+    public int Version { get; set; } = 13;
     public bool AutomationEnabled { get; set; }
     public bool ProcessAllRetainers { get; set; } = true;
     public bool RepeatBellRuns { get; set; }
@@ -24,6 +24,8 @@ public sealed class Configuration : IPluginConfiguration
     public bool AutomaticProcurementEnabled { get; set; }
     public bool AllowAutomaticPurchases { get; set; }
     public bool AllowAutomaticListing { get; set; }
+    public bool AutomaticCuratedBagListingEnabled { get; set; } = true;
+    public int BagListingReservePerItem { get; set; } = 100;
     public int ProcurementIntervalMinutes { get; set; } = 10;
     public uint ProcurementBudget { get; set; } = 5_000_000;
     public int ProcurementTargetSaleSlots { get; set; } = 60;
@@ -164,6 +166,13 @@ public sealed class Configuration : IPluginConfiguration
                 ProcurementIntervalMinutes = 10;
             Version = 12;
         }
+        if (Version < 13)
+        {
+            if (BagListingReservePerItem == 0)
+                BagListingReservePerItem = 100;
+            AutomaticCuratedBagListingEnabled = true;
+            Version = 13;
+        }
         MinimumDelayMs = Math.Clamp(MinimumDelayMs, 100, 60_000);
         MaximumDelayMs = Math.Clamp(MaximumDelayMs, MinimumDelayMs, 60_000);
         MarketRequestTimeoutSeconds = Math.Clamp(MarketRequestTimeoutSeconds, 2, 60);
@@ -177,6 +186,7 @@ public sealed class Configuration : IPluginConfiguration
         ProcurementBudget = Math.Clamp(ProcurementBudget, 1_000u, 100_000_000u);
         ProcurementTargetSaleSlots = Math.Clamp(ProcurementTargetSaleSlots, 1, 200);
         ProcurementInventoryReserve = Math.Clamp(ProcurementInventoryReserve, 1, 100);
+        BagListingReservePerItem = Math.Clamp(BagListingReservePerItem, 0, 9999);
         ProcurementMinimumRoiPercent = Math.Clamp(ProcurementMinimumRoiPercent, 0m, 1_000m);
         ProcurementMinimumProfitPerUnit = Math.Clamp(ProcurementMinimumProfitPerUnit, 0u, 100_000_000u);
         ProcurementDataCenter ??= string.Empty;

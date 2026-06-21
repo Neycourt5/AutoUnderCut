@@ -43,16 +43,16 @@ public sealed class Plugin : IDalamudPlugin
         var procurementLedger = new ProcurementLedger();
         marketData = new MarketDataService(MarketBoard, configuration);
         var retainerListings = new RetainerListingService(ClientState, ObjectTable, GameGui, DataManager);
+        var pricingStrategy = new PricingStrategyService();
         automation = new AutomationController(
             Framework,
             retainerListings,
             marketData,
-            new PricingStrategyService(),
+            pricingStrategy,
             new PortfolioValuationService(),
             configuration,
             procurementLedger,
             automationLog);
-        bagListing = new BagListingController(Framework, retainerListings, automationLog);
         universalis = new UniversalisService(PlayerState, DataManager);
         if (configuration.Current.ProcurementRules.Count == 0)
         {
@@ -73,6 +73,17 @@ public sealed class Plugin : IDalamudPlugin
             procurementLedger,
             automation,
             configuration,
+            automationLog);
+        bagListing = new BagListingController(
+            Framework,
+            PlayerState,
+            retainerListings,
+            universalis,
+            pricingStrategy,
+            configuration,
+            procurementLedger,
+            automation,
+            procurement,
             automationLog);
         dashboard = new DashboardWindow(
             configuration, automation, procurement, bagListing, universalis, procurementLedger, marketData,

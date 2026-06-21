@@ -9,7 +9,10 @@ public sealed record ProcurementLedgerEntry(
     uint ListedQuantity,
     uint TargetSalePrice,
     int TargetStackSize,
-    bool IsHighQuality)
+    bool IsHighQuality,
+    bool RequireFullStacks = false,
+    uint ReserveQuantity = 0,
+    bool IsBagStock = false)
 {
     public uint PendingQuantity => PurchasedQuantity > ListedQuantity ? PurchasedQuantity - ListedQuantity : 0;
 }
@@ -45,6 +48,41 @@ public sealed class ProcurementLedger
                     order.ItemId, order.ItemName, order.Quantity, 0, order.TargetSalePrice, targetStackSize,
                     order.IsHighQuality);
             }
+        }
+    }
+
+    public void QueueExistingStock(
+        uint itemId,
+        string itemName,
+        uint quantity,
+        uint targetSalePrice,
+        int targetStackSize,
+        bool isHighQuality,
+        uint reserveQuantity)
+    {
+        lock (sync)
+        {
+            var key = (itemId, isHighQuality);
+            entries[key] = new(
+                itemId,
+                itemName,
+                quantity,
+                0,
+                targetSalePrice,
+                targetStackSize,
+                isHighQuality,
+                true,
+                reserveQuantity,
+                true);
+        }
+    }
+
+    public void ClearBagStockQueue()
+    {
+        lock (sync)
+        {
+            foreach (var key in entries.Where(x => x.Value.IsBagStock).Select(x => x.Key).ToArray())
+                entries.Remove(key);
         }
     }
 

@@ -1,4 +1,6 @@
 using Dalamud.Plugin.Services;
+using SmartUndercutBot.Core.Models;
+using SmartUndercutBot.Core.Services;
 using SmartUndercutBot.Services;
 
 namespace SmartUndercutBot.Automation;
@@ -6,6 +8,8 @@ namespace SmartUndercutBot.Automation;
 public enum BagListingState
 {
     Idle,
+    ScanningPrices,
+    QueuePrepared,
     WaitingForVerification,
     Completed,
     Failed,
@@ -13,39 +17,138 @@ public enum BagListingState
 
 public sealed record BagListingStatus(BagListingState State, string Detail);
 
+public sealed record CuratedBagStock(
+    uint ItemId,
+    string ItemName,
+    uint TotalQuantity,
+    uint ReservedQuantity,
+    uint ListableQuantity,
+    int StackCount,
+    uint? SuggestedPrice);
+
 public sealed class BagListingController : IDisposable
 {
+    private static readonly HashSet<string> CuratedItems = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Grade 4 Gemdraught of Strength",
+        "Grade 4 Gemdraught of Dexterity",
+        "Grade 4 Gemdraught of Intelligence",
+        "Grade 4 Gemdraught of Mind",
+        "Caramel Popcorn",
+    };
+
     private readonly IFramework framework;
+    private readonly IPlayerState playerState;
     private readonly IRetainerListingService retainerListings;
+    private readonly IUniversalisService universalis;
+    private readonly IPricingStrategyService pricing;
+    private readonly ConfigurationService configuration;
+    private readonly ProcurementLedger ledger;
+    private readonly AutomationController automation;
+    private readonly ProcurementController procurement;
     private readonly AutomationLog log;
+    private readonly Dictionary<uint, uint> plannedPrices = [];
     private IReadOnlyList<BagListingCandidate> candidates = [];
+    private CancellationTokenSource? scanCancellation;
+    private Task<IReadOnlyList<ProcurementMarketItem>>? scanTask;
     private PendingAutoListing? pending;
     private DateTimeOffset deadline;
+    private DateTimeOffset nextAutomaticAttempt;
 
     public BagListingController(
         IFramework framework,
+        IPlayerState playerState,
         IRetainerListingService retainerListings,
+        IUniversalisService universalis,
+        IPricingStrategyService pricing,
+        ConfigurationService configuration,
+        ProcurementLedger ledger,
+        AutomationController automation,
+        ProcurementController procurement,
         AutomationLog log)
     {
         this.framework = framework;
+        this.playerState = playerState;
         this.retainerListings = retainerListings;
+        this.universalis = universalis;
+        this.pricing = pricing;
+        this.configuration = configuration;
+        this.ledger = ledger;
+        this.automation = automation;
+        this.procurement = procurement;
         this.log = log;
+        nextAutomaticAttempt = DateTimeOffset.UtcNow;
+        Refresh();
         framework.Update += OnFrameworkUpdate;
     }
 
     public BagListingStatus Status { get; private set; } = new(BagListingState.Idle,
-        "Open a retainer sell list, select a bag stack, and enter its unit price.");
+        "Only curated HQ raid consumables are eligible for automatic listing.");
     public IReadOnlyList<BagListingCandidate> Candidates => candidates;
-    public bool IsBusy => State == BagListingState.WaitingForVerification;
+    public IReadOnlyList<CuratedBagStock> Stock => BuildStockSummary();
+    public bool IsBusy => State is BagListingState.ScanningPrices or BagListingState.WaitingForVerification;
     public bool IsRetainerSellListOpen => retainerListings.IsSellListOpen;
+    public bool IsRetainerListOpen => retainerListings.IsRetainerListOpen;
     private BagListingState State => Status.State;
 
     public void Refresh()
     {
         if (IsBusy)
             return;
-        candidates = retainerListings.ReadBagListingCandidates();
-        Status = new(BagListingState.Idle, $"Found {candidates.Count} marketable bag stack(s).");
+        candidates = retainerListings.ReadBagListingCandidates()
+            .Where(x => x.IsHighQuality && CuratedItems.Contains(x.ItemName))
+            .ToArray();
+        var distinctItems = candidates.Select(x => x.ItemId).Distinct().Count();
+        Status = new(BagListingState.Idle,
+            distinctItems == 0
+                ? "No eligible HQ Grade 4 gemdraughts or HQ Caramel Popcorn were found in the bags."
+                : $"Found {distinctItems} curated HQ item type(s). Ready to auto-price 99-stacks.");
+    }
+
+    public void PrepareAutomaticRun()
+    {
+        if (IsBusy)
+            return;
+        if (!retainerListings.IsRetainerListOpen)
+        {
+            Fail("Open the summoning-bell retainer list before starting automatic bag listing.");
+            return;
+        }
+        if (automation.IsActive || procurement.IsActive)
+        {
+            Fail("Wait for the current retainer or procurement operation to finish.");
+            return;
+        }
+
+        Refresh();
+        var rules = BuildScanRules();
+        if (rules.Count == 0)
+        {
+            Status = new(BagListingState.Completed,
+                $"Nothing is listable: each item needs {configuration.Current.BagListingReservePerItem:N0} reserved plus one complete 99-stack.");
+            ScheduleNextAttempt();
+            return;
+        }
+        if (!playerState.IsLoaded)
+        {
+            Fail("The current world is not available yet.");
+            return;
+        }
+
+        var world = playerState.CurrentWorld.Value.Name.ToString();
+        if (string.IsNullOrWhiteSpace(world))
+        {
+            Fail("Could not determine the current world for pricing.");
+            return;
+        }
+
+        scanCancellation?.Cancel();
+        scanCancellation?.Dispose();
+        scanCancellation = new CancellationTokenSource();
+        scanTask = universalis.ScanAsync(rules, world, scanCancellation.Token);
+        Status = new(BagListingState.ScanningPrices,
+            $"Reading current {world} prices for {rules.Count} curated HQ item(s).");
+        log.Add(AutomationLogLevel.Information, Status.Detail);
     }
 
     public bool List(BagListingCandidate candidate, uint quantity, uint unitPrice)
@@ -55,8 +158,7 @@ public sealed class BagListingController : IDisposable
         if (!retainerListings.TryListBagItem(candidate, quantity, unitPrice, out pending, out var message) ||
             pending is null)
         {
-            Status = new(BagListingState.Failed, message);
-            log.Add(AutomationLogLevel.Error, $"BAG LIST FAILED {candidate.ItemName}: {message}");
+            Fail(message, $"BAG LIST FAILED {candidate.ItemName}: {message}");
             return false;
         }
 
@@ -68,7 +170,154 @@ public sealed class BagListingController : IDisposable
 
     private void OnFrameworkUpdate(IFramework _)
     {
-        if (State != BagListingState.WaitingForVerification || pending is null)
+        if (State == BagListingState.ScanningPrices)
+        {
+            PollPriceScan();
+            return;
+        }
+        if (State == BagListingState.WaitingForVerification)
+        {
+            PollManualVerification();
+            return;
+        }
+        TryAutomaticStart();
+    }
+
+    private void PollPriceScan()
+    {
+        if (scanTask is null || !scanTask.IsCompleted)
+            return;
+        if (scanTask.IsCanceled || scanTask.IsFaulted)
+        {
+            Fail(scanTask.Exception?.GetBaseException().Message ?? "The Universalis price scan was cancelled.");
+            scanTask = null;
+            ScheduleNextAttempt();
+            return;
+        }
+        if (!retainerListings.IsRetainerListOpen)
+        {
+            Fail("The summoning-bell retainer list closed before the price plan was ready.");
+            scanTask = null;
+            ScheduleNextAttempt();
+            return;
+        }
+
+        QueuePricedStock(scanTask.Result);
+        scanTask = null;
+    }
+
+    private void QueuePricedStock(IReadOnlyList<ProcurementMarketItem> markets)
+    {
+        plannedPrices.Clear();
+        ledger.ClearBagStockQueue();
+        var existingProcurement = ledger.Snapshot()
+            .Where(x => !x.IsBagStock && x.PendingQuantity > 0)
+            .Select(x => (x.ItemId, x.IsHighQuality))
+            .ToHashSet();
+        var reserve = (uint)configuration.Current.BagListingReservePerItem;
+        var queuedStacks = 0;
+        foreach (var stock in BuildStockSummary())
+        {
+            if (stock.StackCount == 0 || existingProcurement.Contains((stock.ItemId, true)))
+                continue;
+            var market = markets.FirstOrDefault(x => x.ItemId == stock.ItemId);
+            if (market is null)
+                continue;
+            var listings = market.Listings
+                .Select(x => new MarketListing(x.PricePerUnit, x.Quantity, x.IsHighQuality, RetainerId: x.RetainerId))
+                .ToArray();
+            var historicalMedian = Median(market.RecentSales.Where(x => x.IsHighQuality).Select(x => x.PricePerUnit));
+            var rule = configuration.Current.GetEffectiveRule(stock.ItemId);
+            rule.QualityFilter = QualityFilterMode.HighQualityOnly;
+            var placeholder = new RetainerListing(
+                0, "New bag listing", -1, stock.ItemId, stock.ItemName, 99,
+                PricingStrategyService.MaximumListingPrice, true, rule.CostBasis);
+            var decision = pricing.Evaluate(new PricingContext(
+                placeholder,
+                new MarketSnapshot(stock.ItemId, DateTimeOffset.UtcNow, listings, historicalMedian, true),
+                rule,
+                retainerListings.OwnedRetainerIds));
+            if (!decision.ShouldUpdate || decision.TargetPrice is not { } target)
+            {
+                log.Add(AutomationLogLevel.Warning,
+                    $"BAG STOCK SKIPPED {stock.ItemName}: {decision.Reason}");
+                continue;
+            }
+
+            plannedPrices[stock.ItemId] = target;
+            ledger.QueueExistingStock(stock.ItemId, stock.ItemName, stock.ListableQuantity, target, 99, true, reserve);
+            queuedStacks += stock.StackCount;
+            log.Add(AutomationLogLevel.Information,
+                $"BAG STOCK QUEUED {stock.ItemName}: {stock.StackCount} x99 at {target:N0} gil; keeping {reserve:N0} in bags.");
+        }
+
+        ScheduleNextAttempt();
+        if (queuedStacks == 0)
+        {
+            Status = new(BagListingState.Completed,
+                "No complete 99-stacks passed the reserve, market-data, and pricing-floor checks.");
+            return;
+        }
+
+        configuration.Current.AllowAutomaticListing = true;
+        configuration.Current.ProcessAllRetainers = true;
+        configuration.Save();
+        Status = new(BagListingState.QueuePrepared,
+            $"Queued {queuedStacks} curated 99-stack(s). Starting the all-retainer listing and live repricing pass.");
+        log.Add(AutomationLogLevel.Information, Status.Detail);
+        automation.StartNow();
+    }
+
+    private void TryAutomaticStart()
+    {
+        if (!configuration.Current.AutomaticCuratedBagListingEnabled || DateTimeOffset.UtcNow < nextAutomaticAttempt ||
+            automation.IsActive || procurement.IsActive || !retainerListings.IsRetainerListOpen ||
+            automation.LastKnownFreeSaleSlots is not > 0)
+            return;
+        PrepareAutomaticRun();
+    }
+
+    private IReadOnlyList<ProcurementRule> BuildScanRules() => BuildStockSummary()
+        .Where(x => x.StackCount > 0)
+        .Select(x => new ProcurementRule
+        {
+            ItemId = x.ItemId,
+            ItemName = x.ItemName,
+            TargetStackSize = 99,
+            MaximumSaleSlots = x.StackCount,
+            AllowHighQuality = true,
+            RequireHighQuality = true,
+        })
+        .ToArray();
+
+    private IReadOnlyList<CuratedBagStock> BuildStockSummary()
+    {
+        var reserve = (uint)configuration.Current.BagListingReservePerItem;
+        return candidates
+            .GroupBy(x => new { x.ItemId, x.ItemName })
+            .Select(group =>
+            {
+                var total = (uint)Math.Min(uint.MaxValue, group.Sum(x => (long)x.Quantity));
+                var stacksAllowedByReserve = total > reserve ? (total - reserve) / 99 : 0;
+                var completeSourceStacks = (uint)group.Sum(x => x.Quantity / 99);
+                var stackCount = Math.Min(stacksAllowedByReserve, completeSourceStacks);
+                var listable = stackCount * 99;
+                return new CuratedBagStock(
+                    group.Key.ItemId,
+                    group.Key.ItemName,
+                    total,
+                    Math.Min(total, reserve),
+                    listable,
+                    (int)stackCount,
+                    plannedPrices.GetValueOrDefault(group.Key.ItemId) is var price && price > 0 ? price : null);
+            })
+            .OrderBy(x => x.ItemName, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    private void PollManualVerification()
+    {
+        if (pending is null)
             return;
         if (retainerListings.VerifyAutoListing(pending))
         {
@@ -78,7 +327,7 @@ public sealed class BagListingController : IDisposable
                 $"Listed {verified.ItemName} x{verified.Quantity:N0} at {verified.UnitPrice:N0} gil.");
             log.Add(AutomationLogLevel.Information,
                 $"BAG LIST VERIFIED {verified.ItemName} x{verified.Quantity:N0} at {verified.UnitPrice:N0} gil on {retainerListings.ActiveRetainerName}.");
-            candidates = retainerListings.ReadBagListingCandidates();
+            RefreshCandidatesOnly();
             return;
         }
         if (DateTimeOffset.UtcNow < deadline)
@@ -86,11 +335,38 @@ public sealed class BagListingController : IDisposable
 
         var failed = pending;
         pending = null;
-        Status = new(BagListingState.Failed,
-            $"Could not verify {failed.ItemName} in the retainer sale slot.");
-        log.Add(AutomationLogLevel.Error, $"BAG LIST VERIFICATION FAILED {failed.ItemName}.");
-        candidates = retainerListings.ReadBagListingCandidates();
+        Fail($"Could not verify {failed.ItemName} in the retainer sale slot.",
+            $"BAG LIST VERIFICATION FAILED {failed.ItemName}.");
+        RefreshCandidatesOnly();
     }
 
-    public void Dispose() => framework.Update -= OnFrameworkUpdate;
+    private void RefreshCandidatesOnly() => candidates = retainerListings.ReadBagListingCandidates()
+        .Where(x => x.IsHighQuality && CuratedItems.Contains(x.ItemName))
+        .ToArray();
+
+    private void ScheduleNextAttempt() => nextAutomaticAttempt = DateTimeOffset.UtcNow.AddMinutes(5);
+
+    private void Fail(string message, string? logMessage = null)
+    {
+        Status = new(BagListingState.Failed, message);
+        log.Add(AutomationLogLevel.Error, logMessage ?? message);
+    }
+
+    private static uint? Median(IEnumerable<uint> source)
+    {
+        var values = source.Where(x => x > 0).Order().ToArray();
+        if (values.Length == 0)
+            return null;
+        var middle = values.Length / 2;
+        return values.Length % 2 == 1
+            ? values[middle]
+            : (uint)(((ulong)values[middle - 1] + values[middle]) / 2);
+    }
+
+    public void Dispose()
+    {
+        framework.Update -= OnFrameworkUpdate;
+        scanCancellation?.Cancel();
+        scanCancellation?.Dispose();
+    }
 }

@@ -17,7 +17,7 @@ Smart Undercutter is a Dalamud SDK 15 plugin for guarded retainer-market reprici
 - Supports price floors, cost-basis margins, HQ/NQ filtering, match-lowest mode, optional tolerance bands, and 99/999 rounding.
 - Provides an ImGui status dashboard, per-retainer progress, queue with live/target prices, configuration, and audit log.
 - Shows a Portfolio estimate with wallet and retainer gil, gross asking value, live market-aligned value, per-retainer seller tax, estimated net proceeds, markdown risk, and projected total wealth.
-- Includes an explicit Bag Listing tab that scans marketable inventory stacks and lists a selected quantity/price on the currently open retainer, with cost-floor checks and server-slot verification.
+- Automatically filters bag stock to HQ Grade 4 gemdraughts and HQ Caramel Popcorn, prices them from the current-world market, and fills free retainer slots with complete 99-stacks while preserving 100 of each item for personal use by default.
 - Builds diversified purchase plans from Universalis sale history and current listings, constrained by gil, bag slots, retainer sale slots, weekly sales, ROI, and per-item limits.
 - Uses Lifestream and vnavmesh to visit same-data-center worlds, then revalidates every candidate against the live in-game listing before submitting a purchase.
 - Offers a guided deal route that prioritizes Universalis opportunities by world, travels to each market board, flashes the FFXIV taskbar icon, shows expected prices and guarded ceilings, and waits for a manual Done / Next command.
@@ -25,7 +25,7 @@ Smart Undercutter is a Dalamud SDK 15 plugin for guarded retainer-market reprici
 - The curated procurement set is HQ Grade 4 gemdraughts plus HQ Caramel Popcorn; legacy Grade 3 gemdraught and food defaults are removed during migration.
 - Persists the landed unit cost of automatic purchases, including the buyer fee, and prevents later repricing below that cost plus the configured margin.
 
-Dry-run mode remains available. Repricing writes, purchases, automatic listing, and recurring procurement each have separate opt-in controls. Purchase and listing controls ship disarmed.
+Dry-run mode remains available. Repricing writes, purchases, automatic listing, and recurring procurement each have separate controls. Automatic curated bag refills are enabled during idle bell runs; market-board purchases remain separately armed.
 
 ## Projects
 

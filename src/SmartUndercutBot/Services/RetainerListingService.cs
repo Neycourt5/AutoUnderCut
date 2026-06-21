@@ -476,7 +476,16 @@ public sealed unsafe class RetainerListingService : IRetainerListingService
                 if (item == null || item->ItemId == 0 || item->Quantity <= 0 ||
                     !ledger.TryGetPending(item->ItemId, isHighQuality, out var entry) || entry is null)
                     continue;
-                var quantity = Math.Min((uint)item->Quantity, Math.Min(entry.PendingQuantity, (uint)entry.TargetStackSize));
+                if (entry.RequireFullStacks && item->Quantity < entry.TargetStackSize)
+                    continue;
+                if (entry.ReserveQuantity > 0 &&
+                    GetBagQuantity(manager, entry.ItemId, entry.IsHighQuality) <
+                    entry.ReserveQuantity + (uint)entry.TargetStackSize)
+                    continue;
+                var quantity = entry.RequireFullStacks
+                    ? (uint)entry.TargetStackSize
+                    : Math.Min((uint)item->Quantity, Math.Min(entry.PendingQuantity, (uint)entry.TargetStackSize));
+                quantity = Math.Min(quantity, entry.PendingQuantity);
                 if (quantity == 0 || entry.TargetSalePrice == 0)
                     continue;
 
@@ -613,6 +622,25 @@ public sealed unsafe class RetainerListingService : IRetainerListingService
     }
 
     private bool IsAddonVisible(string name) => GetAddon(name) != null;
+
+    private static uint GetBagQuantity(InventoryManager* manager, uint itemId, bool isHighQuality)
+    {
+        uint total = 0;
+        foreach (var type in PlayerInventoryTypes)
+        {
+            var inventory = manager->GetInventoryContainer(type);
+            if (inventory == null || !inventory->IsLoaded)
+                continue;
+            for (ushort slot = 0; slot < inventory->Size; slot++)
+            {
+                var item = inventory->GetInventorySlot(slot);
+                if (item != null && item->ItemId == itemId && item->Quantity > 0 &&
+                    ((item->Flags & InventoryItem.ItemFlags.HighQuality) != 0) == isHighQuality)
+                    total += (uint)item->Quantity;
+            }
+        }
+        return total;
+    }
 
     private static readonly InventoryType[] PlayerInventoryTypes =
     [
