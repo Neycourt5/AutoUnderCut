@@ -978,12 +978,17 @@ public sealed class ProcurementController : IDisposable
             repricing.IsActive)
             return;
 
-        if (configuration.Current.LiveWorldStockHuntEnabled &&
-            configuration.Current.AllowAutomaticPurchases &&
-            repricing.LastKnownFreeSaleSlots is > 0 &&
-            DateTimeOffset.UtcNow >= nextLiveStockHunt && HasLowCuratedStock())
+        if (configuration.Current.LiveWorldStockHuntEnabled)
         {
-            StartLiveStockHunt();
+            if (configuration.Current.AllowAutomaticPurchases &&
+                repricing.LastKnownFreeSaleSlots is > 0 &&
+                DateTimeOffset.UtcNow >= nextLiveStockHunt && HasLowCuratedStock())
+                StartLiveStockHunt();
+
+            // Live-market mode deliberately does not fall through to an automatic
+            // Universalis plan. Universalis remains available through its manual
+            // scan button, while unattended procurement uses only visible in-game
+            // searches and revalidates every purchase against the selected listing.
             return;
         }
 

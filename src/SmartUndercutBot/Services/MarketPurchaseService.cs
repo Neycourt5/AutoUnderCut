@@ -3,8 +3,11 @@ using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.Game.Control;
 using FFXIVClientStructs.FFXIV.Client.Game.Object;
+using FFXIVClientStructs.FFXIV.Client.UI;
+using FFXIVClientStructs.FFXIV.Client.UI.Agent;
 using FFXIVClientStructs.FFXIV.Client.UI.Info;
 using FFXIVClientStructs.FFXIV.Component.GUI;
+using Lumina.Excel.Sheets;
 using SmartUndercutBot.Core.Models;
 
 namespace SmartUndercutBot.Services;
@@ -41,12 +44,16 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService
 {
     private readonly IObjectTable objectTable;
     private readonly IGameGui gameGui;
-    private uint submittedItemId;
+    private readonly IDataManager dataManager;
+    private uint visibleSearchItemId;
+    private bool visibleSearchResultSelected;
+    private DateTimeOffset nextVisibleSelectionAt;
 
-    public MarketPurchaseService(IObjectTable objectTable, IGameGui gameGui)
+    public MarketPurchaseService(IObjectTable objectTable, IGameGui gameGui, IDataManager dataManager)
     {
         this.objectTable = objectTable;
         this.gameGui = gameGui;
+        this.dataManager = dataManager;
     }
 
     public bool IsMarketBoardOpen => IsAddonVisible("ItemSearch");
@@ -98,23 +105,60 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService
 
     public bool RequestListings(uint itemId)
     {
-        var proxy = InfoProxyItemSearch.Instance();
-        if (proxy == null || itemId == 0)
+        if (itemId == 0 || !dataManager.GetExcelSheet<Item>().TryGetRow(itemId, out var item))
             return false;
-        if (proxy->WaitingForListings)
-            return submittedItemId == itemId;
-        proxy->ClearListData();
-        proxy->SearchItemId = itemId;
-        var submitted = proxy->RequestData();
-        submittedItemId = submitted ? itemId : 0;
-        return submitted;
+
+        if (visibleSearchItemId == itemId)
+            return true;
+
+        ResetListingRequest();
+        var addon = gameGui.GetAddonByName<AddonItemSearch>("ItemSearch");
+        var agent = AgentItemSearch.Instance();
+        if (addon == null || !addon->IsVisible || addon->SearchTextInput == null ||
+            addon->ResultsList == null || agent == null)
+            return false;
+
+        addon->SearchTextInput->SetText(item.Name.ToString());
+        addon->RunSearch(false);
+        visibleSearchItemId = itemId;
+        visibleSearchResultSelected = false;
+        return true;
     }
 
     public bool AreListingsReady(uint itemId)
     {
         var proxy = InfoProxyItemSearch.Instance();
-        return proxy != null && submittedItemId == itemId &&
-               !proxy->WaitingForListings && proxy->SearchItemId == itemId;
+        if (proxy == null || visibleSearchItemId != itemId)
+            return false;
+
+        var resultAddon = gameGui.GetAddonByName<AtkUnitBase>("ItemSearchResult");
+        if (resultAddon != null && resultAddon->IsVisible &&
+            !proxy->WaitingForListings && proxy->SearchItemId == itemId)
+            return true;
+
+        if (visibleSearchResultSelected && DateTimeOffset.UtcNow < nextVisibleSelectionAt)
+            return false;
+        visibleSearchResultSelected = false;
+
+        var addon = gameGui.GetAddonByName<AddonItemSearch>("ItemSearch");
+        var agent = AgentItemSearch.Instance();
+        if (addon == null || !addon->IsVisible || addon->ResultsList == null || agent == null ||
+            !agent->ListingPageLoaded)
+            return false;
+
+        var ids = agent->ListingPageItemIds;
+        var count = (int)Math.Min(agent->ListingPageItemCount, (uint)ids.Length);
+        count = Math.Min(count, addon->ResultsList->GetItemCount());
+        for (var index = 0; index < count; index++)
+        {
+            if (ids[index] != itemId || addon->ResultsList->GetItemDisabledState(index))
+                continue;
+            addon->ResultsList->SelectItem(index, true);
+            visibleSearchResultSelected = true;
+            nextVisibleSelectionAt = DateTimeOffset.UtcNow.AddSeconds(2);
+            return false;
+        }
+        return false;
     }
 
     public void ResetListingRequest()
@@ -126,7 +170,10 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService
                 proxy->EndRequest();
             proxy->ClearListData();
         }
-        submittedItemId = 0;
+        CloseAddon("ItemSearchResult");
+        visibleSearchItemId = 0;
+        visibleSearchResultSelected = false;
+        nextVisibleSelectionAt = default;
     }
 
     public IReadOnlyList<LivePurchaseListing> ReadLiveListings(uint itemId)

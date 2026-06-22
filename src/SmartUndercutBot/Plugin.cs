@@ -67,7 +67,7 @@ public sealed class Plugin : IDalamudPlugin
             retainerListings,
             universalis,
             new ProcurementPlannerService(),
-            new MarketPurchaseService(ObjectTable, GameGui),
+            new MarketPurchaseService(ObjectTable, GameGui, DataManager),
             new VnavmeshService(PluginInterface),
             new LifestreamService(PluginInterface),
             taskbarAttention,

@@ -627,12 +627,12 @@ public sealed class DashboardWindow : Window
         }
         ImGui.TextDisabled("Default scans every North American world plus Oceania: North-America,Oceania");
         var liveHunt = config.LiveWorldStockHuntEnabled;
-        if (ImGui.Checkbox("Use a live all-world fallback when curated stock is low", ref liveHunt))
+        if (ImGui.Checkbox("Use live in-game markets for automatic procurement", ref liveHunt))
         {
             config.LiveWorldStockHuntEnabled = liveHunt;
             SaveConfiguration();
         }
-        ImGui.TextWrapped("This slow fallback ignores Universalis listings, visits every NA and Oceania world, reads each in-game HQ market, and uses the live Siren price as the resale anchor.");
+        ImGui.TextWrapped("When enabled, unattended procurement does not use Universalis. It visits every NA and Oceania world, visibly searches each curated HQ item on the Market Board, and uses the live Siren price as the resale anchor. The Scan Universalis button remains available for optional planning.");
         var lowStockThreshold = config.LiveWorldStockThresholdPerItem;
         if (InputInt("Live-tour low-stock threshold per item", ref lowStockThreshold, 1, 9999))
         {
