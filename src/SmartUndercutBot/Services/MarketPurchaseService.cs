@@ -29,6 +29,7 @@ public interface IMarketPurchaseService
     bool InteractNearest(string objectName, float maximumDistance = 5f);
     bool RequestListings(uint itemId);
     bool AreListingsReady(uint itemId);
+    void ResetListingRequest();
     IReadOnlyList<LivePurchaseListing> ReadLiveListings(uint itemId);
     bool TrySelectLiveListing(ProcurementOrder expected, out LivePurchaseListing? listing);
     bool SubmitPurchase(LivePurchaseListing listing);
@@ -40,6 +41,7 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService
 {
     private readonly IObjectTable objectTable;
     private readonly IGameGui gameGui;
+    private uint submittedItemId;
 
     public MarketPurchaseService(IObjectTable objectTable, IGameGui gameGui)
     {
@@ -97,17 +99,34 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService
     public bool RequestListings(uint itemId)
     {
         var proxy = InfoProxyItemSearch.Instance();
-        if (proxy == null || itemId == 0 || proxy->WaitingForListings)
+        if (proxy == null || itemId == 0)
             return false;
+        if (proxy->WaitingForListings)
+            return submittedItemId == itemId;
         proxy->ClearListData();
         proxy->SearchItemId = itemId;
-        return proxy->RequestData();
+        var submitted = proxy->RequestData();
+        submittedItemId = submitted ? itemId : 0;
+        return submitted;
     }
 
     public bool AreListingsReady(uint itemId)
     {
         var proxy = InfoProxyItemSearch.Instance();
-        return proxy != null && !proxy->WaitingForListings && proxy->SearchItemId == itemId;
+        return proxy != null && submittedItemId == itemId &&
+               !proxy->WaitingForListings && proxy->SearchItemId == itemId;
+    }
+
+    public void ResetListingRequest()
+    {
+        var proxy = InfoProxyItemSearch.Instance();
+        if (proxy != null)
+        {
+            if (proxy->WaitingForListings)
+                proxy->EndRequest();
+            proxy->ClearListData();
+        }
+        submittedItemId = 0;
     }
 
     public IReadOnlyList<LivePurchaseListing> ReadLiveListings(uint itemId)
@@ -171,6 +190,7 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService
 
     public void CloseMarketBoard()
     {
+        ResetListingRequest();
         CloseAddon("ItemSearchResult");
         CloseAddon("ItemSearch");
     }

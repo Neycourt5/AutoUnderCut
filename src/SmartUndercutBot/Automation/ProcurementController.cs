@@ -16,6 +16,7 @@ public enum ProcurementState
     FindingMarketBoard,
     MovingToMarketBoard,
     WaitingForMarketBoard,
+    WaitingAfterMarketBoardOpen,
     WaitingForStockHuntListings,
     AwaitingManualReview,
     WaitingForListings,
@@ -98,6 +99,7 @@ public sealed class ProcurementController : IDisposable
     private int stockHuntWorldIndex;
     private int stockHuntRuleIndex;
     private bool stockHuntScanning;
+    private bool localTravelObservedBusy;
 
     public ProcurementController(
         IFramework framework,
@@ -268,18 +270,30 @@ public sealed class ProcurementController : IDisposable
                 break;
             case ProcurementState.WaitingForMarketBoard:
                 if (market.IsMarketBoardOpen)
-                {
-                    if (stockHuntScanning)
-                        BeginStockHuntRuleScan();
-                    else if (activeRunMode == ProcurementRunMode.GuidedReview)
-                        BeginGuidedReview();
-                    else
-                        BeginCurrentOrder();
-                }
+                    Delay(ProcurementState.WaitingAfterMarketBoardOpen,
+                        "Market Board opened; allowing item-search services to settle.", 3_000);
                 else if (stockHuntScanning && DateTimeOffset.UtcNow >= deadline)
                     SkipStockHuntWorld($"LIVE TOUR could not open {WorldName}'s Market Board; skipping that world.");
                 else
                     CheckTimeout("Timed out opening the Market Board.");
+                break;
+            case ProcurementState.WaitingAfterMarketBoardOpen:
+                if (!market.IsMarketBoardOpen)
+                {
+                    if (stockHuntScanning)
+                        SkipStockHuntWorld($"LIVE TOUR: {WorldName}'s Market Board closed before item search became ready; skipping that world.");
+                    else
+                        Halt("The Market Board closed before its item-search services became ready.");
+                    break;
+                }
+                if (!DelayElapsed())
+                    break;
+                if (stockHuntScanning)
+                    BeginStockHuntRuleScan();
+                else if (activeRunMode == ProcurementRunMode.GuidedReview)
+                    BeginGuidedReview();
+                else
+                    BeginCurrentOrder();
                 break;
             case ProcurementState.WaitingForStockHuntListings:
                 PollStockHuntListings();
@@ -383,7 +397,11 @@ public sealed class ProcurementController : IDisposable
             return;
         }
 
-        homeWorld = playerState.HomeWorld.Value.Name.ToString();
+        if (!TryGetHomeWorld(out homeWorld))
+        {
+            Halt("Could not determine the character's home world.");
+            return;
+        }
         stockHuntRules = configuration.Current.ProcurementRules
             .Where(x => x.Enabled && x.ItemId != 0 && x.RequireHighQuality)
             .Where(x => market.GetInventoryCount(x.ItemId, true) < configuration.Current.LiveWorldStockThresholdPerItem)
@@ -432,8 +450,7 @@ public sealed class ProcurementController : IDisposable
             Halt("The procurement plan is empty or no longer fits the available gil balance.");
             return;
         }
-        homeWorld = playerState.IsLoaded ? playerState.HomeWorld.Value.Name.ToString() : string.Empty;
-        if (string.IsNullOrWhiteSpace(homeWorld))
+        if (!TryGetHomeWorld(out homeWorld))
         {
             Halt("Could not determine the character's home world.");
             return;
@@ -512,6 +529,7 @@ public sealed class ProcurementController : IDisposable
     private void BeginLocalTravel(bool returningHome)
     {
         localTravelAttempts = 0;
+        localTravelObservedBusy = false;
         nextActionAt = DateTimeOffset.UtcNow;
         Wait(
             returningHome ? ProcurementState.WaitingForSummoningBellTravel : ProcurementState.WaitingForMarketBoardTravel,
@@ -557,6 +575,7 @@ public sealed class ProcurementController : IDisposable
         {
             if (DateTimeOffset.UtcNow >= deadline)
             {
+                market.ResetListingRequest();
                 log.Add(AutomationLogLevel.Warning,
                     $"LIVE TOUR SKIPPED {currentStockHuntRule.ItemName} on {WorldName}: market request timed out.");
                 AdvanceStockHuntRule();
@@ -695,6 +714,7 @@ public sealed class ProcurementController : IDisposable
         {
             if (DateTimeOffset.UtcNow >= deadline)
             {
+                market.ResetListingRequest();
                 SkipCurrentOrder($"SKIPPED BUY {currentOrder.ItemName}: the live market request timed out.");
                 return;
             }
@@ -814,16 +834,9 @@ public sealed class ProcurementController : IDisposable
 
     private void PollLocalTravel(string objectName, ProcurementState foundState, bool returningHome)
     {
-        if (market.FindNearest(objectName).HasValue)
-        {
-            State = foundState;
-            detail = $"Found {objectName}; preparing to approach it.";
-            deadline = DateTimeOffset.UtcNow.AddSeconds(60);
-            return;
-        }
-
         if (lifestream.IsBusy)
         {
+            localTravelObservedBusy = true;
             detail = returningHome
                 ? "Lifestream is moving to the home market area."
                 : $"Lifestream is moving to {WorldName}'s market area.";
@@ -831,6 +844,33 @@ public sealed class ProcurementController : IDisposable
                 SkipStockHuntWorld($"LIVE TOUR timed out reaching {WorldName}'s {objectName}; skipping that world.");
             else
                 CheckTimeout($"Lifestream did not finish travelling to the market area near {objectName}.");
+            return;
+        }
+
+        // Always ask Lifestream to perform its complete `/li mb` route first.
+        // A Market Board can already be present in the object table while the
+        // character is still across the city; treating that as arrival was the
+        // reason the route sometimes stopped in Limsa and fell through to vnav.
+        if (localTravelAttempts == 0 && DateTimeOffset.UtcNow >= nextActionAt)
+        {
+            SubmitMarketTravelAttempt(objectName);
+            return;
+        }
+
+        // Give Lifestream time to consume the chat command. Without this grace
+        // period the next framework frame could see an already-loaded board in
+        // the object table and start vnav before `/li mb` began moving us.
+        if (!localTravelObservedBusy && DateTimeOffset.UtcNow < nextActionAt)
+        {
+            CheckTimeout($"Waiting for '{configuration.Current.MarketBoardTravelCommand}' to begin.");
+            return;
+        }
+
+        if (market.FindNearest(objectName).HasValue)
+        {
+            State = foundState;
+            detail = $"Found {objectName}; preparing to approach it.";
+            deadline = DateTimeOffset.UtcNow.AddSeconds(60);
             return;
         }
 
@@ -852,28 +892,36 @@ public sealed class ProcurementController : IDisposable
             return;
         }
 
+        SubmitMarketTravelAttempt(objectName);
+    }
+
+    private void SubmitMarketTravelAttempt(string objectName)
+    {
         localTravelAttempts++;
         if (!TryExecuteMarketTravel())
         {
             nextActionAt = DateTimeOffset.UtcNow.AddSeconds(4);
-            detail = $"Lifestream did not accept market-area attempt {localTravelAttempts}/3; waiting to retry.";
+            detail = $"Lifestream did not accept '{configuration.Current.MarketBoardTravelCommand}' " +
+                     $"attempt {localTravelAttempts}/3; waiting to retry.";
             log.Add(AutomationLogLevel.Warning, detail);
             return;
         }
 
         nextActionAt = DateTimeOffset.UtcNow.AddSeconds(12);
-        detail = $"Market-area travel attempt {localTravelAttempts}/3 accepted; waiting for {objectName} to load.";
+        detail = $"Sent '{configuration.Current.MarketBoardTravelCommand}' " +
+                 $"(attempt {localTravelAttempts}/3); waiting for {objectName} to load.";
         log.Add(AutomationLogLevel.Information, detail);
     }
 
     private bool TryExecuteMarketTravel()
     {
         var command = configuration.Current.MarketBoardTravelCommand.Trim();
-        if (lifestream.IsAvailable && command.StartsWith("/li", StringComparison.OrdinalIgnoreCase))
-        {
-            var arguments = command.Length > 3 ? command[3..].Trim() : string.Empty;
-            return lifestream.ExecuteCommand(arguments);
-        }
+        if (string.IsNullOrWhiteSpace(command))
+            return false;
+
+        // Send the configured chat command literally. In particular, `/li mb`
+        // performs Lifestream's complete local market-board route; invoking its
+        // internal ExecuteCommand IPC did not consistently start that route.
         return commandManager.ProcessCommand(command);
     }
 
@@ -956,8 +1004,40 @@ public sealed class ProcurementController : IDisposable
         .Where(x => x.Enabled && x.ItemId != 0 && x.RequireHighQuality)
         .Any(x => market.GetInventoryCount(x.ItemId, true) < configuration.Current.LiveWorldStockThresholdPerItem);
 
-    private bool IsOnWorld(string world) => playerState.IsLoaded && string.Equals(
-        playerState.CurrentWorld.Value.Name.ToString(), world, StringComparison.OrdinalIgnoreCase);
+    private bool IsOnWorld(string world)
+    {
+        if (!playerState.IsLoaded || string.IsNullOrWhiteSpace(world))
+            return false;
+
+        try
+        {
+            return string.Equals(playerState.CurrentWorld.Value.Name.ToString(), world,
+                StringComparison.OrdinalIgnoreCase);
+        }
+        catch (InvalidOperationException)
+        {
+            // RowRef.Value is temporarily unavailable while cross-DC travel is
+            // loading. Treat that as "not arrived yet" and keep polling.
+            return false;
+        }
+    }
+
+    private bool TryGetHomeWorld(out string world)
+    {
+        world = string.Empty;
+        if (!playerState.IsLoaded)
+            return false;
+
+        try
+        {
+            world = playerState.HomeWorld.Value.Name.ToString();
+            return !string.IsNullOrWhiteSpace(world);
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
+    }
 
     private void Complete(string message)
     {
