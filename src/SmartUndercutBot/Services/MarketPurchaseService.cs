@@ -19,7 +19,8 @@ public sealed record LivePurchaseListing(
     ulong RetainerId,
     uint PricePerUnit,
     uint Quantity,
-    bool IsHighQuality);
+    bool IsHighQuality,
+    uint TotalTax);
 
 public interface IMarketPurchaseService
 {
@@ -34,7 +35,10 @@ public interface IMarketPurchaseService
     bool AreListingsReady(uint itemId);
     void ResetListingRequest();
     IReadOnlyList<LivePurchaseListing> ReadLiveListings(uint itemId);
-    bool TrySelectLiveListing(ProcurementOrder expected, out LivePurchaseListing? listing);
+    bool TrySelectLiveListing(
+        ProcurementOrder expected,
+        IReadOnlySet<ulong> excludedRetainerIds,
+        out LivePurchaseListing? listing);
     bool SubmitPurchase(LivePurchaseListing listing);
     void CloseMarketBoard();
     void CloseRetainerList();
@@ -108,16 +112,16 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService
         if (itemId == 0 || !dataManager.GetExcelSheet<Item>().TryGetRow(itemId, out var item))
             return false;
 
-        if (visibleSearchItemId == itemId)
-            return true;
-
-        ResetListingRequest();
         var addon = gameGui.GetAddonByName<AddonItemSearch>("ItemSearch");
         var agent = AgentItemSearch.Instance();
         if (addon == null || !addon->IsVisible || addon->SearchTextInput == null ||
             addon->ResultsList == null || agent == null)
             return false;
 
+        if (visibleSearchItemId == itemId)
+            return true;
+
+        ResetListingRequest();
         addon->SearchTextInput->SetText(item.Name.ToString());
         addon->RunSearch(false);
         visibleSearchItemId = itemId;
@@ -132,9 +136,21 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService
             return false;
 
         var resultAddon = gameGui.GetAddonByName<AtkUnitBase>("ItemSearchResult");
-        if (resultAddon != null && resultAddon->IsVisible &&
-            !proxy->WaitingForListings && proxy->SearchItemId == itemId)
-            return true;
+        if (resultAddon != null && resultAddon->IsVisible)
+        {
+            if (proxy->SearchItemId == itemId)
+                return !proxy->WaitingForListings;
+
+            // Never accept data from a previously opened item. Wait for an
+            // in-flight request, or close the stale result so the exact search
+            // row can be activated below.
+            if (proxy->WaitingForListings)
+                return false;
+            resultAddon->Close(true);
+        }
+
+        if (proxy->WaitingForListings)
+            return false;
 
         if (visibleSearchResultSelected && DateTimeOffset.UtcNow < nextVisibleSelectionAt)
             return false;
@@ -153,9 +169,14 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService
         {
             if (ids[index] != itemId || addon->ResultsList->GetItemDisabledState(index))
                 continue;
-            addon->ResultsList->SelectItem(index, true);
+
+            // SelectItem(..., true) emits ListItemSelect, which only highlights
+            // this list. A real user click emits ListItemClick and is what opens
+            // ItemSearchResult and starts the server listing request.
+            addon->ResultsList->SelectItem(index);
+            addon->ResultsList->DispatchItemEvent(index, AtkEventType.ListItemClick);
             visibleSearchResultSelected = true;
-            nextVisibleSelectionAt = DateTimeOffset.UtcNow.AddSeconds(2);
+            nextVisibleSelectionAt = DateTimeOffset.UtcNow.AddMilliseconds(2_500);
             return false;
         }
         return false;
@@ -190,12 +211,15 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService
             var row = source[index];
             if (row.ItemId == itemId && row.UnitPrice > 0 && row.Quantity > 0)
                 result.Add(new(index, row.ItemId, row.ListingId, row.RetainerId,
-                    row.UnitPrice, row.Quantity, row.IsHqItem));
+                    row.UnitPrice, row.Quantity, row.IsHqItem, row.TotalTax));
         }
         return result;
     }
 
-    public bool TrySelectLiveListing(ProcurementOrder expected, out LivePurchaseListing? listing)
+    public bool TrySelectLiveListing(
+        ProcurementOrder expected,
+        IReadOnlySet<ulong> excludedRetainerIds,
+        out LivePurchaseListing? listing)
     {
         listing = null;
         var proxy = InfoProxyItemSearch.Instance();
@@ -209,9 +233,11 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService
         {
             var row = source[index];
             if (row.ItemId != expected.ItemId || row.UnitPrice == 0 || row.UnitPrice > expected.MaximumAcceptableUnitPrice ||
-                row.Quantity == 0 || row.Quantity > expected.Quantity || row.IsHqItem != expected.IsHighQuality)
+                row.Quantity == 0 || row.Quantity > expected.Quantity || row.IsHqItem != expected.IsHighQuality ||
+                excludedRetainerIds.Contains(row.RetainerId))
                 continue;
-            candidates.Add(new(index, row.ItemId, row.ListingId, row.RetainerId, row.UnitPrice, row.Quantity, row.IsHqItem));
+            candidates.Add(new(index, row.ItemId, row.ListingId, row.RetainerId,
+                row.UnitPrice, row.Quantity, row.IsHqItem, row.TotalTax));
         }
 
         listing = candidates.FirstOrDefault(x => x.ListingId == expected.ListingId && x.RetainerId == expected.RetainerId)
@@ -222,14 +248,18 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService
     public bool SubmitPurchase(LivePurchaseListing listing)
     {
         var proxy = InfoProxyItemSearch.Instance();
-        if (proxy == null || proxy->WaitingForListings || listing.Index < 0 || listing.Index >= proxy->Listings.Length)
+        if (proxy == null || proxy->WaitingForListings || proxy->SearchItemId != listing.ItemId ||
+            !IsAddonVisible("ItemSearchResult") || listing.Index < 0 ||
+            listing.Index >= proxy->ListingCount || listing.Index >= proxy->Listings.Length)
             return false;
         var source = proxy->Listings;
         fixed (MarketBoardListing* rows = source)
         {
             var row = &rows[listing.Index];
             if (row->ListingId != listing.ListingId || row->RetainerId != listing.RetainerId ||
-                row->ItemId != listing.ItemId || row->UnitPrice != listing.PricePerUnit || row->Quantity != listing.Quantity)
+                row->ItemId != listing.ItemId || row->UnitPrice != listing.PricePerUnit ||
+                row->Quantity != listing.Quantity || row->IsHqItem != listing.IsHighQuality ||
+                row->TotalTax != listing.TotalTax)
                 return false;
             return proxy->SetLastPurchasedItem(row) && proxy->SendPurchaseRequestPacket();
         }

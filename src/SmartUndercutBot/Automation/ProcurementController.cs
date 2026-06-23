@@ -423,8 +423,12 @@ public sealed class ProcurementController : IDisposable
         Plan = ProcurementPlan.Empty;
         gilSpent = 0;
         stockHuntListings.Clear();
+        // Scan the home world last. Its prices are the resale anchor for every
+        // prospective deal, so they should be the freshest data in the tour
+        // when the guarded purchase plan is built.
         stockHuntWorlds = NorthAmericaAndOceaniaWorlds
-            .Prepend(homeWorld)
+            .Where(x => !string.Equals(x, homeWorld, StringComparison.OrdinalIgnoreCase))
+            .Append(homeWorld)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
         stockHuntWorldIndex = 0;
@@ -611,6 +615,7 @@ public sealed class ProcurementController : IDisposable
 
     private void AdvanceStockHuntRule()
     {
+        market.ResetListingRequest();
         stockHuntRuleIndex++;
         currentStockHuntRule = null;
         nextActionAt = DateTimeOffset.UtcNow.AddMilliseconds(1_200);
@@ -725,13 +730,13 @@ public sealed class ProcurementController : IDisposable
             }
             return;
         }
-        if (!market.TrySelectLiveListing(currentOrder, out var live) || live is null)
+        if (!market.TrySelectLiveListing(currentOrder, retainerListings.OwnedRetainerIds, out var live) || live is null)
         {
             SkipCurrentOrder($"SKIPPED BUY {currentOrder.ItemName}: the Universalis deal was gone or exceeded the live ceiling.");
             return;
         }
 
-        var totalCost = (ulong)live.PricePerUnit * live.Quantity;
+        var totalCost = GetPurchaseCost(live);
         var remainingBudget = configuration.Current.ProcurementBudget > gilSpent
             ? configuration.Current.ProcurementBudget - gilSpent
             : 0;
@@ -762,7 +767,8 @@ public sealed class ProcurementController : IDisposable
         {
             if (DateTimeOffset.UtcNow < deadline)
                 return;
-            SkipCurrentOrder($"SKIPPED BUY {currentOrder.ItemName}: inventory did not confirm the purchase.");
+            Halt($"PURCHASE OUTCOME UNKNOWN for {currentOrder.ItemName}: the game accepted the request, " +
+                 "but inventory did not confirm it before the timeout. Procurement stopped to prevent a duplicate buy.");
             return;
         }
 
@@ -778,21 +784,22 @@ public sealed class ProcurementController : IDisposable
         var pricingRule = configuration.Current.PerItemRules.TryGetValue(actual.ItemId, out var existingRule)
             ? existingRule
             : configuration.Current.GlobalRule.Clone();
-        // Buyers always pay a 5% market-board fee. Store a conservative landed
-        // unit cost so later repricing cannot sell below the actual purchase cost.
+        // Use the server-provided buyer tax from the exact live listing. Store
+        // the rounded-up landed unit cost so repricing cannot sell below what
+        // this particular stack actually cost.
+        var purchaseCost = GetPurchaseCost(currentLiveListing);
         var landedCostPerUnit = (uint)Math.Min(
             PricingStrategyService.MaximumListingPrice,
-            decimal.Ceiling(actual.PricePerUnit * 1.05m));
+            (purchaseCost + actual.Quantity - 1) / actual.Quantity);
         pricingRule.CostBasis = Math.Max(pricingRule.CostBasis, landedCostPerUnit);
         pricingRule.MinimumMarginPercent = Math.Max(
             pricingRule.MinimumMarginPercent, configuration.Current.ProcurementMinimumRoiPercent);
         configuration.Current.PerItemRules[actual.ItemId] = pricingRule;
         configuration.Save();
-        var cost = (ulong)actual.PricePerUnit * actual.Quantity;
-        gilSpent += (uint)Math.Min(cost, uint.MaxValue - gilSpent);
+        gilSpent += (uint)Math.Min(purchaseCost, uint.MaxValue - gilSpent);
         log.Add(AutomationLogLevel.Information,
             $"PURCHASED {actual.ItemName} x{actual.Quantity} on {actual.WorldName} at {actual.PricePerUnit:N0} gil each; " +
-            $"tracked landed cost {landedCostPerUnit:N0} gil including buyer fee.");
+            $"buyer tax {currentLiveListing.TotalTax:N0} gil, tracked landed cost {landedCostPerUnit:N0} gil each.");
         AdvanceOrder();
     }
 
@@ -804,6 +811,10 @@ public sealed class ProcurementController : IDisposable
 
     private void AdvanceOrder()
     {
+        // The server can leave the just-purchased row in the current proxy until
+        // a fresh request. This is essential when consecutive plan entries are
+        // the same item: never submit against a stale listing snapshot.
+        market.ResetListingRequest();
         orderIndex++;
         currentOrder = null;
         currentLiveListing = null;
@@ -812,6 +823,9 @@ public sealed class ProcurementController : IDisposable
         // Reuse the listings state as a throttled handoff; it will call BeginCurrentOrder.
         State = ProcurementState.WaitingForListings;
     }
+
+    private static ulong GetPurchaseCost(LivePurchaseListing listing) =>
+        (ulong)listing.PricePerUnit * listing.Quantity + listing.TotalTax;
 
     private void ReturnHome()
     {

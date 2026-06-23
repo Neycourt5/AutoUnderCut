@@ -23,7 +23,7 @@ public sealed class ProcurementPlannerServiceTests
         var plan = planner.BuildPlan(new([market], [rule], 150_000, 10, 10, 20m, 100));
 
         Assert.Single(plan.Orders);
-        Assert.Equal(99_000u, plan.TotalCost);
+        Assert.Equal(103_950u, plan.TotalCost);
         Assert.Equal(2_050u, plan.Orders[0].TargetSalePrice);
     }
 
@@ -127,6 +127,46 @@ public sealed class ProcurementPlannerServiceTests
         var plan = planner.BuildLiveMarketPlan(new(
             [market], [rule], "Siren", new HashSet<ulong>(),
             500_000, 5, 5, 20m, 100));
+
+        Assert.Empty(plan.Orders);
+    }
+
+    [Fact]
+    public void RejectsListingWhoseBuyerFeeBreaksTheRequiredRoi()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var market = new ProcurementMarketItem(1, "Caramel Popcorn",
+            [new(1, 10, 20, "Alpha", 1, 1_550, 99, true)],
+            [new(2_000, 99, true, now)]);
+        var rule = new ProcurementRule
+        {
+            ItemId = 1,
+            ItemName = market.ItemName,
+            AllowHighQuality = true,
+            RequireHighQuality = true,
+        };
+
+        var plan = planner.BuildPlan(new([market], [rule], 500_000, 5, 5, 20m, 100));
+
+        Assert.Empty(plan.Orders);
+    }
+
+    [Fact]
+    public void BuyerFeeCountsAgainstTheGilBudget()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var market = new ProcurementMarketItem(1, "Caramel Popcorn",
+            [new(1, 10, 20, "Alpha", 1, 1_000, 99, true)],
+            [new(2_000, 99, true, now)]);
+        var rule = new ProcurementRule
+        {
+            ItemId = 1,
+            ItemName = market.ItemName,
+            AllowHighQuality = true,
+            RequireHighQuality = true,
+        };
+
+        var plan = planner.BuildPlan(new([market], [rule], 100_000, 5, 5, 20m, 100));
 
         Assert.Empty(plan.Orders);
     }

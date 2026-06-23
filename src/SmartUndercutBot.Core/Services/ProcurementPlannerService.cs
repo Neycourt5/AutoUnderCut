@@ -41,9 +41,14 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
                 continue;
 
             var netUnitProceeds = decimal.Floor(targetSalePrice * (1m - request.MarketTaxPercent / 100m));
+            var buyerFeeMultiplier = 1m + request.BuyerFeePercent / 100m;
             var roiDivisor = 1m + request.MinimumRoiPercent / 100m;
-            var roiCeiling = roiDivisor <= 0 ? 0 : decimal.Floor(netUnitProceeds / roiDivisor);
-            var profitCeiling = Math.Max(0, netUnitProceeds - request.MinimumProfitPerUnit);
+            var roiCeiling = roiDivisor <= 0 || buyerFeeMultiplier <= 0
+                ? 0
+                : decimal.Floor(netUnitProceeds / roiDivisor / buyerFeeMultiplier);
+            var profitCeiling = buyerFeeMultiplier <= 0
+                ? 0
+                : decimal.Floor(Math.Max(0, netUnitProceeds - request.MinimumProfitPerUnit) / buyerFeeMultiplier);
             var ceiling = (uint)Math.Min(uint.MaxValue, Math.Min(roiCeiling, profitCeiling));
             if (rule.MaximumUnitPrice > 0)
                 ceiling = Math.Min(ceiling, rule.MaximumUnitPrice);
@@ -58,7 +63,7 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
                     listing.Quantity > Math.Max(1, rule.TargetStackSize))
                     continue;
 
-                var totalCost = (ulong)listing.PricePerUnit * listing.Quantity;
+                var totalCost = PurchaseCost(listing.PricePerUnit, listing.Quantity, request.BuyerFeePercent);
                 var totalNet = (ulong)(uint)netUnitProceeds * listing.Quantity;
                 if (totalCost > uint.MaxValue || totalNet <= totalCost)
                     continue;
@@ -94,7 +99,7 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
         {
             var rule = rules[candidate.ItemId];
             var usedForItem = itemSlots.GetValueOrDefault(candidate.ItemId);
-            var cost = (ulong)candidate.PricePerUnit * candidate.Quantity;
+            var cost = PurchaseCost(candidate.PricePerUnit, candidate.Quantity, request.BuyerFeePercent);
             if (orders.Count >= slotLimit || usedForItem >= rule.MaximumSaleSlots || spent + cost > request.GilBudget)
                 continue;
 
@@ -149,9 +154,14 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
                 continue;
 
             var netUnitProceeds = decimal.Floor(targetSalePrice * (1m - request.MarketTaxPercent / 100m));
+            var buyerFeeMultiplier = 1m + request.BuyerFeePercent / 100m;
             var roiDivisor = 1m + request.MinimumRoiPercent / 100m;
-            var roiCeiling = roiDivisor <= 0 ? 0 : decimal.Floor(netUnitProceeds / roiDivisor);
-            var profitCeiling = Math.Max(0, netUnitProceeds - request.MinimumProfitPerUnit);
+            var roiCeiling = roiDivisor <= 0 || buyerFeeMultiplier <= 0
+                ? 0
+                : decimal.Floor(netUnitProceeds / roiDivisor / buyerFeeMultiplier);
+            var profitCeiling = buyerFeeMultiplier <= 0
+                ? 0
+                : decimal.Floor(Math.Max(0, netUnitProceeds - request.MinimumProfitPerUnit) / buyerFeeMultiplier);
             var ceiling = (uint)Math.Min(uint.MaxValue, Math.Min(roiCeiling, profitCeiling));
             if (rule.MaximumUnitPrice > 0)
                 ceiling = Math.Min(ceiling, rule.MaximumUnitPrice);
@@ -165,7 +175,7 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
                     listing.Quantity > Math.Max(1, rule.TargetStackSize))
                     continue;
 
-                var totalCost = (ulong)listing.PricePerUnit * listing.Quantity;
+                var totalCost = PurchaseCost(listing.PricePerUnit, listing.Quantity, request.BuyerFeePercent);
                 var totalNet = (ulong)(uint)netUnitProceeds * listing.Quantity;
                 if (totalCost > uint.MaxValue || totalNet <= totalCost)
                     continue;
@@ -197,7 +207,7 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
                      .ThenBy(x => x.PricePerUnit))
         {
             var usedForItem = itemSlots.GetValueOrDefault(candidate.ItemId);
-            var cost = (ulong)candidate.PricePerUnit * candidate.Quantity;
+            var cost = PurchaseCost(candidate.PricePerUnit, candidate.Quantity, request.BuyerFeePercent);
             if (orders.Count >= slotLimit || usedForItem >= rules[candidate.ItemId].MaximumSaleSlots ||
                 spent + cost > request.GilBudget)
                 continue;
@@ -224,5 +234,11 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
         return sorted.Length % 2 == 0
             ? (uint)(((ulong)sorted[middle - 1] + sorted[middle]) / 2)
             : sorted[middle];
+    }
+
+    private static ulong PurchaseCost(uint unitPrice, uint quantity, decimal buyerFeePercent)
+    {
+        var subtotal = (decimal)unitPrice * quantity;
+        return (ulong)Math.Min(ulong.MaxValue, decimal.Ceiling(subtotal * (1m + buyerFeePercent / 100m)));
     }
 }

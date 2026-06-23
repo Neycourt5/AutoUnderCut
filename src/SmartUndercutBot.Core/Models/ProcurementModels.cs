@@ -39,7 +39,8 @@ public sealed record ProcurementPlanRequest(
     int FreeInventorySlots,
     decimal MinimumRoiPercent,
     uint MinimumProfitPerUnit,
-    decimal MarketTaxPercent = 5m);
+    decimal MarketTaxPercent = 5m,
+    decimal BuyerFeePercent = 5m);
 
 public sealed record LiveMarketPlanRequest(
     IReadOnlyList<ProcurementMarketItem> Markets,
@@ -51,7 +52,8 @@ public sealed record LiveMarketPlanRequest(
     int FreeInventorySlots,
     decimal MinimumRoiPercent,
     uint MinimumProfitPerUnit,
-    decimal MarketTaxPercent = 5m);
+    decimal MarketTaxPercent = 5m,
+    decimal BuyerFeePercent = 5m);
 
 public sealed record ProcurementOrder(
     uint ItemId,
