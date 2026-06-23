@@ -49,15 +49,22 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService
     private readonly IObjectTable objectTable;
     private readonly IGameGui gameGui;
     private readonly IDataManager dataManager;
+    private readonly AutomationLog log;
     private uint visibleSearchItemId;
     private bool visibleSearchResultSelected;
     private DateTimeOffset nextVisibleSelectionAt;
+    private DateTimeOffset nextSearchDiagnosticAt;
 
-    public MarketPurchaseService(IObjectTable objectTable, IGameGui gameGui, IDataManager dataManager)
+    public MarketPurchaseService(
+        IObjectTable objectTable,
+        IGameGui gameGui,
+        IDataManager dataManager,
+        AutomationLog log)
     {
         this.objectTable = objectTable;
         this.gameGui = gameGui;
         this.dataManager = dataManager;
+        this.log = log;
     }
 
     public bool IsMarketBoardOpen => IsAddonVisible("ItemSearch");
@@ -126,6 +133,7 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService
         addon->RunSearch(false);
         visibleSearchItemId = itemId;
         visibleSearchResultSelected = false;
+        log.Add(AutomationLogLevel.Debug, $"MARKET BUY search typed '{item.Name}' ({itemId}).");
         return true;
     }
 
@@ -158,13 +166,18 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService
 
         var addon = gameGui.GetAddonByName<AddonItemSearch>("ItemSearch");
         var agent = AgentItemSearch.Instance();
-        if (addon == null || !addon->IsVisible || addon->ResultsList == null || agent == null ||
-            !agent->ListingPageLoaded)
+        if (addon == null || !addon->IsVisible || addon->ResultsList == null || agent == null)
             return false;
 
         var ids = agent->ListingPageItemIds;
         var count = (int)Math.Min(agent->ListingPageItemCount, (uint)ids.Length);
         count = Math.Min(count, addon->ResultsList->GetItemCount());
+        if (count <= 0)
+        {
+            LogSearchDiagnostic(itemId, "search results are not populated yet");
+            return false;
+        }
+
         for (var index = 0; index < count; index++)
         {
             if (ids[index] != itemId || addon->ResultsList->GetItemDisabledState(index))
@@ -175,10 +188,18 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService
             // ItemSearchResult and starts the server listing request.
             addon->ResultsList->SelectItem(index);
             addon->ResultsList->DispatchItemEvent(index, AtkEventType.ListItemClick);
+            addon->ResultsList->DispatchItemEvent(index, AtkEventType.ListItemDoubleClick);
+            log.Add(AutomationLogLevel.Debug,
+                $"MARKET BUY activated search row {index + 1}/{count} for item {itemId}; waiting for ItemSearchResult.");
             visibleSearchResultSelected = true;
             nextVisibleSelectionAt = DateTimeOffset.UtcNow.AddMilliseconds(2_500);
             return false;
         }
+        var visibleIds = new List<string>();
+        for (var i = 0; i < Math.Min(count, 8); i++)
+            visibleIds.Add(ids[i].ToString());
+        LogSearchDiagnostic(itemId,
+            $"no exact row matched; first ids: {string.Join(", ", visibleIds)}");
         return false;
     }
 
@@ -195,6 +216,7 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService
         visibleSearchItemId = 0;
         visibleSearchResultSelected = false;
         nextVisibleSelectionAt = default;
+        nextSearchDiagnosticAt = default;
     }
 
     public IReadOnlyList<LivePurchaseListing> ReadLiveListings(uint itemId)
@@ -285,5 +307,13 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService
         var addon = gameGui.GetAddonByName<AtkUnitBase>(name);
         if (addon != null && addon->IsVisible)
             addon->Close(true);
+    }
+
+    private void LogSearchDiagnostic(uint itemId, string reason)
+    {
+        if (DateTimeOffset.UtcNow < nextSearchDiagnosticAt)
+            return;
+        nextSearchDiagnosticAt = DateTimeOffset.UtcNow.AddSeconds(3);
+        log.Add(AutomationLogLevel.Debug, $"MARKET BUY waiting for item {itemId}: {reason}.");
     }
 }
