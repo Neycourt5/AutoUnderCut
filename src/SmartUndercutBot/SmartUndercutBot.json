@@ -1,8 +1,8 @@
 {
   "Author": "AutoUnderCut",
   "Name": "Smart Undercutter",
-  "Punchline": "Guarded repricing, purchasing, and retainer restocking.",
-  "Description": "Reprices every active retainer, discovers guarded Universalis deals, can travel with Lifestream and vnavmesh, purchases only after live revalidation, and distributes purchased stacks across open retainer sale slots. Use /sub to open the dashboard.",
+  "Punchline": "Guarded repricing, validated restocking, and guided market routes.",
+  "Description": "Reprices every active retainer, lists curated HQ bag stock only at validated prices, and plans guided Universalis deal routes with Lifestream travel. Experimental automatic buying remains opt-in. Use /sub to open the dashboard.",
   "ApplicableVersion": "any",
   "Tags": [
     "market board",

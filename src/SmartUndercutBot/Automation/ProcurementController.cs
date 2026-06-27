@@ -467,8 +467,12 @@ public sealed class ProcurementController : IDisposable
         activeRunMode = mode;
         runAfterScan = ProcurementRunMode.None;
         market.CloseRetainerList();
-        worldGroups = Plan.Orders.GroupBy(x => x.WorldName, StringComparer.OrdinalIgnoreCase)
-            .OrderByDescending(x => x.Sum(y => (long)y.ExpectedProfit)).ToList();
+        var orderedWorlds = Plan.Orders.GroupBy(x => x.WorldName, StringComparer.OrdinalIgnoreCase)
+            .OrderByDescending(x => x.Sum(y => (long)y.ExpectedProfit));
+        worldGroups = (mode == ProcurementRunMode.GuidedReview
+                ? orderedWorlds.Take(configuration.Current.GuidedTourMaximumWorlds)
+                : orderedWorlds)
+            .ToList();
         worldIndex = 0;
         orderIndex = 0;
         gilSpent = 0;
@@ -514,9 +518,10 @@ public sealed class ProcurementController : IDisposable
             Delay(ProcurementState.WaitingAfterWorldArrival, $"Preparing to visit {WorldName}'s market board.", 3_000);
             return;
         }
-        var accepted = lifestream.IsAvailable
-            ? lifestream.ChangeWorld(WorldName)
-            : commandManager.ProcessCommand($"/li {WorldName}");
+        // The public Lifestream IPC can acknowledge a world change without
+        // beginning travel on some versions. The literal chat command is the
+        // same path the user has confirmed works reliably.
+        var accepted = commandManager.ProcessCommand($"/li {WorldName}");
         if (!accepted)
         {
             if (stockHuntScanning)
@@ -524,7 +529,7 @@ public sealed class ProcurementController : IDisposable
                 SkipStockHuntWorld($"Lifestream could not visit {WorldName}; skipping that world.");
                 return;
             }
-            Halt("Lifestream was busy or did not accept the world-travel command. Try Run guarded purchase plan again.");
+            Halt("The literal /li world-travel command was not accepted. Check that Lifestream is enabled, then retry the route.");
             return;
         }
         Wait(ProcurementState.WaitingForWorld, $"Travelling to {WorldName} with Lifestream.", 180);
@@ -835,12 +840,10 @@ public sealed class ProcurementController : IDisposable
             Delay(ProcurementState.WaitingAfterHomeArrival, "Preparing to return to the summoning bell.", 3_000);
             return;
         }
-        var accepted = lifestream.IsAvailable
-            ? lifestream.ChangeWorld(homeWorld)
-            : commandManager.ProcessCommand($"/li {homeWorld}");
+        var accepted = commandManager.ProcessCommand($"/li {homeWorld}");
         if (!accepted)
         {
-            Halt("Lifestream was busy or did not accept the return-home command.");
+            Halt("The literal /li return-home command was not accepted.");
             return;
         }
         Wait(ProcurementState.WaitingForHomeWorld, $"Returning to {homeWorld}.", 180);

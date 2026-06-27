@@ -283,9 +283,12 @@ public sealed unsafe class RetainerListingService : IRetainerListingService
         var visibleQuantity = (uint)Math.Max(0, addon->Quantity->Value);
         var visiblePrice = (uint)Math.Max(0, addon->AskingPrice->Value);
         var visibleHq = visibleName.Contains('\uE03C');
+        var priceMatches = visiblePrice == expected.CurrentPrice ||
+                           (MarketPriceSafety.IsSafetySeedRepresentation(visiblePrice, visibleQuantity) &&
+                            MarketPriceSafety.IsSafetySeedRepresentation(expected.CurrentPrice, expected.Quantity));
         return visibleName.Contains(expected.ItemName, StringComparison.OrdinalIgnoreCase) &&
                visibleQuantity == expected.Quantity && visibleHq == expected.IsHighQuality &&
-               (!requirePriceMatch || visiblePrice == expected.CurrentPrice);
+               (!requirePriceMatch || priceMatches);
     }
 
     public bool SelectRetainer(int index)

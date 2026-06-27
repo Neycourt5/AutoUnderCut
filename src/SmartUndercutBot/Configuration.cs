@@ -6,7 +6,7 @@ namespace SmartUndercutBot;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 15;
+    public int Version { get; set; } = 16;
     public bool AutomationEnabled { get; set; }
     public bool ProcessAllRetainers { get; set; } = true;
     public bool RepeatBellRuns { get; set; }
@@ -37,6 +37,7 @@ public sealed class Configuration : IPluginConfiguration
     public bool LiveWorldStockHuntEnabled { get; set; } = true;
     public int LiveWorldStockThresholdPerItem { get; set; } = 199;
     public int LiveWorldStockHuntCooldownMinutes { get; set; } = 360;
+    public int GuidedTourMaximumWorlds { get; set; } = 6;
     public List<ProcurementRule> ProcurementRules { get; set; } = [];
     public PricingRule GlobalRule { get; set; } = new();
     public Dictionary<uint, PricingRule> PerItemRules { get; set; } = [];
@@ -192,6 +193,17 @@ public sealed class Configuration : IPluginConfiguration
                 LiveWorldStockHuntCooldownMinutes = 360;
             Version = 15;
         }
+        if (Version < 16)
+        {
+            if (GuidedTourMaximumWorlds == 0)
+                GuidedTourMaximumWorlds = 6;
+            // Automatic purchase interaction has not been reliable across live
+            // client revisions. Disarm it on upgrade; the guided Universalis
+            // route remains available without this switch.
+            AllowAutomaticPurchases = false;
+            LiveWorldStockHuntEnabled = false;
+            Version = 16;
+        }
         MinimumDelayMs = Math.Clamp(MinimumDelayMs, 100, 60_000);
         MaximumDelayMs = Math.Clamp(MaximumDelayMs, MinimumDelayMs, 60_000);
         MarketRequestTimeoutSeconds = Math.Clamp(MarketRequestTimeoutSeconds, 2, 60);
@@ -207,6 +219,7 @@ public sealed class Configuration : IPluginConfiguration
         ProcurementInventoryReserve = Math.Clamp(ProcurementInventoryReserve, 1, 100);
         LiveWorldStockThresholdPerItem = Math.Clamp(LiveWorldStockThresholdPerItem, 1, 9999);
         LiveWorldStockHuntCooldownMinutes = Math.Clamp(LiveWorldStockHuntCooldownMinutes, 60, 10_080);
+        GuidedTourMaximumWorlds = Math.Clamp(GuidedTourMaximumWorlds, 1, 20);
         BagListingReservePerItem = Math.Clamp(BagListingReservePerItem, 0, 9999);
         ProcurementMinimumRoiPercent = Math.Clamp(ProcurementMinimumRoiPercent, 0m, 1_000m);
         ProcurementMinimumProfitPerUnit = Math.Clamp(ProcurementMinimumProfitPerUnit, 0u, 100_000_000u);

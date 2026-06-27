@@ -264,20 +264,29 @@ public sealed class BagListingController : IDisposable
                 new MarketSnapshot(stock.ItemId, DateTimeOffset.UtcNow, listings, historicalMedian, true),
                 rule,
                 retainerListings.OwnedRetainerIds));
-            var target = decision.ShouldUpdate && decision.TargetPrice is { } marketTarget
+            uint? target = decision.ShouldUpdate && decision.TargetPrice is { } marketTarget &&
+                           MarketPriceSafety.IsSafeCuratedUnitPrice(marketTarget)
                 ? marketTarget
-                : PricingStrategyService.MaximumListingPrice;
-            if (target == PricingStrategyService.MaximumListingPrice)
+                : null;
+
+            if (!target.HasValue && automation.TryGetKnownSafePrice(stock.ItemId, out var knownPrice))
+                target = Math.Max(stock.EffectiveFloor, knownPrice);
+            if (!target.HasValue && historicalMedian is { } median &&
+                MarketPriceSafety.IsSafeCuratedUnitPrice(median))
+                target = Math.Max(stock.EffectiveFloor, median);
+
+            if (!target.HasValue || !MarketPriceSafety.IsSafeCuratedUnitPrice(target.Value))
             {
                 log.Add(AutomationLogLevel.Warning,
-                    $"BAG STOCK SAFE-SEED {stock.ItemName}: {decision.Reason} Using a protected placeholder; the in-game Adjust Price screen will determine the real price immediately after listing.");
+                    $"BAG STOCK SKIPPED {stock.ItemName}: {decision.Reason} No validated live, historical, or existing same-item price was available; stock remains safely in the bags.");
+                continue;
             }
 
-            plannedPrices[stock.ItemId] = target;
-            ledger.QueueExistingStock(stock.ItemId, stock.ItemName, stock.ListableQuantity, target, 99, true, reserve);
+            plannedPrices[stock.ItemId] = target.Value;
+            ledger.QueueExistingStock(stock.ItemId, stock.ItemName, stock.ListableQuantity, target.Value, 99, true, reserve);
             queuedStacks += stock.StackCount;
             log.Add(AutomationLogLevel.Information,
-                $"BAG STOCK QUEUED {stock.ItemName}: {stock.StackCount} x99 at {target:N0} gil; keeping {reserve:N0} in bags.");
+                $"BAG STOCK QUEUED {stock.ItemName}: {stock.StackCount} x99 at validated {target.Value:N0} gil; keeping {reserve:N0} in bags.");
         }
 
         ScheduleNextAttempt();

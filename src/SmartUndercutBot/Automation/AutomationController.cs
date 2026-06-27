@@ -79,6 +79,7 @@ public sealed class AutomationController : IDisposable
     private readonly Dictionary<(ulong RetainerId, short Slot), PortfolioListingEstimate> portfolioListings = [];
     private readonly Dictionary<ulong, PortfolioRetainerBalance> portfolioRetainers = [];
     private readonly Dictionary<ulong, int> fillListingCounts = [];
+    private readonly Dictionary<(ulong RetainerId, short Slot), (uint ItemId, uint Price)> knownSafeListingPrices = [];
 
     private CancellationTokenSource? sessionCancellation;
     private Task<MarketSnapshot>? marketTask;
@@ -151,6 +152,26 @@ public sealed class AutomationController : IDisposable
         retainerCount);
 
     public IReadOnlyList<AutomationQueueEntry> QueueSnapshot() => queue.ToArray();
+
+    public bool TryGetKnownSafePrice(uint itemId, out uint price)
+    {
+        var values = knownSafeListingPrices.Values
+            .Where(x => x.ItemId == itemId)
+            .Select(x => x.Price)
+            .Order()
+            .ToArray();
+        if (values.Length == 0)
+        {
+            price = 0;
+            return false;
+        }
+
+        var middle = values.Length / 2;
+        price = values.Length % 2 == 1
+            ? values[middle]
+            : (uint)(((ulong)values[middle - 1] + values[middle]) / 2);
+        return true;
+    }
 
     public PortfolioValuation PortfolioSnapshot() => portfolioValuation.Calculate(
         portfolioListings.Values.ToArray(),
@@ -471,12 +492,13 @@ public sealed class AutomationController : IDisposable
         if (fillOnlyRun)
         {
             var currentListings = retainerListings.ReadCurrentListings();
+            RememberSafePrices(currentListings);
             var countKey = retainerListings.ActiveRetainerId != 0
                 ? retainerListings.ActiveRetainerId
                 : (ulong)(retainerIndex + 1);
             fillListingCounts[countKey] = currentListings.Count;
             var unresolvedSeed = currentListings.FirstOrDefault(x =>
-                x.CurrentPrice == PricingStrategyService.MaximumListingPrice &&
+                IsUnresolvedCuratedPrice(x) &&
                 CuratedAutoListItems.Contains(x.ItemName));
             if (unresolvedSeed is not null)
             {
@@ -515,6 +537,7 @@ public sealed class AutomationController : IDisposable
         }
 
         var listings = retainerListings.ReadCurrentListings();
+        RememberSafePrices(listings);
         CapturePortfolioListings(listings);
         queue.Clear();
         processedSlots.Clear();
@@ -587,21 +610,26 @@ public sealed class AutomationController : IDisposable
         }
 
         var verified = pendingAutoListing;
-        procurementLedger.MarkListed(verified.ItemId, verified.IsHighQuality, verified.Quantity);
-        log.Add(AutomationLogLevel.Information,
-            $"AUTO-LISTED {verified.ItemName} x{verified.Quantity} at safe placeholder {verified.UnitPrice:N0} gil on {retainerListings.ActiveRetainerName}; opening it for a live price check now.");
-        pendingAutoListing = null;
-
-        var listings = retainerListings.ReadCurrentListings();
-        var verifiedListing = listings.FirstOrDefault(x => x.Slot == verified.MarketSlot && x.ItemId == verified.ItemId);
-        if (verifiedListing is null)
+        if (!MarketPriceSafety.IsSafeCuratedUnitPrice(verified.UnitPrice, verified.Quantity))
         {
+            pendingAutoListing = null;
             AbortFreshAutoListing(
-                $"Could not locate the verified {verified.ItemName} market slot after creating it.");
+                $"Rejected unsafe automatic listing price {verified.UnitPrice:N0} for {verified.ItemName}.");
             return;
         }
-
-        BeginSafetySeedPricing(verifiedListing, listings.Count);
+        procurementLedger.MarkListed(verified.ItemId, verified.IsHighQuality, verified.Quantity);
+        RememberSafePrice(
+            verified.ItemId,
+            verified.UnitPrice,
+            verified.Quantity,
+            retainerListings.ActiveRetainerId,
+            verified.MarketSlot);
+        log.Add(AutomationLogLevel.Information,
+            $"AUTO-LISTED {verified.ItemName} x{verified.Quantity} at validated {verified.UnitPrice:N0} gil on {retainerListings.ActiveRetainerName}.");
+        pendingAutoListing = null;
+        freshlyRepricedAutoListingSlots.Add(verified.MarketSlot);
+        Transition(AutomationState.ReadingListings,
+            "Validated listing created; looking for the next eligible 99-stack.");
     }
 
     private void BeginSafetySeedPricing(RetainerListing listing, int visibleRowCount)
@@ -912,6 +940,33 @@ public sealed class AutomationController : IDisposable
             rule,
             retainerListings.OwnedRetainerIds));
 
+        if (IsUnresolvedCuratedPrice(entry.Listing) &&
+            (!currentDecision.ShouldUpdate || currentDecision.TargetPrice is not { } proposed ||
+             !MarketPriceSafety.IsSafeCuratedUnitPrice(proposed, entry.Listing.Quantity)))
+        {
+            var repairTarget = ResolveSafetyRepairTarget(entry.Listing, currentDecision, currentMarket!);
+            if (repairTarget.HasValue)
+            {
+                currentDecision = new PriceDecision(
+                    PriceDecisionKind.Update,
+                    entry.Listing.CurrentPrice,
+                    repairTarget.Value,
+                    currentDecision.LowestMarketPrice,
+                    currentDecision.EffectiveFloor,
+                    "Repaired an old automatic-listing placeholder using a validated same-item or historical price.");
+            }
+            else
+            {
+                ReplaceCurrent(entry with { Status = "Unsafe placeholder needs market data", Decision = currentDecision });
+                log.Add(AutomationLogLevel.Error,
+                    $"UNRESOLVED UNSAFE PRICE {entry.Listing.ItemName} at {entry.Listing.CurrentPrice:N0} gil: no validated repair price was available. The listing was not treated as a legitimate asking price.");
+                retainerListings.CancelPriceEditor();
+                Schedule(AutomationState.WaitingAfterCommit,
+                    "Unsafe placeholder could not be repaired without trustworthy price data; continuing.");
+                return;
+            }
+        }
+
         if (returnToAutoListingAfterCurrent && currentDecision.Kind == PriceDecisionKind.BelowFloor &&
             entry.Listing.CurrentPrice != currentDecision.EffectiveFloor)
         {
@@ -1063,6 +1118,12 @@ public sealed class AutomationController : IDisposable
                 return;
             }
             ReplaceCurrent(entry with { Status = $"Verified {target:N0} gil" });
+            RememberSafePrice(
+                entry.Listing.ItemId,
+                target,
+                entry.Listing.Quantity,
+                entry.Listing.RetainerId,
+                entry.Listing.Slot);
             var key = (entry.Listing.RetainerId, entry.Listing.Slot);
             if (portfolioListings.TryGetValue(key, out var estimate))
             {
@@ -1114,7 +1175,7 @@ public sealed class AutomationController : IDisposable
         abortFillRunAtBell = true;
         abortFillReason = reason;
         log.Add(AutomationLogLevel.Error,
-            $"AUTO-LIST ABORTED: {reason} Returning to the main summoning-bell list. Any 999,999,999 gil safety seed remains unsellable and needs the next guarded repair pass.");
+            $"AUTO-LIST ABORTED: {reason} Returning to the main summoning-bell list. No additional bag stock will be submitted this run.");
         Schedule(AutomationState.WaitingBeforeClosingSellList,
             "Stopping bag filling and returning safely to the main summoning-bell list.");
     }
@@ -1218,6 +1279,54 @@ public sealed class AutomationController : IDisposable
         var delay = Random.Shared.Next(config.MinimumDelayMs, config.MaximumDelayMs + 1);
         nextActionAt = DateTimeOffset.UtcNow.AddMilliseconds(delay);
         Transition(state, message);
+    }
+
+    private void RememberSafePrices(IEnumerable<RetainerListing> listings)
+    {
+        foreach (var listing in listings.Where(x => CuratedAutoListItems.Contains(x.ItemName)))
+            RememberSafePrice(
+                listing.ItemId,
+                listing.CurrentPrice,
+                listing.Quantity,
+                listing.RetainerId,
+                listing.Slot);
+    }
+
+    private void RememberSafePrice(
+        uint itemId,
+        uint price,
+        uint quantity,
+        ulong retainerId,
+        short slot)
+    {
+        if (!MarketPriceSafety.IsSafeCuratedUnitPrice(price, quantity))
+            return;
+        knownSafeListingPrices[(retainerId, slot)] = (itemId, price);
+    }
+
+    private static bool IsUnresolvedCuratedPrice(RetainerListing listing) =>
+        MarketPriceSafety.IsSafetySeedRepresentation(listing.CurrentPrice, listing.Quantity) ||
+        listing.CurrentPrice > MarketPriceSafety.MaximumCuratedUnitPrice;
+
+    private uint? ResolveSafetyRepairTarget(
+        RetainerListing listing,
+        PriceDecision decision,
+        MarketSnapshot market)
+    {
+        uint? candidate = null;
+        if (TryGetKnownSafePrice(listing.ItemId, out var known))
+            candidate = known;
+        else if (market.HistoricalMedianPrice is { } median &&
+                 MarketPriceSafety.IsSafeCuratedUnitPrice(median, listing.Quantity))
+            candidate = median;
+        else if (decision.EffectiveFloor > 1 &&
+                 MarketPriceSafety.IsSafeCuratedUnitPrice(decision.EffectiveFloor, listing.Quantity))
+            candidate = decision.EffectiveFloor;
+
+        if (!candidate.HasValue)
+            return null;
+        var target = Math.Max(candidate.Value, decision.EffectiveFloor);
+        return MarketPriceSafety.IsSafeCuratedUnitPrice(target, listing.Quantity) ? target : null;
     }
 
     private void WaitFor(AutomationState state, string message, int seconds = 10)

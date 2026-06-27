@@ -531,7 +531,7 @@ public sealed class DashboardWindow : Window
         if (ImGui.Button("Scan Universalis"))
             procurement.ScanNow();
         ImGui.SameLine();
-        if (ImGui.Button("Run guarded purchase plan"))
+        if (ImGui.Button("Experimental auto-buy plan"))
             procurement.RunNow();
         ImGui.SameLine();
         if (ImGui.Button("Run guided deal route"))
@@ -548,7 +548,7 @@ public sealed class DashboardWindow : Window
         var fullLoop = config.AutomationEnabled && config.ProcessAllRetainers && config.RepeatBellRuns &&
                        config.AllowAutomaticWrites && config.AutomaticProcurementEnabled &&
                        config.AllowAutomaticPurchases && config.AllowAutomaticListing;
-        if (ImGui.Checkbox("Enable complete AFK reprice + restock loop", ref fullLoop))
+        if (ImGui.Checkbox("Enable experimental complete AFK reprice + restock loop", ref fullLoop))
         {
             config.AutomationEnabled = fullLoop;
             config.ProcessAllRetainers = fullLoop;
@@ -559,7 +559,7 @@ public sealed class DashboardWindow : Window
             config.AllowAutomaticListing = fullLoop;
             SaveConfiguration();
         }
-        ImGui.TextWrapped("When enabled, remain idle with the summoning-bell retainer list open. The plugin reprices all available retainers, detects newly empty sale slots, scans guarded Universalis deals, travels with Lifestream, walks with vnavmesh, buys only after live revalidation, returns home, and lists the purchased stock.");
+        ImGui.TextWrapped("Automatic repricing and validated bag restocking can run while idle at the bell. Automatic travel/purchasing is experimental and disarmed after this update; use the guided deal route for the dependable Universalis workflow.");
         var automatic = config.AutomaticProcurementEnabled;
         if (ImGui.Checkbox("Run procurement automatically while idle at the bell", ref automatic))
         {
@@ -589,6 +589,25 @@ public sealed class DashboardWindow : Window
             config.ProcurementBudget = budget;
             configurationDirty = true;
         }
+        ImGui.SameLine();
+        if (ImGui.SmallButton("20M"))
+        {
+            config.ProcurementBudget = 20_000_000;
+            SaveConfiguration();
+        }
+        ImGui.SameLine();
+        if (ImGui.SmallButton("50M"))
+        {
+            config.ProcurementBudget = 50_000_000;
+            SaveConfiguration();
+        }
+        var guidedWorlds = config.GuidedTourMaximumWorlds;
+        if (InputInt("Maximum worlds per guided route", ref guidedWorlds, 1, 20))
+        {
+            config.GuidedTourMaximumWorlds = guidedWorlds;
+            configurationDirty = true;
+        }
+        ImGui.TextWrapped("Recommended: Run guided deal route. It scans Universalis, ranks worlds by expected profit, uses literal /li world travel, opens each Market Board, and waits for manual review. The budget is a maximum, not a spending target.");
         var interval = config.ProcurementIntervalMinutes;
         if (InputInt("Minutes between procurement scans", ref interval, 5, 1_440))
         {
