@@ -1,6 +1,7 @@
 using System.Numerics;
 using System.Globalization;
 using System.Text.RegularExpressions;
+using Dalamud.Memory;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.UI;
@@ -36,6 +37,7 @@ public interface IRetainerListingService
     bool IsSellListOpen { get; }
     bool IsContextMenuOpen { get; }
     bool IsPriceEditorOpen { get; }
+    bool IsBankOpen { get; }
     bool IsTalkOpen { get; }
     int RetainerCount { get; }
     IReadOnlyList<int> AvailableRetainerIndices { get; }
@@ -60,6 +62,10 @@ public interface IRetainerListingService
     void CancelPriceEditor();
     PriceUpdateResult CommitPrice(RetainerListing expected, uint targetPrice);
     bool CloseSellList();
+    bool SelectEntrustGil();
+    bool SetWithdrawAllRetainerGil(out uint amount, out string message);
+    bool ConfirmGilWithdrawal();
+    void CancelBankDialog();
     bool CloseRetainerMenu();
     bool AdvanceTalk();
     bool TryAutoListPurchase(ProcurementLedger ledger, out PendingAutoListing? pending);
@@ -95,6 +101,7 @@ public sealed unsafe class RetainerListingService : IRetainerListingService
     public bool IsSellListOpen => IsAddonVisible("RetainerSellList");
     public bool IsContextMenuOpen => IsAddonVisible("ContextMenu");
     public bool IsPriceEditorOpen => IsAddonVisible("RetainerSell");
+    public bool IsBankOpen => IsAddonVisible("Bank");
     public bool IsTalkOpen => IsAddonVisible("Talk");
 
     public int RetainerCount
@@ -427,6 +434,97 @@ public sealed unsafe class RetainerListingService : IRetainerListingService
             return false;
         addon->Close(true);
         return true;
+    }
+
+    public bool SelectEntrustGil()
+    {
+        var addon = gameGui.GetAddonByName<AddonSelectString>("SelectString");
+        if (addon == null || !addon->AtkUnitBase.IsVisible ||
+            addon->PopupMenu.PopupMenu.EntryNames == null)
+            return false;
+
+        var expected = dataManager.GetExcelSheet<Addon>().TryGetRow(2379, out var row)
+            ? row.Text.ToString().Trim()
+            : string.Empty;
+        if (string.IsNullOrWhiteSpace(expected))
+            return false;
+
+        var count = Math.Clamp(addon->PopupMenu.PopupMenu.EntryCount, 0, 32);
+        for (var index = 0; index < count; index++)
+        {
+            var pointer = addon->PopupMenu.PopupMenu.EntryNames[index].Value;
+            if (pointer == null)
+                continue;
+            var text = MemoryHelper.ReadSeStringNullTerminated((nint)pointer).TextValue.Trim();
+            if (!string.Equals(text, expected, StringComparison.Ordinal))
+                continue;
+            FireCallback(&addon->AtkUnitBase, index);
+            return true;
+        }
+        return false;
+    }
+
+    public bool SetWithdrawAllRetainerGil(out uint amount, out string message)
+    {
+        amount = 0;
+        message = string.Empty;
+        var addon = GetAddon("Bank");
+        if (addon == null)
+        {
+            message = "The retainer gil window is not open.";
+            return false;
+        }
+
+        var retainerGil = ActiveRetainerGil;
+        var playerGil = PlayerGil;
+        var capacity = PricingStrategyService.MaximumListingPrice > playerGil
+            ? PricingStrategyService.MaximumListingPrice - playerGil
+            : 0;
+        amount = Math.Min(retainerGil, capacity);
+        if (amount == 0)
+        {
+            message = retainerGil == 0
+                ? "The retainer has no gil to collect."
+                : "Player gil is at the game cap; no retainer gil can be collected.";
+            return false;
+        }
+
+        var values = stackalloc AtkValue[2];
+        values[0].Type = AtkValueType.Int;
+        values[0].Int = 3;
+        values[1].Type = AtkValueType.UInt;
+        values[1].UInt = amount;
+        addon->FireCallback(2, values, true);
+        message = $"Prepared to withdraw {amount:N0} gil.";
+        return true;
+    }
+
+    public bool ConfirmGilWithdrawal()
+    {
+        var addon = GetAddon("Bank");
+        if (addon == null)
+            return false;
+
+        var values = stackalloc AtkValue[2];
+        values[0].Type = AtkValueType.Int;
+        values[0].Int = 0;
+        values[1] = default;
+        addon->FireCallback(2, values, true);
+        addon->Close(true);
+        return true;
+    }
+
+    public void CancelBankDialog()
+    {
+        var addon = GetAddon("Bank");
+        if (addon == null)
+            return;
+        var values = stackalloc AtkValue[2];
+        values[0].Type = AtkValueType.Int;
+        values[0].Int = 1;
+        values[1] = default;
+        addon->FireCallback(2, values, true);
+        addon->Close(true);
     }
 
     public bool CloseRetainerMenu()

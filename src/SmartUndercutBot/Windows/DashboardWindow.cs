@@ -129,6 +129,14 @@ public sealed class DashboardWindow : Window
             SaveConfiguration();
         }
 
+        var collectGil = config.AutomaticallyCollectRetainerGil;
+        if (ImGui.Checkbox("Collect gil from every processed retainer", ref collectGil))
+        {
+            config.AutomaticallyCollectRetainerGil = collectGil;
+            SaveConfiguration();
+        }
+        ImGui.TextDisabled("Withdraws after listings finish, verifies the retainer balance, and respects the player gil cap.");
+
         var repeatRuns = config.RepeatBellRuns;
         if (ImGui.Checkbox("Repeat bell runs while idle", ref repeatRuns))
         {

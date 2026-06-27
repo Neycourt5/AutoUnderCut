@@ -29,6 +29,11 @@ public enum AutomationState
     WaitingAfterCommit,
     WaitingBeforeClosingSellList,
     WaitingForRetainerMenuAfterSellList,
+    WaitingBeforeGilCollection,
+    WaitingForBank,
+    WaitingBeforeGilAmount,
+    WaitingBeforeGilConfirmation,
+    WaitingForGilVerification,
     WaitingBeforeClosingRetainer,
     WaitingForRetainerList,
     WaitingForScheduledRun,
@@ -112,6 +117,8 @@ public sealed class AutomationController : IDisposable
     private bool fillOnlyRun;
     private bool abortFillRunAtBell;
     private int autoListingProbeRowLimit;
+    private uint retainerGilBeforeWithdrawal;
+    private uint pendingGilWithdrawal;
     private string abortFillReason = string.Empty;
     private string detail = "Open a summoning bell to begin.";
 
@@ -213,6 +220,7 @@ public sealed class AutomationController : IDisposable
         retainerListings.CloseContextMenu();
         if (retainerListings.IsPriceEditorOpen)
             retainerListings.CancelPriceEditor();
+        retainerListings.CancelBankDialog();
         State = AutomationState.Halted;
         detail = reason;
         log.Add(AutomationLogLevel.Warning, $"Automation halted: {reason}");
@@ -227,6 +235,7 @@ public sealed class AutomationController : IDisposable
         catch (Exception ex)
         {
             sessionCancellation?.Cancel();
+            retainerListings.CancelBankDialog();
             State = AutomationState.Faulted;
             detail = ex.Message;
             log.Add(AutomationLogLevel.Error, $"Automation faulted: {ex}");
@@ -327,9 +336,34 @@ public sealed class AutomationController : IDisposable
                 break;
             case AutomationState.WaitingForRetainerMenuAfterSellList:
                 if (retainerListings.IsRetainerMenuOpen)
-                    Schedule(AutomationState.WaitingBeforeClosingRetainer, $"Dismissing {retainerListings.ActiveRetainerName}.");
+                {
+                    if (configuration.Current.AutomaticallyCollectRetainerGil && retainerListings.ActiveRetainerGil > 0)
+                        Schedule(AutomationState.WaitingBeforeGilCollection,
+                            $"Collecting gil from {retainerListings.ActiveRetainerName}.");
+                    else
+                        Schedule(AutomationState.WaitingBeforeClosingRetainer,
+                            $"Dismissing {retainerListings.ActiveRetainerName}.");
+                }
                 else
                     CheckTimeout("Timed out returning to the retainer menu.");
+                break;
+            case AutomationState.WaitingBeforeGilCollection:
+                if (DelayElapsed()) StartGilCollection();
+                break;
+            case AutomationState.WaitingForBank:
+                if (retainerListings.IsBankOpen)
+                    Schedule(AutomationState.WaitingBeforeGilAmount, "Preparing the retainer gil withdrawal amount.");
+                else if (DateTimeOffset.UtcNow >= stateDeadline)
+                    SkipGilCollection("Timed out opening the retainer gil window.");
+                break;
+            case AutomationState.WaitingBeforeGilAmount:
+                if (DelayElapsed()) PrepareGilWithdrawal();
+                break;
+            case AutomationState.WaitingBeforeGilConfirmation:
+                if (DelayElapsed()) ConfirmGilWithdrawal();
+                break;
+            case AutomationState.WaitingForGilVerification:
+                PollGilWithdrawal();
                 break;
             case AutomationState.WaitingBeforeClosingRetainer:
                 if (DelayElapsed()) CloseCurrentRetainer();
@@ -360,7 +394,8 @@ public sealed class AutomationController : IDisposable
 
         if (State is AutomationState.Halted or AutomationState.Faulted &&
             !retainerListings.IsRetainerListOpen && !retainerListings.IsRetainerMenuOpen &&
-            !retainerListings.IsSellListOpen && !retainerListings.IsPriceEditorOpen)
+            !retainerListings.IsSellListOpen && !retainerListings.IsPriceEditorOpen &&
+            !retainerListings.IsBankOpen)
         {
             State = AutomationState.Idle;
             detail = "Open a summoning bell to begin.";
@@ -443,6 +478,8 @@ public sealed class AutomationController : IDisposable
         fillOnlyRun = requestedFillOnlyRun;
         abortFillRunAtBell = false;
         autoListingProbeRowLimit = 0;
+        retainerGilBeforeWithdrawal = 0;
+        pendingGilWithdrawal = 0;
         abortFillReason = string.Empty;
         marketTask = null;
         lastMarketRequestAt = DateTimeOffset.MinValue;
@@ -1214,6 +1251,79 @@ public sealed class AutomationController : IDisposable
         WaitFor(AutomationState.WaitingForRetainerList, "Waiting for the summoning-bell retainer list.", 15);
     }
 
+    private void StartGilCollection()
+    {
+        retainerGilBeforeWithdrawal = retainerListings.ActiveRetainerGil;
+        pendingGilWithdrawal = 0;
+        if (retainerGilBeforeWithdrawal == 0)
+        {
+            Schedule(AutomationState.WaitingBeforeClosingRetainer,
+                $"No gil to collect from {retainerListings.ActiveRetainerName}; dismissing retainer.");
+            return;
+        }
+        if (!retainerListings.SelectEntrustGil())
+        {
+            SkipGilCollection("Could not find the localized 'Entrust or withdraw gil' retainer-menu entry.");
+            return;
+        }
+        WaitFor(AutomationState.WaitingForBank, "Waiting for the retainer gil window.");
+    }
+
+    private void PrepareGilWithdrawal()
+    {
+        retainerGilBeforeWithdrawal = retainerListings.ActiveRetainerGil;
+        if (!retainerListings.SetWithdrawAllRetainerGil(out pendingGilWithdrawal, out var message))
+        {
+            retainerListings.CancelBankDialog();
+            SkipGilCollection(message);
+            return;
+        }
+        Schedule(AutomationState.WaitingBeforeGilConfirmation, message);
+    }
+
+    private void ConfirmGilWithdrawal()
+    {
+        if (!retainerListings.ConfirmGilWithdrawal())
+        {
+            SkipGilCollection("The retainer gil withdrawal confirmation was unavailable.");
+            return;
+        }
+        WaitFor(AutomationState.WaitingForGilVerification,
+            $"Waiting for the server to confirm {pendingGilWithdrawal:N0} gil collected.");
+    }
+
+    private void PollGilWithdrawal()
+    {
+        var expectedRemaining = retainerGilBeforeWithdrawal > pendingGilWithdrawal
+            ? retainerGilBeforeWithdrawal - pendingGilWithdrawal
+            : 0;
+        var current = retainerListings.ActiveRetainerGil;
+        if (current <= expectedRemaining)
+        {
+            var collected = retainerGilBeforeWithdrawal - current;
+            var retainerId = retainerListings.ActiveRetainerId;
+            if (portfolioRetainers.TryGetValue(retainerId, out var balance))
+                portfolioRetainers[retainerId] = balance with { Gil = current };
+            log.Add(AutomationLogLevel.Information,
+                $"COLLECTED {collected:N0} gil from {retainerListings.ActiveRetainerName}; {current:N0} gil remains on the retainer.");
+            Schedule(AutomationState.WaitingBeforeClosingRetainer,
+                $"Gil collected; dismissing {retainerListings.ActiveRetainerName}.");
+            return;
+        }
+        if (DateTimeOffset.UtcNow >= stateDeadline)
+            SkipGilCollection($"Server verification did not confirm the {pendingGilWithdrawal:N0} gil withdrawal.");
+    }
+
+    private void SkipGilCollection(string reason)
+    {
+        retainerListings.CancelBankDialog();
+        log.Add(AutomationLogLevel.Warning,
+            $"GIL COLLECTION SKIPPED for {retainerListings.ActiveRetainerName}: {reason}");
+        pendingGilWithdrawal = 0;
+        Schedule(AutomationState.WaitingBeforeClosingRetainer,
+            $"Gil collection skipped; dismissing {retainerListings.ActiveRetainerName}.");
+    }
+
     private void ContinueWithNextRetainer()
     {
         if (abortFillRunAtBell)
@@ -1370,6 +1480,9 @@ public sealed class AutomationController : IDisposable
         AutomationState.WaitingBeforeCommit or
         AutomationState.WaitingAfterCommit or
         AutomationState.WaitingBeforeClosingSellList or
+        AutomationState.WaitingBeforeGilCollection or
+        AutomationState.WaitingBeforeGilAmount or
+        AutomationState.WaitingBeforeGilConfirmation or
         AutomationState.WaitingBeforeClosingRetainer or
         AutomationState.WaitingForScheduledRun;
 

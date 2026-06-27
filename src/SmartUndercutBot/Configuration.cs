@@ -6,7 +6,7 @@ namespace SmartUndercutBot;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 16;
+    public int Version { get; set; } = 17;
     public bool AutomationEnabled { get; set; }
     public bool ProcessAllRetainers { get; set; } = true;
     public bool RepeatBellRuns { get; set; }
@@ -21,6 +21,7 @@ public sealed class Configuration : IPluginConfiguration
     public int MarketRequestRetryCount { get; set; } = 2;
     public int MarketRetryBackoffMs { get; set; } = 2000;
     public int MaximumUpdatesPerSession { get; set; } = 200;
+    public bool AutomaticallyCollectRetainerGil { get; set; } = true;
     public bool AutomaticProcurementEnabled { get; set; }
     public bool AllowAutomaticPurchases { get; set; }
     public bool AllowAutomaticListing { get; set; }
@@ -203,6 +204,11 @@ public sealed class Configuration : IPluginConfiguration
             AllowAutomaticPurchases = false;
             LiveWorldStockHuntEnabled = false;
             Version = 16;
+        }
+        if (Version < 17)
+        {
+            AutomaticallyCollectRetainerGil = true;
+            Version = 17;
         }
         MinimumDelayMs = Math.Clamp(MinimumDelayMs, 100, 60_000);
         MaximumDelayMs = Math.Clamp(MaximumDelayMs, MinimumDelayMs, 60_000);
