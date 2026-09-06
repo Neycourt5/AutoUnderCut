@@ -128,8 +128,14 @@ public sealed class ProcurementControllerTests
             case "board": run.Game.BoardOpen = false; break;
         }
         run.Tick();
-        Assert.Equal(ProcurementState.Halted, run.Controller.State);
+        // Abandoning the buy is not a reason to abandon the character on a foreign
+        // world: the route gives up on shopping and heads home to the bell instead.
         Assert.Equal(0, run.Game.Purchases);
+        Assert.Contains(run.Controller.State, new[]
+        {
+            ProcurementState.WaitingBeforeHomeTravel, ProcurementState.WaitingAfterHomeArrival,
+        });
+        Assert.True(run.Controller.IsActive);
     }
 
     [Fact]
@@ -141,7 +147,7 @@ public sealed class ProcurementControllerTests
         run.ReachApproach();
         run.Tick();
         run.Tick(61);
-        Assert.Equal(ProcurementState.Halted, run.Controller.State);
+        Assert.Equal(ProcurementState.WaitingBeforeHomeTravel, run.Controller.State);
         Assert.Equal(0, run.Game.Purchases);
     }
 
@@ -163,7 +169,7 @@ public sealed class ProcurementControllerTests
         run.Tick();
         run.Game.IsBusy = true;
         run.Tick(70);
-        Assert.Equal(ProcurementState.Halted, run.Controller.State);
+        Assert.Equal(ProcurementState.WaitingBeforeHomeTravel, run.Controller.State);
         Assert.Equal(1, run.Game.Aborts);
     }
 
@@ -232,6 +238,73 @@ public sealed class ProcurementControllerTests
         run.Tick(2);
         Assert.Equal(ProcurementState.WaitingBeforeHomeTravel, run.Controller.State);
         Assert.Equal(0, run.Game.Purchases);
+    }
+
+    [Fact]
+    public void RecoverableStopDoesNotDisableUnattendedProcurementForever()
+    {
+        using var run = new Route();
+        run.Repricing.LastKnownFreeSaleSlots = 0;
+        run.Controller.RunLiveStockHuntNow();
+        Assert.Equal(ProcurementState.Halted, run.Controller.State);
+
+        run.Tick(60);
+        Assert.Equal(ProcurementState.Halted, run.Controller.State);
+
+        // Once the retry delay passes and the character is back at a bell, the
+        // controller must be schedulable again instead of staying stopped.
+        run.Repricing.LastKnownFreeSaleSlots = 5;
+        run.Tick(600);
+        Assert.Equal(ProcurementState.Idle, run.Controller.State);
+    }
+
+    [Fact]
+    public void UserStopStaysStoppedAndIsNeverRetriedAutomatically()
+    {
+        using var run = new Route();
+        run.Controller.Halt();
+        run.Tick(100_000);
+        Assert.Equal(ProcurementState.Halted, run.Controller.State);
+    }
+
+    [Fact]
+    public void StoppedRouteDoesNotResumeAwayFromASummoningBell()
+    {
+        using var run = new Route();
+        run.Repricing.LastKnownFreeSaleSlots = 0;
+        run.Controller.RunLiveStockHuntNow();
+        run.Game.BellOpen = false;
+        run.Tick(100_000);
+        Assert.Equal(ProcurementState.Halted, run.Controller.State);
+    }
+
+    [Fact]
+    public void PendingStockDoesNotMakeTheSchedulerRescanUniversalisContinuously()
+    {
+        using var run = new Route();
+        run.Config.Current.AutomaticProcurementEnabled = true;
+        run.Config.Current.LiveWorldStockHuntEnabled = false;
+        run.Repricing.LastKnownFreeSaleSlots = 5;
+        // Five bought-but-unlisted stacks reserve every free sale slot.
+        run.Ledger.RecordPurchase(new(1, "Popcorn", 1, 1, "Siren", 1, 1_000, 5, true, 2_000, 1_500, 100, 1), 1);
+        Assert.Equal(5, run.Ledger.PendingSaleSlots);
+
+        run.Tick();
+        run.Tick();
+        Assert.Equal(ProcurementState.PlanReady, run.Controller.State);
+        Assert.Equal(1, run.Game.Scans);
+
+        // The "capacity changed" trigger must not fire on its own reserved slots,
+        // or the scheduler rescans as fast as Universalis answers.
+        for (var tick = 0; tick < 50; tick++)
+            run.Tick();
+        Assert.Equal(1, run.Game.Scans);
+
+        // Listing that stock frees the capacity again and earns a fresh scan.
+        run.Ledger.MarkListed(1, true, 5);
+        run.Tick();
+        run.Tick();
+        Assert.Equal(2, run.Game.Scans);
     }
 
     private sealed class Clock : TimeProvider
@@ -329,10 +402,15 @@ public sealed class ProcurementControllerTests
         public bool ChangeWorld(string world) => true;
         public void Abort() { Aborts++; IsBusy = false; }
         public string ResolveDataCenter(string configured) => configured;
+        public int Scans { get; private set; }
         public Task<IReadOnlyList<ProcurementMarketItem>> ScanAsync(IReadOnlyList<ProcurementRule> rules,
-            string dataCenter, CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<ProcurementMarketItem>>(
-            [new(1, "Popcorn", [new(1, 10, 20, "Cactuar", 1, 1_000, 99, true)],
-                [new(2_000, 99, true, DateTimeOffset.UtcNow)])]);
+            string dataCenter, CancellationToken cancellationToken)
+        {
+            Scans++;
+            return Task.FromResult<IReadOnlyList<ProcurementMarketItem>>(
+                [new(1, "Popcorn", [new(1, 10, 20, "Cactuar", 1, 1_000, 99, true)],
+                    [new(2_000, 99, true, DateTimeOffset.UtcNow)])]);
+        }
         public int GetInventoryCount(uint itemId, bool highQuality) => Inventory;
         public Vector3? FindNearest(string objectName) => Vector3.Zero;
         public float DistanceTo(Vector3 position) => 1;

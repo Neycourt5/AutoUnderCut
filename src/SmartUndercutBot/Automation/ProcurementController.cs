@@ -89,6 +89,7 @@ public sealed class ProcurementController : IDisposable
     private DateTimeOffset nextActionAt;
     private DateTimeOffset nextAutomaticScan;
     private DateTimeOffset nextLiveStockHunt;
+    private DateTimeOffset resumeStoppedRouteAt = DateTimeOffset.MaxValue;
     private int worldIndex;
     private int orderIndex;
     private int inventoryBefore;
@@ -109,6 +110,9 @@ public sealed class ProcurementController : IDisposable
     private int confirmedPurchases;
     private int skippedPurchases;
     private string routeOutcome = string.Empty;
+    private int consecutiveFailedWorlds;
+    private int worldSuccessfulScans;
+    private readonly Dictionary<uint, int> purchasedSlotsByItem = [];
 
     public ProcurementController(
         IFramework framework,
@@ -159,8 +163,9 @@ public sealed class ProcurementController : IDisposable
     public IReadOnlyList<ProcurementOrder> CurrentGuidedWorldOrders =>
         IsGuidedReviewPending && worldIndex < worldGroups.Count ? worldGroups[worldIndex].ToArray() : [];
     public ProcurementStatus Status => new(
-        State, detail, Math.Min(orderIndex + 1, Plan.Orders.Count), Plan.Orders.Count, gilSpent,
-        configuration.Current.AutomaticProcurementEnabled ? nextAutomaticScan : null);
+        State, detail, confirmedPurchases, Plan.Orders.Count, gilSpent,
+        configuration.Current.AutomaticProcurementEnabled && State is not (ProcurementState.Halted or ProcurementState.Faulted)
+            ? configuration.Current.LiveWorldStockHuntEnabled ? nextLiveStockHunt : nextAutomaticScan : null);
 
     public void ScanNow() => StartScan(ProcurementRunMode.None);
 
@@ -168,7 +173,8 @@ public sealed class ProcurementController : IDisposable
     {
         if (IsActive || IsStartBlocked?.Invoke() == true)
             return;
-        if (Plan.Orders.Count == 0)
+        if (State != ProcurementState.PlanReady || Plan.Orders.Count == 0 ||
+            timeProvider.GetUtcNow() - Plan.CreatedAt > TimeSpan.FromMinutes(5))
             StartScan(ProcurementRunMode.AutomaticPurchase);
         else
             BeginExecution(ProcurementRunMode.AutomaticPurchase);
@@ -190,6 +196,17 @@ public sealed class ProcurementController : IDisposable
     }
 
     public void Halt(string reason = "Procurement stopped by user.")
+        => StopRoute(reason, DateTimeOffset.MaxValue);
+
+    // A stop that only reflects a passing condition - no capacity yet, Lifestream
+    // still busy, a scan that failed - must not disable unattended procurement for
+    // the rest of the session. Those schedule a retry; a user stop and an
+    // unverified purchase stay latched until the user looks at them.
+    private void HaltForRetry(string reason) => StopRoute(
+        reason,
+        timeProvider.GetUtcNow().AddMinutes(Math.Max(1, configuration.Current.ProcurementIntervalMinutes)));
+
+    private void StopRoute(string reason, DateTimeOffset resumeAt)
     {
         cancellation?.Cancel();
         scanTask = null;
@@ -199,6 +216,7 @@ public sealed class ProcurementController : IDisposable
         taskbarAttention.StopFlashing();
         stockHuntScanning = false;
         activeRunMode = ProcurementRunMode.None;
+        resumeStoppedRouteAt = resumeAt;
         State = ProcurementState.Halted;
         detail = reason;
         log.Add(AutomationLogLevel.Warning, reason);
@@ -212,12 +230,12 @@ public sealed class ProcurementController : IDisposable
         var dataCenter = universalis.ResolveDataCenter(configuration.Current.ProcurementDataCenter);
         if (string.IsNullOrWhiteSpace(dataCenter))
         {
-            Halt("Could not determine a Universalis data center. Set it in the Procurement tab.");
+            HaltForRetry("Could not determine a Universalis data center. Set it in the Procurement tab.");
             return;
         }
         if (configuration.Current.ProcurementRules.Count == 0)
         {
-            Halt("No procurement items are configured. Add the favorite defaults in the Procurement tab.");
+            HaltForRetry("No procurement items are configured. Add the favorite defaults in the Procurement tab.");
             return;
         }
 
@@ -226,6 +244,11 @@ public sealed class ProcurementController : IDisposable
         cancellation = new CancellationTokenSource();
         runAfterScan = mode;
         scanTask = universalis.ScanAsync(configuration.Current.ProcurementRules, dataCenter, cancellation.Token);
+        deadline = timeProvider.GetUtcNow().AddSeconds(90);
+        Plan = ProcurementPlan.Empty;
+        confirmedPurchases = 0;
+        skippedPurchases = 0;
+        gilSpent = 0;
         State = ProcurementState.ScanningUniversalis;
         detail = $"Scanning {dataCenter} on Universalis.";
         log.Add(AutomationLogLevel.Information, detail);
@@ -245,6 +268,8 @@ public sealed class ProcurementController : IDisposable
                 lifestream.Abort();
             activeRunMode = ProcurementRunMode.None;
             stockHuntScanning = false;
+            resumeStoppedRouteAt = timeProvider.GetUtcNow()
+                .AddMinutes(Math.Max(1, configuration.Current.ProcurementIntervalMinutes));
             State = ProcurementState.Faulted;
             detail = ex.Message;
             vnavmesh.Stop();
@@ -267,7 +292,10 @@ public sealed class ProcurementController : IDisposable
             return;
         }
         if (State is ProcurementState.Faulted or ProcurementState.Halted)
+        {
+            TryResumeAfterStop();
             return;
+        }
 
         // Cross-DC travel intentionally passes through character selection.
         // Other steps must wait for a loaded character before touching game UI.
@@ -321,7 +349,7 @@ public sealed class ProcurementController : IDisposable
                     if (stockHuntScanning)
                         SkipStockHuntWorld($"LIVE TOUR: {WorldName}'s Market Board closed before item search became ready; skipping that world.");
                     else
-                        Halt("The Market Board closed before its item-search services became ready.");
+                        FinishShopping("The Market Board closed before its item-search services became ready.");
                     break;
                 }
                 if (!DelayElapsed())
@@ -386,15 +414,18 @@ public sealed class ProcurementController : IDisposable
     private void PollScan()
     {
         if (scanTask is null || !scanTask.IsCompleted)
+        {
+            CheckTimeout("Universalis did not finish within 90 seconds; the scan was cancelled.");
             return;
+        }
         if (scanTask.IsCanceled || scanTask.IsFaulted)
         {
-            Halt(scanTask.Exception?.GetBaseException().Message ?? "Universalis scan was cancelled.");
+            HaltForRetry(scanTask.Exception?.GetBaseException().Message ?? "Universalis scan was cancelled.");
             return;
         }
         var config = configuration.Current;
         var freeSaleSlots = repricing.LastKnownFreeSaleSlots ?? config.ProcurementTargetSaleSlots;
-        var plannedSaleSlots = Math.Min(freeSaleSlots, config.ProcurementTargetSaleSlots);
+        var plannedSaleSlots = PlannedSaleSlots(freeSaleSlots);
         var freeInventorySlots = Math.Max(0, (int)market.FreeInventorySlots - config.ProcurementInventoryReserve);
         Plan = planner.BuildPlan(new(
             scanTask.Result,
@@ -429,23 +460,28 @@ public sealed class ProcurementController : IDisposable
         }
         if (!playerState.IsLoaded)
         {
-            Halt("The character is not fully loaded.");
+            HaltForRetry("The character is not fully loaded.");
             return;
         }
         if (!lifestream.IsAvailable || lifestream.IsBusy)
         {
-            Halt("Lifestream must be enabled and idle before starting a live tour.");
+            HaltForRetry("Lifestream must be enabled and idle before starting a live tour.");
             return;
         }
         if (repricing.LastKnownFreeSaleSlots is not > 0)
         {
-            Halt("The live all-world stock hunt needs at least one confirmed empty retainer sale slot. Run the all-retainer bell pass first.");
+            HaltForRetry("The live all-world stock hunt needs at least one confirmed empty retainer sale slot. Run the all-retainer bell pass first.");
+            return;
+        }
+        if (AvailablePurchaseSlots() == 0 || market.FreeInventorySlots <= configuration.Current.ProcurementInventoryReserve || market.Gil == 0)
+        {
+            HaltForRetry("No shopping capacity: list pending stock first and keep bag space and gil available.");
             return;
         }
 
         if (!TryGetHomeWorld(out homeWorld))
         {
-            Halt("Could not determine the character's home world.");
+            HaltForRetry("Could not determine the character's home world.");
             return;
         }
         stockHuntRules = configuration.Current.ProcurementRules
@@ -473,6 +509,9 @@ public sealed class ProcurementController : IDisposable
         successfulLiveScans = 0;
         failedLiveScans = 0;
         routeOutcome = string.Empty;
+        consecutiveFailedWorlds = 0;
+        worldSuccessfulScans = 0;
+        purchasedSlotsByItem.Clear();
         stockHuntListings.Clear();
         // Scan the home world last. Its prices are the resale anchor for every
         // prospective deal, so they should be the freshest data in the tour
@@ -494,27 +533,38 @@ public sealed class ProcurementController : IDisposable
 
     private void BeginExecution(ProcurementRunMode mode)
     {
+        // The live tour reaches this after its scan, so returning silently would
+        // leave the route dangling mid-state. Stop explicitly and retry later.
         if (IsStartBlocked?.Invoke() == true)
+        {
+            HaltForRetry("Another automation pass started first; the procurement route was not begun.");
             return;
+        }
         if (mode == ProcurementRunMode.AutomaticPurchase && !configuration.Current.AllowAutomaticPurchases)
         {
             State = ProcurementState.PlanReady;
             detail = "Purchase writes are disarmed; review the plan and arm them before running.";
             return;
         }
+        if (mode == ProcurementRunMode.AutomaticPurchase &&
+            (AvailablePurchaseSlots() == 0 || market.FreeInventorySlots <= configuration.Current.ProcurementInventoryReserve))
+        {
+            HaltForRetry("The plan no longer has free retainer or inventory capacity. List pending stock before buying more.");
+            return;
+        }
         if (Plan.Orders.Count == 0 || market.Gil < Plan.TotalCost)
         {
-            Halt("The procurement plan is empty or no longer fits the available gil balance.");
+            HaltForRetry("The procurement plan is empty or no longer fits the available gil balance.");
             return;
         }
         if (!TryGetHomeWorld(out homeWorld))
         {
-            Halt("Could not determine the character's home world.");
+            HaltForRetry("Could not determine the character's home world.");
             return;
         }
         if (!lifestream.IsAvailable || lifestream.IsBusy)
         {
-            Halt("Lifestream must be enabled and idle before starting a route.");
+            HaltForRetry("Lifestream must be enabled and idle before starting a route.");
             return;
         }
 
@@ -537,6 +587,7 @@ public sealed class ProcurementController : IDisposable
         confirmedPurchases = 0;
         skippedPurchases = 0;
         routeOutcome = string.Empty;
+        purchasedSlotsByItem.Clear();
         TravelToCurrentWorld();
     }
 
@@ -592,7 +643,7 @@ public sealed class ProcurementController : IDisposable
         }
         if (!lifestream.IsAvailable)
         {
-            Halt("Lifestream is unavailable; the route cannot continue.");
+            HaltForRetry("Lifestream is unavailable; the route cannot continue.");
             return;
         }
         var destination = returningHome ? homeWorld : WorldName;
@@ -607,7 +658,7 @@ public sealed class ProcurementController : IDisposable
                 SkipStockHuntWorld($"Lifestream could not visit {WorldName}; skipping that world.");
                 return;
             }
-            Halt("The literal /li world-travel command was not accepted. Check that Lifestream is enabled, then retry the route.");
+            FailDestination("The /li world-travel command was not accepted.");
             return;
         }
         Wait(returningHome ? ProcurementState.WaitingForHomeWorld : ProcurementState.WaitingForWorld,
@@ -653,6 +704,11 @@ public sealed class ProcurementController : IDisposable
 
     private void PollStockHuntListings()
     {
+        if (!IsOnWorld(WorldName) || !market.IsMarketBoardOpen || lifestream.IsBusy)
+        {
+            SkipStockHuntWorld("Live scan lost its destination world or Market Board; discarding this world's data.");
+            return;
+        }
         if (currentStockHuntRule is null)
         {
             if (DelayElapsed())
@@ -685,6 +741,7 @@ public sealed class ProcurementController : IDisposable
             .Where(x => x.IsHighQuality)
             .ToArray();
         successfulLiveScans++;
+        worldSuccessfulScans++;
         foreach (var listing in live)
         {
             stockHuntListings.Add(new(
@@ -715,6 +772,10 @@ public sealed class ProcurementController : IDisposable
     private void FinishStockHuntWorld()
     {
         var completedWorld = WorldName;
+        consecutiveFailedWorlds = worldSuccessfulScans == 0 ? consecutiveFailedWorlds + 1 : 0;
+        worldSuccessfulScans = 0;
+        if (StopUnproductiveTour())
+            return;
         market.CloseMarketBoard();
         stockHuntWorldIndex++;
         stockHuntRuleIndex = 0;
@@ -730,6 +791,11 @@ public sealed class ProcurementController : IDisposable
         lifestream.Abort();
         vnavmesh.Stop();
         market.CloseMarketBoard();
+        stockHuntListings.RemoveAll(x => string.Equals(x.WorldName, WorldName, StringComparison.OrdinalIgnoreCase));
+        consecutiveFailedWorlds++;
+        worldSuccessfulScans = 0;
+        if (StopUnproductiveTour())
+            return;
         stockHuntWorldIndex++;
         stockHuntRuleIndex = 0;
         currentStockHuntRule = null;
@@ -756,7 +822,7 @@ public sealed class ProcurementController : IDisposable
             homeWorld,
             retainerListings.OwnedRetainerIds,
             Math.Min(config.ProcurementBudget, market.Gil),
-            Math.Min(freeSaleSlots, config.ProcurementTargetSaleSlots),
+            PlannedSaleSlots(freeSaleSlots),
             Math.Max(0, (int)market.FreeInventorySlots - config.ProcurementInventoryReserve),
             config.ProcurementMinimumRoiPercent,
             config.ProcurementMinimumProfitPerUnit));
@@ -799,6 +865,11 @@ public sealed class ProcurementController : IDisposable
             return;
         }
         currentOrder = orders[orderIndex];
+        if (AvailablePurchaseSlots() == 0)
+        {
+            FinishShopping("Shopping stopped: all available retainer slots are reserved for purchased stock.");
+            return;
+        }
         listingRequestAttempts = 1;
         nextActionAt = timeProvider.GetUtcNow().AddMilliseconds(1_200);
         if (!market.RequestListings(currentOrder.ItemId))
@@ -814,12 +885,12 @@ public sealed class ProcurementController : IDisposable
     {
         if (!configuration.Current.AllowAutomaticPurchases)
         {
-            Halt("Automatic purchases were disarmed; the route stopped before submitting another purchase.");
+            FinishShopping("Automatic purchases were disarmed; the route stopped before submitting another purchase.");
             return;
         }
         if (!IsOnWorld(WorldName) || !market.IsMarketBoardOpen || lifestream.IsBusy)
         {
-            Halt("The destination world or Market Board changed before purchase validation.");
+            FinishShopping("The destination world or Market Board changed before purchase validation.");
             return;
         }
         if (currentOrder is null)
@@ -829,6 +900,21 @@ public sealed class ProcurementController : IDisposable
             BeginCurrentOrder();
             return;
         }
+        var rule = configuration.Current.ProcurementRules.FirstOrDefault(x => x.ItemId == currentOrder.ItemId);
+        if (rule is null || !rule.Enabled || (rule.RequireHighQuality && !currentOrder.IsHighQuality) ||
+            (currentOrder.IsHighQuality && !rule.AllowHighQuality && !rule.RequireHighQuality) ||
+            purchasedSlotsByItem.GetValueOrDefault(currentOrder.ItemId) >= rule.MaximumSaleSlots)
+        {
+            SkipCurrentOrder($"SKIPPED BUY {currentOrder.ItemName}: its current rule no longer permits this order.");
+            return;
+        }
+        currentOrder = currentOrder with
+        {
+            MaximumAcceptableUnitPrice = rule.MaximumUnitPrice > 0
+                ? Math.Min(currentOrder.MaximumAcceptableUnitPrice, rule.MaximumUnitPrice)
+                : currentOrder.MaximumAcceptableUnitPrice,
+            Quantity = Math.Min(currentOrder.Quantity, (uint)Math.Max(1, rule.TargetStackSize)),
+        };
         if (!market.AreListingsReady(currentOrder.ItemId))
         {
             if (timeProvider.GetUtcNow() >= deadline)
@@ -853,6 +939,14 @@ public sealed class ProcurementController : IDisposable
         }
 
         var totalCost = GetPurchaseCost(live);
+        // Validate the returned candidate independently of the UI adapter.
+        if (live.ItemId != currentOrder.ItemId || live.IsHighQuality != currentOrder.IsHighQuality ||
+            live.Quantity == 0 || live.Quantity > currentOrder.Quantity || live.PricePerUnit == 0 ||
+            live.PricePerUnit > currentOrder.MaximumAcceptableUnitPrice || retainerListings.OwnedRetainerIds.Contains(live.RetainerId))
+        {
+            SkipCurrentOrder($"SKIPPED BUY {currentOrder.ItemName}: the selected live listing failed validation.");
+            return;
+        }
         var expectedNetProceeds = decimal.Floor(currentOrder.TargetSalePrice * 0.95m) * live.Quantity;
         if (expectedNetProceeds < totalCost * (1m + configuration.Current.ProcurementMinimumRoiPercent / 100m) ||
             expectedNetProceeds - totalCost < (decimal)configuration.Current.ProcurementMinimumProfitPerUnit * live.Quantity)
@@ -862,7 +956,7 @@ public sealed class ProcurementController : IDisposable
         }
         if (market.FreeInventorySlots <= configuration.Current.ProcurementInventoryReserve)
         {
-            Halt("The inventory reserve was reached; no further purchases will be submitted.");
+            FinishShopping("The inventory reserve was reached; no further purchases will be submitted.");
             return;
         }
         var remainingBudget = configuration.Current.ProcurementBudget > gilSpent
@@ -908,7 +1002,6 @@ public sealed class ProcurementController : IDisposable
             Quantity = currentLiveListing.Quantity,
         };
         var stackSize = configuration.Current.ProcurementRules.FirstOrDefault(x => x.ItemId == actual.ItemId)?.TargetStackSize ?? 99;
-        ledger.RecordPurchase(actual, stackSize);
         var pricingRule = configuration.Current.PerItemRules.TryGetValue(actual.ItemId, out var existingRule)
             ? existingRule
             : configuration.Current.GlobalRule.Clone();
@@ -922,10 +1015,16 @@ public sealed class ProcurementController : IDisposable
         pricingRule.CostBasis = Math.Max(pricingRule.CostBasis, landedCostPerUnit);
         pricingRule.MinimumMarginPercent = Math.Max(
             pricingRule.MinimumMarginPercent, configuration.Current.ProcurementMinimumRoiPercent);
+        pricingRule.MinimumPrice = Math.Max(pricingRule.MinimumPrice,
+            ProcurementPriceSafety.MinimumResalePrice(pricingRule.CostBasis,
+                pricingRule.MinimumMarginPercent, configuration.Current.ProcurementMinimumProfitPerUnit));
+        actual = actual with { TargetSalePrice = Math.Max(actual.TargetSalePrice, pricingRule.MinimumPrice) };
+        ledger.RecordPurchase(actual, stackSize);
         configuration.Current.PerItemRules[actual.ItemId] = pricingRule;
         configuration.Save();
         gilSpent += (uint)Math.Min(purchaseCost, uint.MaxValue - gilSpent);
         confirmedPurchases++;
+        purchasedSlotsByItem[actual.ItemId] = purchasedSlotsByItem.GetValueOrDefault(actual.ItemId) + 1;
         log.Add(AutomationLogLevel.Information,
             $"PURCHASED {actual.ItemName} x{actual.Quantity} on {actual.WorldName} at {actual.PricePerUnit:N0} gil each; " +
             $"buyer tax {currentLiveListing.TotalTax:N0} gil, tracked landed cost {landedCostPerUnit:N0} gil each.");
@@ -1037,7 +1136,7 @@ public sealed class ProcurementController : IDisposable
                 SkipStockHuntWorld($"LIVE TOUR could not reach {WorldName}'s {objectName} after 3 attempts; skipping that world.");
                 return;
             }
-            Halt($"Could not reach a {objectName} after 3 Lifestream market-area attempts. " +
+            FailDestination($"Could not reach a {objectName} after 3 Lifestream market-area attempts. " +
                  $"Check that '{configuration.Current.MarketBoardTravelCommand}' works in chat and that Lifestream is enabled.");
             return;
         }
@@ -1167,8 +1266,7 @@ public sealed class ProcurementController : IDisposable
         // configured periodic interval while the character remains idle at the bell.
         var freeSaleSlots = repricing.LastKnownFreeSaleSlots;
         var newlyAvailableCapacity = freeSaleSlots is > 0 &&
-                                     Math.Min(freeSaleSlots.Value, configuration.Current.ProcurementTargetSaleSlots) !=
-                                     lastScannedFreeSaleSlots;
+                                     PlannedSaleSlots(freeSaleSlots.Value) != lastScannedFreeSaleSlots;
         if (!newlyAvailableCapacity && timeProvider.GetUtcNow() < nextAutomaticScan)
             return;
         nextAutomaticScan = timeProvider.GetUtcNow().AddMinutes(configuration.Current.ProcurementIntervalMinutes);
@@ -1246,14 +1344,85 @@ public sealed class ProcurementController : IDisposable
         if (stockHuntScanning)
             SkipStockHuntWorld($"LIVE TOUR timed out approaching or interacting with {WorldName}'s {objectName}.");
         else
-            Halt($"Timed out approaching or interacting with {objectName}.");
+            FailDestination($"Timed out approaching or interacting with {objectName}.");
         return true;
     }
 
     private void CheckTimeout(string message)
     {
         if (timeProvider.GetUtcNow() >= deadline)
-            Halt(message);
+            FailDestination(message);
+    }
+
+    private int AvailablePurchaseSlots() => PlannedSaleSlots(repricing.LastKnownFreeSaleSlots ?? 0);
+
+    // Every capacity decision - planning, the pre-purchase guard, and the
+    // scheduler's "capacity changed" trigger - must agree on this number.
+    // Comparing two different definitions is what made the scheduler rescan
+    // Universalis continuously whenever any purchased stock was still unlisted.
+    private int PlannedSaleSlots(int freeSaleSlots) => Math.Max(0,
+        Math.Min(freeSaleSlots, configuration.Current.ProcurementTargetSaleSlots) - ledger.PendingSaleSlots);
+
+    private bool StopUnproductiveTour()
+    {
+        if (consecutiveFailedWorlds < 2)
+            return false;
+        FinishShopping("Live tour stopped: two consecutive worlds returned no completed item searches. Check the market-search and travel log before restarting.");
+        return true;
+    }
+
+    private void FinishShopping(string reason)
+    {
+        log.Add(AutomationLogLevel.Warning, reason);
+        routeOutcome = reason;
+        stockHuntScanning = false;
+        lifestream.Abort();
+        vnavmesh.Stop();
+        currentOrder = null;
+        currentLiveListing = null;
+        ReturnHome();
+    }
+
+    private void FailDestination(string reason)
+    {
+        if (stockHuntScanning)
+        {
+            SkipStockHuntWorld(reason);
+            return;
+        }
+        if (activeRunMode != ProcurementRunMode.None && State is
+            ProcurementState.WaitingBeforeWorldTravel or ProcurementState.WaitingForWorld or
+            ProcurementState.WaitingAfterWorldArrival or ProcurementState.WaitingForMarketBoardTravel or
+            ProcurementState.FindingMarketBoard or ProcurementState.MovingToMarketBoard or ProcurementState.WaitingForMarketBoard)
+        {
+            log.Add(AutomationLogLevel.Warning, $"SKIPPED WORLD {WorldName}: {reason}");
+            lifestream.Abort();
+            vnavmesh.Stop();
+            if (worldIndex < worldGroups.Count)
+                skippedPurchases += Math.Max(0, worldGroups[worldIndex].Count() - orderIndex);
+            currentOrder = null;
+            currentLiveListing = null;
+            worldIndex++;
+            orderIndex = 0;
+            TravelToCurrentWorld();
+            return;
+        }
+        HaltForRetry(reason);
+    }
+
+    // A stopped route otherwise stays stopped for the rest of the session, so a
+    // single passing failure silently ends unattended shopping. Once the retry
+    // delay has passed and the character is parked at a summoning bell again,
+    // return to Idle and let the scheduler decide whether to run.
+    private void TryResumeAfterStop()
+    {
+        if (timeProvider.GetUtcNow() < resumeStoppedRouteAt || lifestream.IsBusy ||
+            !playerState.IsLoaded || !retainerListings.IsRetainerListOpen)
+            return;
+        resumeStoppedRouteAt = DateTimeOffset.MaxValue;
+        State = ProcurementState.Idle;
+        detail = "Ready to retry procurement after the previous stop.";
+        log.Add(AutomationLogLevel.Information, detail);
     }
 
     private bool DelayElapsed() => timeProvider.GetUtcNow() >= nextActionAt;

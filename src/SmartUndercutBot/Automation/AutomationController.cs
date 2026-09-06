@@ -268,7 +268,13 @@ public sealed class AutomationController : IDisposable
 
         if (retainerListings.IsTalkOpen && State is AutomationState.WaitingForRetainerMenu or AutomationState.WaitingForRetainerList)
         {
-            retainerListings.AdvanceTalk();
+            if (DateTimeOffset.UtcNow >= stateDeadline)
+                Halt("Retainer dialogue did not finish before the timeout.");
+            else if (DelayElapsed())
+            {
+                retainerListings.AdvanceTalk();
+                nextActionAt = DateTimeOffset.UtcNow.AddMilliseconds(500);
+            }
             return;
         }
 
@@ -382,7 +388,9 @@ public sealed class AutomationController : IDisposable
                     CheckTimeout("Timed out returning to the summoning-bell retainer list.");
                 break;
             case AutomationState.WaitingForScheduledRun:
-                if (!retainerListings.IsRetainerListOpen)
+                if (!configuration.Current.RepeatBellRuns)
+                    Complete("Repeated retainer runs were disabled.");
+                else if (!retainerListings.IsRetainerListOpen)
                     Halt("The summoning-bell list closed; scheduled runs were cancelled.");
                 else if (DelayElapsed())
                     BeginBellSession();
@@ -1260,6 +1268,11 @@ public sealed class AutomationController : IDisposable
 
     private void StartGilCollection()
     {
+        if (!configuration.Current.AutomaticallyCollectRetainerGil)
+        {
+            SkipGilCollection("Automatic gil collection was disabled.");
+            return;
+        }
         retainerGilBeforeWithdrawal = retainerListings.ActiveRetainerGil;
         pendingGilWithdrawal = 0;
         if (retainerGilBeforeWithdrawal == 0)
@@ -1290,6 +1303,11 @@ public sealed class AutomationController : IDisposable
 
     private void ConfirmGilWithdrawal()
     {
+        if (!configuration.Current.AutomaticallyCollectRetainerGil)
+        {
+            SkipGilCollection("Automatic gil collection was disabled before confirmation.");
+            return;
+        }
         if (!retainerListings.ConfirmGilWithdrawal())
         {
             SkipGilCollection("The retainer gil withdrawal confirmation was unavailable.");

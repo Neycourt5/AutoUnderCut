@@ -51,6 +51,7 @@ public sealed class BagListingController : IDisposable
     private readonly AutomationController automation;
     private readonly ProcurementController procurement;
     private readonly AutomationLog log;
+    private readonly TimeProvider timeProvider;
     private readonly Dictionary<uint, uint> plannedPrices = [];
     private IReadOnlyList<BagListingCandidate> candidates = [];
     private CancellationTokenSource? scanCancellation;
@@ -72,7 +73,8 @@ public sealed class BagListingController : IDisposable
         ProcurementLedger ledger,
         AutomationController automation,
         ProcurementController procurement,
-        AutomationLog log)
+        AutomationLog log,
+        TimeProvider? timeProvider = null)
     {
         this.framework = framework;
         this.commandManager = commandManager;
@@ -85,7 +87,8 @@ public sealed class BagListingController : IDisposable
         this.automation = automation;
         this.procurement = procurement;
         this.log = log;
-        nextAutomaticAttempt = DateTimeOffset.UtcNow;
+        this.timeProvider = timeProvider ?? TimeProvider.System;
+        nextAutomaticAttempt = this.timeProvider.GetUtcNow();
         Refresh();
         framework.Update += OnFrameworkUpdate;
     }
@@ -97,6 +100,10 @@ public sealed class BagListingController : IDisposable
     public bool IsBusy => State is BagListingState.ConsolidatingBags or BagListingState.ScanningPrices or BagListingState.WaitingForVerification;
     public bool IsRetainerSellListOpen => retainerListings.IsSellListOpen;
     public bool IsRetainerListOpen => retainerListings.IsRetainerListOpen;
+    public bool IsAutomaticRunDue => !automaticStartSuspended &&
+        configuration.Current.AutomaticCuratedBagListingEnabled && configuration.Current.AllowAutomaticListing &&
+        timeProvider.GetUtcNow() >= nextAutomaticAttempt && !automation.IsActive &&
+        retainerListings.IsRetainerListOpen && automation.LastKnownFreeSaleSlots is > 0;
     private BagListingState State => Status.State;
 
     public void Refresh()
@@ -127,13 +134,18 @@ public sealed class BagListingController : IDisposable
             Fail("Wait for the current retainer or procurement operation to finish.");
             return;
         }
+        if (!configuration.Current.AllowAutomaticListing)
+        {
+            Fail("Arm automatic listing before preparing a bag-listing run.");
+            return;
+        }
 
         automaticStartSuspended = false;
 
         ScheduleNextAttempt();
         if (commandManager.ProcessCommand("/isort execute inventory"))
         {
-            bagSortReadyAt = DateTimeOffset.UtcNow.AddMilliseconds(900);
+            bagSortReadyAt = this.timeProvider.GetUtcNow().AddMilliseconds(900);
             Status = new(BagListingState.ConsolidatingBags,
                 "Consolidating inventory stacks before calculating the protected reserve and 99-stacks.");
             log.Add(AutomationLogLevel.Information, Status.Detail);
@@ -172,6 +184,7 @@ public sealed class BagListingController : IDisposable
         scanCancellation?.Dispose();
         scanCancellation = new CancellationTokenSource();
         scanTask = universalis.ScanAsync(rules, world, scanCancellation.Token);
+        deadline = timeProvider.GetUtcNow().AddSeconds(90);
         Status = new(BagListingState.ScanningPrices,
             $"Reading current {world} prices for {rules.Count} curated HQ item(s).");
         log.Add(AutomationLogLevel.Information, Status.Detail);
@@ -188,7 +201,7 @@ public sealed class BagListingController : IDisposable
             return false;
         }
 
-        deadline = DateTimeOffset.UtcNow.AddSeconds(10);
+        deadline = this.timeProvider.GetUtcNow().AddSeconds(10);
         Status = new(BagListingState.WaitingForVerification, message + " Waiting for retainer verification.");
         log.Add(AutomationLogLevel.Information, $"BAG LIST SUBMITTED {message}");
         return true;
@@ -220,7 +233,7 @@ public sealed class BagListingController : IDisposable
     {
         if (State == BagListingState.ConsolidatingBags)
         {
-            if (DateTimeOffset.UtcNow >= bagSortReadyAt)
+            if (this.timeProvider.GetUtcNow() >= bagSortReadyAt)
                 BeginPriceScan();
             return;
         }
@@ -239,8 +252,22 @@ public sealed class BagListingController : IDisposable
 
     private void PollPriceScan()
     {
-        if (scanTask is null || !scanTask.IsCompleted)
+        if (!configuration.Current.AllowAutomaticListing)
+        {
+            Halt("Automatic listing was disarmed while prices were loading.");
             return;
+        }
+        if (scanTask is null || !scanTask.IsCompleted)
+        {
+            if (timeProvider.GetUtcNow() >= deadline)
+            {
+                scanCancellation?.Cancel();
+                scanTask = null;
+                Fail("Bag-listing price scan timed out; stock remains in inventory.");
+                ScheduleNextAttempt();
+            }
+            return;
+        }
         if (scanTask.IsCanceled || scanTask.IsFaulted)
         {
             Fail(scanTask.Exception?.GetBaseException().Message ?? "The Universalis price scan was cancelled.");
@@ -286,7 +313,7 @@ public sealed class BagListingController : IDisposable
                 PricingStrategyService.MaximumListingPrice, true, rule.CostBasis);
             var decision = pricing.Evaluate(new PricingContext(
                 placeholder,
-                new MarketSnapshot(stock.ItemId, DateTimeOffset.UtcNow, listings, historicalMedian, true),
+                new MarketSnapshot(stock.ItemId, this.timeProvider.GetUtcNow(), listings, historicalMedian, true),
                 rule,
                 retainerListings.OwnedRetainerIds));
             uint? target = decision.ShouldUpdate && decision.TargetPrice is { } marketTarget &&
@@ -322,7 +349,6 @@ public sealed class BagListingController : IDisposable
             return;
         }
 
-        configuration.Current.AllowAutomaticListing = true;
         configuration.Current.ProcessAllRetainers = true;
         configuration.Save();
         Status = new(BagListingState.QueuePrepared,
@@ -333,9 +359,7 @@ public sealed class BagListingController : IDisposable
 
     private void TryAutomaticStart()
     {
-        if (automaticStartSuspended || !configuration.Current.AutomaticCuratedBagListingEnabled || DateTimeOffset.UtcNow < nextAutomaticAttempt ||
-            automation.IsActive || procurement.IsActive || !retainerListings.IsRetainerListOpen ||
-            automation.LastKnownFreeSaleSlots is not > 0)
+        if (!IsAutomaticRunDue || procurement.IsActive)
             return;
         PrepareAutomaticRun();
     }
@@ -404,7 +428,7 @@ public sealed class BagListingController : IDisposable
             RefreshCandidatesOnly();
             return;
         }
-        if (DateTimeOffset.UtcNow < deadline)
+        if (this.timeProvider.GetUtcNow() < deadline)
             return;
 
         var failed = pending;
@@ -418,7 +442,7 @@ public sealed class BagListingController : IDisposable
         .Where(x => x.IsHighQuality && CuratedItems.Contains(x.ItemName))
         .ToArray();
 
-    private void ScheduleNextAttempt() => nextAutomaticAttempt = DateTimeOffset.UtcNow.AddMinutes(5);
+    private void ScheduleNextAttempt() => nextAutomaticAttempt = this.timeProvider.GetUtcNow().AddMinutes(5);
 
     private void Fail(string message, string? logMessage = null)
     {

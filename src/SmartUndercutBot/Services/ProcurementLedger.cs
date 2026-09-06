@@ -22,6 +22,16 @@ public sealed class ProcurementLedger
     private readonly object sync = new();
     private readonly Dictionary<(uint ItemId, bool IsHighQuality), ProcurementLedgerEntry> entries = [];
 
+    public int PendingSaleSlots
+    {
+        get
+        {
+            lock (sync)
+                return (int)Math.Min(int.MaxValue, entries.Values.Sum(x =>
+                    ((long)x.PendingQuantity + Math.Max(1, x.TargetStackSize) - 1) / Math.Max(1, x.TargetStackSize)));
+        }
+    }
+
     public IReadOnlyList<ProcurementLedgerEntry> Snapshot()
     {
         lock (sync)
@@ -37,7 +47,7 @@ public sealed class ProcurementLedger
             {
                 entries[key] = existing with
                 {
-                    PurchasedQuantity = existing.PurchasedQuantity + order.Quantity,
+                    PurchasedQuantity = (uint)Math.Min(uint.MaxValue, (ulong)existing.PurchasedQuantity + order.Quantity),
                     TargetSalePrice = order.TargetSalePrice,
                     TargetStackSize = targetStackSize,
                 };
@@ -63,6 +73,8 @@ public sealed class ProcurementLedger
         lock (sync)
         {
             var key = (itemId, isHighQuality);
+            if (entries.TryGetValue(key, out var existing) && !existing.IsBagStock && existing.PendingQuantity > 0)
+                return;
             entries[key] = new(
                 itemId,
                 itemName,
@@ -104,7 +116,7 @@ public sealed class ProcurementLedger
                 return;
             entries[key] = entry with
             {
-                ListedQuantity = Math.Min(entry.PurchasedQuantity, entry.ListedQuantity + quantity),
+                ListedQuantity = (uint)Math.Min(entry.PurchasedQuantity, (ulong)entry.ListedQuantity + quantity),
             };
         }
     }

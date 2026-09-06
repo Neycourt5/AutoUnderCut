@@ -88,7 +88,7 @@ public sealed class Plugin : IDalamudPlugin
             procurement,
             automationLog);
         automation.IsStartBlocked = () => procurement.IsActive || bagListing.IsBusy;
-        procurement.IsStartBlocked = () => automation.IsActive || bagListing.IsBusy;
+        procurement.IsStartBlocked = () => automation.IsActive || bagListing.IsBusy || bagListing.IsAutomaticRunDue;
         dashboard = new DashboardWindow(
             configuration, automation, procurement, bagListing, universalis, procurementLedger, marketData,
             automationLog);
