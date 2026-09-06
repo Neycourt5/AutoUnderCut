@@ -1,4 +1,5 @@
 using SmartUndercutBot.Core.Services;
+using System.Net;
 using System.Text.Json;
 using Dalamud.Plugin.Services;
 using Lumina.Excel.Sheets;
@@ -10,8 +11,7 @@ public interface IUniversalisService
 {
     string ResolveDataCenter(string configuredDataCenter);
     IReadOnlyList<ProcurementRule> CreateFavoriteRules();
-    IReadOnlyList<ProcurementRule> CreateDyeRules();
-    IReadOnlyList<ProcurementRule> CreateMateriaRules();
+    IReadOnlyList<ProcurementRule> CreateLiquidationRules();
     Task<IReadOnlyList<ProcurementMarketItem>> ScanAsync(
         IReadOnlyList<ProcurementRule> rules,
         string dataCenter,
@@ -29,8 +29,11 @@ public sealed class UniversalisService : IUniversalisService, IDisposable
         "Caramel Popcorn",
     ];
 
-    private readonly HttpClient httpClient = new() { Timeout = TimeSpan.FromSeconds(30) };
-    private readonly SemaphoreSlim requestSlots = new(3);
+    private const int MaximumAttempts = 3;
+
+    private readonly HttpClient httpClient = new() { Timeout = TimeSpan.FromSeconds(20) };
+    // Universalis rate-limits aggressively; keep the plugin well under it.
+    private readonly SemaphoreSlim requestSlots = new(2);
     private readonly IPlayerState playerState;
     private readonly IDataManager dataManager;
 
@@ -68,24 +71,33 @@ public sealed class UniversalisService : IUniversalisService, IDisposable
             .ToArray();
     }
 
-    // Dyes and materia are stock the player wants cleared, not traded: list every
-    // one held in the bags, keep nothing back, and never plan a purchase for them.
-    public IReadOnlyList<ProcurementRule> CreateDyeRules() => LiquidationRules(x =>
-        x.Name.ToString().EndsWith(" Dye", StringComparison.OrdinalIgnoreCase));
-
-    public IReadOnlyList<ProcurementRule> CreateMateriaRules() => LiquidationRules(x =>
-        string.Equals(x.ItemUICategory.ValueNullable?.Name.ToString(), "Materia", StringComparison.OrdinalIgnoreCase));
-
-    private IReadOnlyList<ProcurementRule> LiquidationRules(Func<Item, bool> match) => dataManager
+    // Dyes, materia and ethers are stock the player wants cleared, not traded: list
+    // everything held in the bags, keep nothing back, and never plan a purchase.
+    public IReadOnlyList<ProcurementRule> CreateLiquidationRules() => dataManager
         .GetExcelSheet<Item>()
-        .Where(x => !x.IsUntradable && x.ItemSearchCategory.RowId != 0 &&
-                    !string.IsNullOrWhiteSpace(x.Name.ToString()) && match(x))
+        .Where(x => !x.IsUntradable && x.ItemSearchCategory.RowId != 0)
+        .Select(x => (Row: x, Name: x.Name.ToString()))
+        .Where(x => !string.IsNullOrWhiteSpace(x.Name) &&
+                    // Never sweep up the consumables the player actually trades.
+                    !ResaleStockPolicy.IsCuratedConsumable(x.Name) &&
+                    (IsDye(x.Name) || IsEther(x.Name) || IsMateria(x.Row)))
         .Select(x => new ProcurementRule
         {
-            ItemId = x.RowId, ItemName = x.Name.ToString(), TargetStackSize = 5,
-            MaximumSaleSlots = 2, MinimumWeeklyUnitsSold = 0,
+            ItemId = x.Row.RowId, ItemName = x.Name, TargetStackSize = 5,
+            MaximumSaleSlots = 5, MinimumWeeklyUnitsSold = 0,
             ListFromBags = true, BagReserveQuantity = 0, LiquidateOnly = true,
         }).OrderBy(x => x.ItemName).ToArray();
+
+    private static bool IsDye(string name) => name.EndsWith(" Dye", StringComparison.OrdinalIgnoreCase);
+
+    // "Ether", "Hi-Ether", "Mega-Ether", "X-Ether". Matching the whole word keeps
+    // "Aethersand" and anything merely containing the letters out.
+    private static bool IsEther(string name) => name
+        .Split([' ', '-'], StringSplitOptions.RemoveEmptyEntries)
+        .Any(part => string.Equals(part, "Ether", StringComparison.OrdinalIgnoreCase));
+
+    private static bool IsMateria(Item item) => string.Equals(
+        item.ItemUICategory.ValueNullable?.Name.ToString(), "Materia", StringComparison.OrdinalIgnoreCase);
 
     public async Task<IReadOnlyList<ProcurementMarketItem>> ScanAsync(
         IReadOnlyList<ProcurementRule> rules,
@@ -99,9 +111,15 @@ public sealed class UniversalisService : IUniversalisService, IDisposable
         var scopes = dataCenter.Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
-        var scans = await Task.WhenAll(scopes.SelectMany(scope => enabled.Chunk(20).Select(batch =>
-            ScanScopeAsync(batch, scope, cancellationToken)))).ConfigureAwait(false);
-        return scans.SelectMany(x => x)
+        var batches = scopes.SelectMany(scope => enabled.Chunk(20).Select(batch => (batch, scope))).ToArray();
+        var scans = await Task.WhenAll(batches.Select(x =>
+            ScanScopeAsync(x.batch, x.scope, cancellationToken))).ConfigureAwait(false);
+        // A batch that never answered returns null. Partial data only ever means
+        // fewer buy candidates, so keep what arrived; fail only when nothing did.
+        if (scans.All(x => x is null))
+            throw new HttpRequestException(
+                $"Universalis did not answer any of the {batches.Length} price request(s) for this scan.");
+        return scans.Where(x => x is not null).SelectMany(x => x!)
             .GroupBy(x => x.ItemId)
             .Select(group => new ProcurementMarketItem(
                 group.Key,
@@ -115,7 +133,10 @@ public sealed class UniversalisService : IUniversalisService, IDisposable
             .ToArray();
     }
 
-    private async Task<IReadOnlyList<ProcurementMarketItem>> ScanScopeAsync(
+    // Universalis returns 504 and 429 under load. Retry those a few times with a
+    // growing delay, then give up on this batch alone. Null means "no answer", which
+    // the caller treats differently from an empty market.
+    private async Task<IReadOnlyList<ProcurementMarketItem>?> ScanScopeAsync(
         IReadOnlyList<ProcurementRule> enabled,
         string scope,
         CancellationToken cancellationToken)
@@ -123,18 +144,40 @@ public sealed class UniversalisService : IUniversalisService, IDisposable
         var itemIds = string.Join(',', enabled.Select(x => x.ItemId));
         var endpoint = $"https://universalis.app/api/v2/{Uri.EscapeDataString(scope)}/{itemIds}" +
                        "?listings=100&entries=100&statsWithin=604800";
-        await requestSlots.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
+        for (var attempt = 1; attempt <= MaximumAttempts; attempt++)
         {
-            using var response = await httpClient.GetAsync(endpoint, cancellationToken).ConfigureAwait(false);
-            response.EnsureSuccessStatusCode();
-            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-            using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken).ConfigureAwait(false);
-            return UniversalisResponseParser.Parse(document.RootElement,
-                enabled.ToDictionary(x => x.ItemId, x => x.ItemName));
+            if (attempt > 1)
+                await Task.Delay(TimeSpan.FromSeconds(2 * (attempt - 1)), cancellationToken).ConfigureAwait(false);
+            await requestSlots.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                using var response = await httpClient.GetAsync(endpoint, cancellationToken).ConfigureAwait(false);
+                if (!response.IsSuccessStatusCode)
+                {
+                    if (attempt == MaximumAttempts || !IsWorthRetrying(response.StatusCode))
+                        return null;
+                    continue;
+                }
+                await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+                using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken).ConfigureAwait(false);
+                return UniversalisResponseParser.Parse(document.RootElement,
+                    enabled.ToDictionary(x => x.ItemId, x => x.ItemName));
+            }
+            catch (Exception ex) when (ex is HttpRequestException or JsonException ||
+                                       ex is TaskCanceledException && !cancellationToken.IsCancellationRequested)
+            {
+                if (attempt == MaximumAttempts)
+                    return null;
+            }
+            finally { requestSlots.Release(); }
         }
-        finally { requestSlots.Release(); }
+        return null;
     }
+
+    private static bool IsWorthRetrying(HttpStatusCode status) => status is
+        HttpStatusCode.RequestTimeout or HttpStatusCode.TooManyRequests or
+        HttpStatusCode.InternalServerError or HttpStatusCode.BadGateway or
+        HttpStatusCode.ServiceUnavailable or HttpStatusCode.GatewayTimeout;
 
     public void Dispose() => httpClient.Dispose();
 }

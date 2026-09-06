@@ -258,9 +258,16 @@ public sealed class ProcurementController : IDisposable
             HaltForRetry("Could not determine a Universalis data center. Set it in the Procurement tab.");
             return;
         }
-        if (configuration.Current.ProcurementRules.Count == 0)
+        // Sell-only stock is never bought, so asking Universalis about it only makes
+        // the request enormous. Hundreds of seeded dye and materia rules are what
+        // turned this scan into a 504.
+        var buyRules = configuration.Current.ProcurementRules
+            .Where(x => x.Enabled && x.ItemId != 0 && !x.LiquidateOnly)
+            .DistinctBy(x => x.ItemId)
+            .ToArray();
+        if (buyRules.Length == 0)
         {
-            HaltForRetry("No procurement items are configured. Add the favorite defaults in the Procurement tab.");
+            HaltForRetry("No buyable procurement items are configured. Add the favorite defaults in the Procurement tab.");
             return;
         }
         if (!TryGetHomeWorld(out planningHomeWorld))
@@ -273,15 +280,15 @@ public sealed class ProcurementController : IDisposable
         cancellation?.Dispose();
         cancellation = new CancellationTokenSource();
         runAfterScan = mode;
-        scanTask = ScanWithHomeResaleAsync(configuration.Current.ProcurementRules.ToArray(),
-            dataCenter, planningHomeWorld, cancellation.Token);
-        deadline = timeProvider.GetUtcNow().AddSeconds(90);
+        scanTask = ScanWithHomeResaleAsync(buyRules, dataCenter, planningHomeWorld, cancellation.Token);
+        // Room for three attempts per batch with backoff before giving up.
+        deadline = timeProvider.GetUtcNow().AddSeconds(150);
         Plan = ProcurementPlan.Empty;
         confirmedPurchases = 0;
         skippedPurchases = 0;
         gilSpent = 0;
         State = ProcurementState.ScanningUniversalis;
-        detail = $"Scanning {dataCenter} on Universalis.";
+        detail = $"Scanning {buyRules.Length} item(s) on {dataCenter} via Universalis.";
         log.Add(AutomationLogLevel.Information, detail);
     }
 
@@ -476,7 +483,7 @@ public sealed class ProcurementController : IDisposable
     {
         if (scanTask is null || !scanTask.IsCompleted)
         {
-            CheckTimeout("Universalis did not finish within 90 seconds; the scan was cancelled.");
+            CheckTimeout("Universalis did not answer within 150 seconds; the scan was cancelled and will retry.");
             return;
         }
         if (scanTask.IsCanceled || scanTask.IsFaulted)
@@ -556,14 +563,14 @@ public sealed class ProcurementController : IDisposable
             return;
         }
         stockHuntRules = configuration.Current.ProcurementRules
-            .Where(x => x.Enabled && x.ItemId != 0 && x.RequireHighQuality && !x.LiquidateOnly)
-            .Where(x => market.GetInventoryCount(x.ItemId, true) < configuration.Current.LiveWorldStockThresholdPerItem)
+            .Where(x => x.Enabled && x.ItemId != 0 && !x.LiquidateOnly)
+            .Where(IsBelowStockThreshold)
             .DistinctBy(x => x.ItemId)
             .ToList();
         if (stockHuntRules.Count == 0)
         {
             State = ProcurementState.Completed;
-            detail = $"No curated HQ item is below the live-tour threshold of {configuration.Current.LiveWorldStockThresholdPerItem:N0}.";
+            detail = $"No configured item is below the live-tour threshold of {configuration.Current.LiveWorldStockThresholdPerItem:N0}.";
             log.Add(AutomationLogLevel.Information, detail);
             return;
         }
@@ -597,7 +604,7 @@ public sealed class ProcurementController : IDisposable
         currentStockHuntRule = null;
         stockHuntScanning = true;
         nextLiveStockHunt = timeProvider.GetUtcNow().AddMinutes(configuration.Current.LiveWorldStockHuntCooldownMinutes);
-        detail = $"Starting live HQ stock hunt for {stockHuntRules.Count} low-stock item(s) across {stockHuntWorlds.Count} NA/Oceania worlds.";
+        detail = $"Starting live stock hunt for {stockHuntRules.Count} low-stock item(s) across {stockHuntWorlds.Count} NA/Oceania worlds.";
         log.Add(AutomationLogLevel.Information, detail);
         TravelToCurrentWorld();
     }
@@ -809,7 +816,7 @@ public sealed class ProcurementController : IDisposable
         }
 
         var live = market.ReadLiveListings(currentStockHuntRule.ItemId)
-            .Where(x => x.IsHighQuality)
+            .Where(x => ResaleStockPolicy.QualityAllowed(currentStockHuntRule, x.IsHighQuality))
             .ToArray();
         successfulLiveScans++;
         worldSuccessfulScans++;
@@ -826,7 +833,7 @@ public sealed class ProcurementController : IDisposable
                 listing.IsHighQuality));
         }
         log.Add(AutomationLogLevel.Information,
-            $"LIVE TOUR {WorldName}: {currentStockHuntRule.ItemName} returned {live.Length} eligible HQ listing(s).");
+            $"LIVE TOUR {WorldName}: {currentStockHuntRule.ItemName} returned {live.Length} eligible listing(s).");
         AdvanceStockHuntRule();
     }
 
@@ -912,7 +919,7 @@ public sealed class ProcurementController : IDisposable
             routeOutcome = successfulLiveScans == 0
                 ? "No purchases: every live item search failed; no usable market data was received."
                 : homeItems == 0
-                    ? $"No purchases: no usable HQ resale prices were received from {homeWorld}. The purchase plan could not be built."
+                    ? $"No purchases: no usable resale prices were received from {homeWorld}. The purchase plan could not be built."
                     : $"No purchases: no listing passed the resale, profit, budget, and capacity guards. {successfulLiveScans} item search(es) completed; {failedLiveScans} timed out.";
             log.Add(AutomationLogLevel.Warning, routeOutcome);
             ReturnHome();
@@ -1365,8 +1372,19 @@ public sealed class ProcurementController : IDisposable
     }
 
     private bool HasLowCuratedStock() => configuration.Current.ProcurementRules
-        .Where(x => x.Enabled && x.ItemId != 0 && x.RequireHighQuality)
-        .Any(x => market.GetInventoryCount(x.ItemId, true) < configuration.Current.LiveWorldStockThresholdPerItem);
+        .Where(x => x.Enabled && x.ItemId != 0 && !x.LiquidateOnly)
+        .Any(IsBelowStockThreshold);
+
+    // Count only the qualities a rule actually trades, so a normal-quality food or
+    // potion is not judged by an HQ stock level it will never have.
+    private bool IsBelowStockThreshold(ProcurementRule rule)
+    {
+        var held = 0;
+        foreach (var quality in new[] { false, true })
+            if (ResaleStockPolicy.QualityAllowed(rule, quality))
+                held += market.GetInventoryCount(rule.ItemId, quality);
+        return held < configuration.Current.LiveWorldStockThresholdPerItem;
+    }
 
     private bool IsOnWorld(string world)
     {

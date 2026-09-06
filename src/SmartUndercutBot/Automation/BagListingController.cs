@@ -201,7 +201,7 @@ public sealed class BagListingController : IDisposable
         scanCancellation?.Dispose();
         scanCancellation = new CancellationTokenSource();
         scanTask = universalis.ScanAsync(rules, world, scanCancellation.Token);
-        deadline = timeProvider.GetUtcNow().AddSeconds(90);
+        deadline = timeProvider.GetUtcNow().AddSeconds(150);
         Status = new(BagListingState.ScanningPrices,
             $"Reading current {world} prices for {rules.Count} curated HQ item(s).");
         log.Add(AutomationLogLevel.Information, Status.Detail);

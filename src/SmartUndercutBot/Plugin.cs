@@ -62,7 +62,7 @@ public sealed class Plugin : IDalamudPlugin
         }
         if (!configuration.Current.DyeRulesSeeded || !configuration.Current.MateriaRulesSeeded)
         {
-            var liquidate = universalis.CreateDyeRules().Concat(universalis.CreateMateriaRules());
+            var liquidate = universalis.CreateLiquidationRules();
             foreach (var rule in liquidate)
             {
                 var existing = configuration.Current.ProcurementRules.FirstOrDefault(x => x.ItemId == rule.ItemId);
@@ -70,8 +70,12 @@ public sealed class Plugin : IDalamudPlugin
                     configuration.Current.ProcurementRules.Add(rule);
                 else if (existing.LiquidateOnly)
                 {
+                    // Refresh a rule this plugin seeded, never one the user made
+                    // buyable on purpose.
                     existing.ListFromBags = true;
                     existing.BagReserveQuantity = 0;
+                    existing.MaximumSaleSlots = rule.MaximumSaleSlots;
+                    existing.TargetStackSize = rule.TargetStackSize;
                 }
             }
             configuration.Current.DyeRulesSeeded = true;

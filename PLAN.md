@@ -35,6 +35,21 @@ were dead code and `OwnedStock` was never passed. Now:
   repeating retainer pass collects sale proceeds. Start already sets RepeatBellRuns
   and AutomaticallyCollectRetainerGil, so the zero-gil cycle closes on its own.
 
+### v1.0.0.31 - Universalis 504 and the sell-off list
+Reported in game: the scan sat on "504 (Gateway Timeout)" and nothing was queued to
+list. Root cause was this session's own dye/materia seeding - every sell-only rule
+was still being sent to the buy scan, turning a five-item request into hundreds of
+ids across two scopes. Bag listing prices through the same service, so it failed too
+and left "0 stacks queued to list".
+- Sell-only rules are excluded from the deal scan.
+- Universalis retries 504/502/429/timeouts three times with backoff, keeps partial
+  results, and fails only if no batch answered. Concurrency 3 -> 2, timeout 30s ->
+  20s per try, scan deadline 90s -> 150s.
+- Ethers joined dyes and materia; per-item sell cap 2 -> 5 slots. Curated
+  consumables can never be swept into the sell-off list. Config version 20 re-seeds.
+- The all-world tour now covers every buyable rule and both qualities, not just
+  HQ-required ones, so normal-quality food and potions are included.
+
 ### Deferred (user: low priority, do not break anything)
 - Quieter travel destinations. Only the safe half is in: the summoning-bell leg now
   has its own optional Lifestream command, defaulting to empty, which reuses the

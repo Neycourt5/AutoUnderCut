@@ -6,7 +6,7 @@ namespace SmartUndercutBot;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 19;
+    public int Version { get; set; } = 20;
     public bool AutomationEnabled { get; set; }
     public bool ProcessAllRetainers { get; set; } = true;
     public bool RepeatBellRuns { get; set; }
@@ -266,6 +266,14 @@ public sealed class Configuration : IPluginConfiguration
                 rule.BagReserveQuantity = 0;
             }
             Version = 19;
+        }
+        if (Version < 20)
+        {
+            // Ethers joined the sell-off list and the per-item slot cap was raised,
+            // so re-seed. Existing sell-only rules are refreshed, not duplicated.
+            DyeRulesSeeded = false;
+            MateriaRulesSeeded = false;
+            Version = 20;
         }
         ProcurementTravelReserve = Math.Min(ProcurementTravelReserve, 100_000_000u);
         ProcurementWeeklySalesSharePercent = Math.Clamp(ProcurementWeeklySalesSharePercent, 1m, 100m);

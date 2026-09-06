@@ -21,7 +21,7 @@ public sealed class ProcurementControllerTests
             run.Tick(2);
         Assert.Equal(ProcurementState.Completed, run.Controller.State);
         Assert.Equal(0, run.Game.Purchases);
-        Assert.Contains("No purchases: no usable HQ resale prices", run.Controller.Status.Detail);
+        Assert.Contains("No purchases: no usable resale prices", run.Controller.Status.Detail);
         Assert.Contains("Siren", run.Controller.Status.Detail);
     }
     [Theory]
@@ -503,6 +503,23 @@ public sealed class ProcurementControllerTests
         });
     }
 
+    [Fact]
+    public void SellOnlyStockIsNeverAskedAboutInTheDealScan()
+    {
+        using var run = new Route();
+        // Seeding every dye and materia as sell-only stock is what turned this scan
+        // into hundreds of item ids per scope, and Universalis answered 504.
+        run.Config.Current.ProcurementRules.Add(new()
+        {
+            ItemId = 5_000, ItemName = "Dalamud Red Dye", LiquidateOnly = true, ListFromBags = true,
+        });
+        run.Controller.ScanNow();
+        run.Tick();
+        Assert.NotEmpty(run.Game.ScannedItemIds);
+        Assert.Contains(1u, run.Game.ScannedItemIds);
+        Assert.DoesNotContain(5_000u, run.Game.ScannedItemIds);
+    }
+
     private sealed class Clock : TimeProvider
     {
         private DateTimeOffset now = DateTimeOffset.UtcNow;
@@ -601,10 +618,12 @@ public sealed class ProcurementControllerTests
         public void Abort() { Aborts++; IsBusy = false; }
         public string ResolveDataCenter(string configured) => configured;
         public int Scans { get; private set; }
+        public List<uint> ScannedItemIds { get; } = [];
         public Task<IReadOnlyList<ProcurementMarketItem>> ScanAsync(IReadOnlyList<ProcurementRule> rules,
             string dataCenter, CancellationToken cancellationToken)
         {
             Scans++;
+            ScannedItemIds.AddRange(rules.Select(x => x.ItemId));
             if (dataCenter == "Siren" && MissingHomeListings)
                 return Task.FromResult<IReadOnlyList<ProcurementMarketItem>>([]);
             return Task.FromResult<IReadOnlyList<ProcurementMarketItem>>(

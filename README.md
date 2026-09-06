@@ -40,9 +40,16 @@ no deal qualifies, slots stay empty and another search runs later; filling every
 slot is a goal, not a guarantee.
 
 The default buying list contains HQ Grade 4 gemdraughts and HQ Caramel Popcorn.
-Configure additional buying rules in **Shopping**. Dyes and materia are seeded as
-**sell-only**: everything held is listed from the bags with nothing kept back, and
-they are never bought as stock. The **Stock** tab lists every bag item and marks
+Configure additional buying rules in **Shopping**. Dyes, materia and ethers are
+seeded as **sell-only**: everything held is listed from the bags with nothing kept
+back, and they are never bought as stock. Sell-only items are also left out of the
+Universalis deal scan - asking about hundreds of items the plugin would never buy
+is what made that scan time out with a 504.
+
+Universalis requests retry transient failures (504, 502, 429, timeouts) up to three
+times with a growing delay, and a scan keeps whatever batches did answer instead of
+discarding all of them. A scan fails only when nothing answered at all, and then it
+retries on the procurement interval. The **Stock** tab lists every bag item and marks
 each row Sell or Ignored, so it is visible what automatic listing will and will not
 touch - gear and anything without a rule is never listed.
 
