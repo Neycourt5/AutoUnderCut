@@ -31,6 +31,10 @@ were dead code and `OwnedStock` was never passed. Now:
   seeded with it, are listed from bags with no reserve, and are excluded from every
   purchase plan. Config migrates to version 19 and re-seeds both.
 
+- Running dry mid-route abandons the trip and returns to the home bell, where the
+  repeating retainer pass collects sale proceeds. Start already sets RepeatBellRuns
+  and AutomaticallyCollectRetainerGil, so the zero-gil cycle closes on its own.
+
 ### Deferred (user: low priority, do not break anything)
 - Quieter travel destinations. Only the safe half is in: the summoning-bell leg now
   has its own optional Lifestream command, defaulting to empty, which reuses the

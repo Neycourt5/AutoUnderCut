@@ -1033,6 +1033,15 @@ public sealed class ProcurementController : IDisposable
         }
         if (totalCost > SpendableGil() || totalCost > market.Gil)
         {
+            // Out of money mid-route: no later world is affordable either, and the
+            // only way to get more gil is the retainer pass at the home bell. Go
+            // home and collect sale proceeds instead of touring broke.
+            if (SpendableGil() == 0)
+            {
+                FinishShopping(
+                    "Out of spendable gil. Returning home to collect retainer sales before shopping again.");
+                return;
+            }
             SkipCurrentOrder($"SKIPPED BUY {currentOrder.ItemName}: budget or gil balance changed.");
             return;
         }

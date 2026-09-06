@@ -21,8 +21,14 @@ listings set the resale estimate; the player's own retainers are excluded.
 By default **Spend whatever gil is in the wallet** is on, so each trip may spend
 the whole balance apart from the travel reserve (5,000 gil, configurable to 0) and
 sales compound into the next trip. Turn it off to fall back to the per-trip
-maximum, which applies per trip and resets on the next one. At zero spendable gil
-the loop waits and re-checks after the procurement interval rather than stopping.
+maximum, which applies per trip and resets on the next one.
+
+Starting from nothing works: at zero spendable gil no trip begins, and if the
+wallet runs dry partway through a route the trip is abandoned and the character
+returns to the home-world summoning bell rather than touring with no money. Start
+keeps repeating retainer passes there, which collect gil from anything that sold
+and notice freed sale slots, so shopping resumes on the next interval once there
+is gil to spend.
 
 How much of one item may be held is capped by **maximum stock to hold**, a share of
 that item's observed weekly sales (25% by default). The cap counts stacks already

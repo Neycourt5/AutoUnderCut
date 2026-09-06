@@ -487,6 +487,22 @@ public sealed class ProcurementControllerTests
         Assert.Equal(ProcurementState.Halted, run.Controller.State);
     }
 
+    [Fact]
+    public void RunningOutOfGilMidRouteReturnsHomeToCollectRetainerSales()
+    {
+        using var run = new Route();
+        run.ReachListings();
+        // Only the travel reserve is left, so no world on the route is affordable.
+        run.Game.Gil = run.Config.Current.ProcurementTravelReserve;
+        run.Tick();
+        Assert.Equal(0, run.Game.Purchases);
+        Assert.Contains(run.Log.Messages, x => x.Contains("Out of spendable gil"));
+        Assert.Contains(run.Controller.State, new[]
+        {
+            ProcurementState.WaitingBeforeHomeTravel, ProcurementState.WaitingAfterHomeArrival,
+        });
+    }
+
     private sealed class Clock : TimeProvider
     {
         private DateTimeOffset now = DateTimeOffset.UtcNow;
@@ -500,6 +516,7 @@ public sealed class ProcurementControllerTests
         public ConfigurationService Config { get; } = new();
         public ProcurementLedger Ledger { get; } = new();
         public AutomationController Repricing { get; } = new();
+        public AutomationLog Log { get; } = new();
         public ProcurementController Controller { get; }
         private readonly Clock clock = new();
         public Route()
@@ -507,7 +524,7 @@ public sealed class ProcurementControllerTests
             Config.Current.AllowAutomaticPurchases = true;
             Config.Current.ProcurementRules.Add(new() { ItemId = 1, AllowHighQuality = true, RequireHighQuality = true });
             Controller = new(Game, Game, Game, Game, Game, new ProcurementPlannerService(),
-                Game, Game, Game, Game, Ledger, Repricing, Config, new AutomationLog(), clock);
+                Game, Game, Game, Game, Ledger, Repricing, Config, Log, clock);
         }
         public void Tick(int seconds = 0) { clock.Advance(seconds); Game.Tick(); }
         public void Begin()
@@ -562,7 +579,7 @@ public sealed class ProcurementControllerTests
         public bool IsRetainerListOpen => BellOpen;
         public IReadOnlySet<ulong> OwnedRetainerIds { get; } = new HashSet<ulong>();
         public uint FreeInventorySlots { get; set; } = 50;
-        public uint Gil => 1_000_000;
+        public uint Gil { get; set; } = 1_000_000;
         public int Inventory { get; set; }
         public int Purchases { get; private set; }
         public uint BuyerTax { get; set; } = 4_950;
