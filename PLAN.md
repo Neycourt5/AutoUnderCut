@@ -75,11 +75,15 @@ operations have not been exercised in FFXIV.
 ## GitHub publication (user requested)
 - Standing instruction recorded in AGENTS.md: publish completed plugin updates
   so the user can update in game.
-- Preparing v1.0.0.29 from main. Existing remote main matches the starting commit
-  b18c8e6 and v1.0.0.28 is the previous release tag.
+- Published v1.0.0.29 from commit 2c5082e on main; v1.0.0.28 was the previous release.
 - Added release workflow checks to reject failed tests/builds and mismatched tags.
-- [ ] Validate versioned build and manifest, commit, and push main + release tag.
-- [ ] Confirm GitHub Actions success and the public installer manifest / ZIP.
+- [x] Validate versioned build and manifest, commit, and push main + release tag.
+- [x] Confirm GitHub Actions success and the public installer manifest / ZIP.
+- GitHub Build run 34054881383 and release run 34054881342 both succeeded.
+- Downloaded the public latest installer manifest and its update ZIP. Confirmed
+  installer version, ZIP manifest version, and DLL assembly version all equal
+  1.0.0.29, with Dalamud API 15 and both required DLLs at the ZIP root.
+- Release: https://github.com/Neycourt5/AutoUnderCut/releases/tag/v1.0.0.29
 
 For an in-game smoke test: open the bell with Lifestream and vnavmesh ready, review
 the per-trip budget and item rules, start the stock loop, observe a bag refill and
