@@ -58,6 +58,30 @@ public sealed class ReinvestmentAndStockPolicyTests
     }
 
     [Fact]
+    public void HighQualityOnlyRefusesStockThatWouldBeBoughtAtNormalQuality()
+    {
+        // Normal quality does not sell for this player, so a normal-quality-only
+        // item is skipped entirely rather than stocked in a quality that will sit.
+        Assert.Empty(new ProcurementPlannerService().BuildPlan(new(
+            [Market(10, 200)], [Rule()], 500_000, 5, 5, 20, 100, HighQualityOnly: true)).Orders);
+        Assert.Single(new ProcurementPlannerService().BuildPlan(new(
+            [Market(10, 200)], [Rule()], 500_000, 5, 5, 20, 100)).Orders);
+    }
+
+    [Fact]
+    public void HighQualityOnlyStillBuysTheHighQualityForm()
+    {
+        var market = new ProcurementMarketItem(1, "Item",
+            [new(1, 1, 1, "Cactuar", 1, 100, 10, true)],
+            [new(1_000, 200, true, DateTimeOffset.UtcNow.AddDays(-1))]);
+        var rule = Rule();
+        rule.AllowHighQuality = true;
+        var order = Assert.Single(new ProcurementPlannerService().BuildPlan(new(
+            [market], [rule], 500_000, 5, 5, 20, 100, HighQualityOnly: true)).Orders);
+        Assert.True(order.IsHighQuality);
+    }
+
+    [Fact]
     public void StockAlreadyOwnedStopsTheSameItemBeingBoughtAgain()
     {
         // 200 units sell weekly and a quarter of that may be held, so 50 units.

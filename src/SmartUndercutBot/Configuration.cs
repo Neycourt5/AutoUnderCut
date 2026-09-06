@@ -6,7 +6,7 @@ namespace SmartUndercutBot;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 20;
+    public int Version { get; set; } = 21;
     public bool AutomationEnabled { get; set; }
     public bool ProcessAllRetainers { get; set; } = true;
     public bool RepeatBellRuns { get; set; }
@@ -30,6 +30,7 @@ public sealed class Configuration : IPluginConfiguration
     public int ProcurementIntervalMinutes { get; set; } = 10;
     public uint ProcurementBudget { get; set; } = 5_000_000;
     public bool ReinvestAvailableGil { get; set; } = true;
+    public bool BuyHighQualityOnly { get; set; } = true;
     public uint ProcurementTravelReserve { get; set; } = 5_000;
     public decimal ProcurementWeeklySalesSharePercent { get; set; } = 25m;
     public bool DyeRulesSeeded { get; set; }
@@ -274,6 +275,12 @@ public sealed class Configuration : IPluginConfiguration
             DyeRulesSeeded = false;
             MateriaRulesSeeded = false;
             Version = 20;
+        }
+        if (Version < 21)
+        {
+            // Normal-quality resale stock does not sell for this player.
+            BuyHighQualityOnly = true;
+            Version = 21;
         }
         ProcurementTravelReserve = Math.Min(ProcurementTravelReserve, 100_000_000u);
         ProcurementWeeklySalesSharePercent = Math.Clamp(ProcurementWeeklySalesSharePercent, 1m, 100m);

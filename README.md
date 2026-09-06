@@ -40,6 +40,11 @@ no deal qualifies, slots stay empty and another search runs later; filling every
 slot is a goal, not a guarantee.
 
 The default buying list contains HQ Grade 4 gemdraughts and HQ Caramel Popcorn.
+**Only buy high-quality stock** is on by default: normal quality is never
+purchased, and an item with no HQ form is skipped rather than stocked in a quality
+that will not sell. This applies to buying only - sell-only stock such as dyes,
+materia and ethers is normal quality and is still listed from the bags.
+
 Configure additional buying rules in **Shopping**. Dyes, materia and ethers are
 seeded as **sell-only**: everything held is listed from the bags with nothing kept
 back, and they are never bought as stock. Sell-only items are also left out of the

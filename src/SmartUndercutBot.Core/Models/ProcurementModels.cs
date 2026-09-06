@@ -52,7 +52,8 @@ public sealed record ProcurementPlanRequest(
     string HomeWorld = "",
     IReadOnlySet<ulong>? OwnedRetainerIds = null,
     IReadOnlyList<StockExposure>? OwnedStock = null,
-    decimal MaximumWeeklySalesSharePercent = 100m);
+    decimal MaximumWeeklySalesSharePercent = 100m,
+    bool HighQualityOnly = false);
 
 public sealed record LiveMarketPlanRequest(
     IReadOnlyList<ProcurementMarketItem> Markets,
@@ -66,7 +67,8 @@ public sealed record LiveMarketPlanRequest(
     uint MinimumProfitPerUnit,
     decimal MarketTaxPercent = 5m,
     decimal BuyerFeePercent = 5m,
-    IReadOnlyList<StockExposure>? OwnedStock = null);
+    IReadOnlyList<StockExposure>? OwnedStock = null,
+    bool HighQualityOnly = false);
 
 public sealed record ProcurementOrder(
     uint ItemId,

@@ -31,7 +31,7 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
             if (!rules.TryGetValue(market.ItemId, out var rule))
                 continue;
 
-            foreach (var quality in EligibleQualities(rule))
+            foreach (var quality in EligibleQualities(rule, request.HighQualityOnly))
             {
                 var sales = market.RecentSales
                     .Where(x => x.IsHighQuality == quality)
@@ -143,7 +143,7 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
             if (!rules.TryGetValue(market.ItemId, out var rule))
                 continue;
 
-            foreach (var quality in EligibleQualities(rule))
+            foreach (var quality in EligibleQualities(rule, request.HighQualityOnly))
             {
                 bool QualityMatches(ProcurementMarketListing listing) => listing.IsHighQuality == quality;
 
@@ -257,9 +257,12 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
             .ThenBy(x => x.TotalCost).First();
     }
 
-    private static IEnumerable<bool> EligibleQualities(ProcurementRule rule)
+    // With highQualityOnly set, normal quality is never bought and an item that has
+    // no high-quality form yields nothing at all, so it is skipped rather than
+    // stocked in a quality that will not sell.
+    private static IEnumerable<bool> EligibleQualities(ProcurementRule rule, bool highQualityOnly)
     {
-        if (!rule.RequireHighQuality)
+        if (!rule.RequireHighQuality && !highQualityOnly)
             yield return false;
         if (rule.AllowHighQuality || rule.RequireHighQuality)
             yield return true;

@@ -732,6 +732,15 @@ public sealed class DashboardWindow : Window
                 config.GuidedTourMaximumWorlds = guidedWorlds;
                 configurationDirty = true;
             }
+            var highQualityOnly = config.BuyHighQualityOnly;
+            if (ImGui.Checkbox("Only buy high-quality stock", ref highQualityOnly))
+            {
+                config.BuyHighQualityOnly = highQualityOnly;
+                configurationDirty = true;
+            }
+            ImGui.TextDisabled(highQualityOnly
+                ? "On: normal-quality stock is never bought, and an item with no HQ form is skipped instead of stocked in a quality that will not sell."
+                : "Off: normal quality is bought whenever an item rule allows it.");
             var reinvest = config.ReinvestAvailableGil;
             if (ImGui.Checkbox("Spend whatever gil is in the wallet (reinvest sales)", ref reinvest))
             {

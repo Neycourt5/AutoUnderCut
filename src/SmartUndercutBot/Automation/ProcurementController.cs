@@ -510,7 +510,8 @@ public sealed class ProcurementController : IDisposable
             HomeWorld: planningHomeWorld,
             OwnedRetainerIds: retainerListings.OwnedRetainerIds,
             OwnedStock: CollectOwnedStock(),
-            MaximumWeeklySalesSharePercent: config.ProcurementWeeklySalesSharePercent));
+            MaximumWeeklySalesSharePercent: config.ProcurementWeeklySalesSharePercent,
+            HighQualityOnly: config.BuyHighQualityOnly));
         lastScannedFreeSaleSlots = plannedSaleSlots;
         scanTask = null;
         nextAutomaticScan = timeProvider.GetUtcNow().AddMinutes(config.ProcurementIntervalMinutes);
@@ -563,7 +564,7 @@ public sealed class ProcurementController : IDisposable
             return;
         }
         stockHuntRules = configuration.Current.ProcurementRules
-            .Where(x => x.Enabled && x.ItemId != 0 && !x.LiquidateOnly)
+            .Where(x => x.Enabled && x.ItemId != 0 && !x.LiquidateOnly && IsBuyableQuality(x))
             .Where(IsBelowStockThreshold)
             .DistinctBy(x => x.ItemId)
             .ToList();
@@ -816,7 +817,8 @@ public sealed class ProcurementController : IDisposable
         }
 
         var live = market.ReadLiveListings(currentStockHuntRule.ItemId)
-            .Where(x => ResaleStockPolicy.QualityAllowed(currentStockHuntRule, x.IsHighQuality))
+            .Where(x => ResaleStockPolicy.QualityAllowed(currentStockHuntRule, x.IsHighQuality) &&
+                        (!configuration.Current.BuyHighQualityOnly || x.IsHighQuality))
             .ToArray();
         successfulLiveScans++;
         worldSuccessfulScans++;
@@ -904,7 +906,8 @@ public sealed class ProcurementController : IDisposable
             Math.Max(0, (int)market.FreeInventorySlots - config.ProcurementInventoryReserve),
             config.ProcurementMinimumRoiPercent,
             config.ProcurementMinimumProfitPerUnit,
-            OwnedStock: CollectOwnedStock()));
+            OwnedStock: CollectOwnedStock(),
+            HighQualityOnly: config.BuyHighQualityOnly));
         detail = Plan.Orders.Count == 0
             ? $"Live tour checked {stockHuntWorlds.Count} worlds; no listing beat the live {homeWorld} resale floor and safety guards."
             : $"Live tour found {Plan.Orders.Count} guarded buy(s), costing {Plan.TotalCost:N0} gil with about {Plan.ExpectedProfit:N0} gil expected profit.";
@@ -1372,8 +1375,13 @@ public sealed class ProcurementController : IDisposable
     }
 
     private bool HasLowCuratedStock() => configuration.Current.ProcurementRules
-        .Where(x => x.Enabled && x.ItemId != 0 && !x.LiquidateOnly)
+        .Where(x => x.Enabled && x.ItemId != 0 && !x.LiquidateOnly && IsBuyableQuality(x))
         .Any(IsBelowStockThreshold);
+
+    // Normal-quality resale stock does not sell, so by default an item with no
+    // high-quality form is not worth a world visit at all.
+    private bool IsBuyableQuality(ProcurementRule rule) =>
+        !configuration.Current.BuyHighQualityOnly || rule.AllowHighQuality || rule.RequireHighQuality;
 
     // Count only the qualities a rule actually trades, so a normal-quality food or
     // potion is not judged by an HQ stock level it will never have.
@@ -1381,7 +1389,8 @@ public sealed class ProcurementController : IDisposable
     {
         var held = 0;
         foreach (var quality in new[] { false, true })
-            if (ResaleStockPolicy.QualityAllowed(rule, quality))
+            if (ResaleStockPolicy.QualityAllowed(rule, quality) &&
+                (!configuration.Current.BuyHighQualityOnly || quality))
                 held += market.GetInventoryCount(rule.ItemId, quality);
         return held < configuration.Current.LiveWorldStockThresholdPerItem;
     }
@@ -1489,7 +1498,8 @@ public sealed class ProcurementController : IDisposable
             var stackSize = Math.Max(1, rule.TargetStackSize);
             foreach (var quality in new[] { false, true })
             {
-                if (!ResaleStockPolicy.QualityAllowed(rule, quality))
+                if (!ResaleStockPolicy.QualityAllowed(rule, quality) ||
+                    configuration.Current.BuyHighQualityOnly && !quality)
                     continue;
                 var held = market.GetInventoryCount(rule.ItemId, quality);
                 if (held > 0)

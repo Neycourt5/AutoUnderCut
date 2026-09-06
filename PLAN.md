@@ -50,6 +50,18 @@ and left "0 stacks queued to list".
 - The all-world tour now covers every buyable rule and both qualities, not just
   HQ-required ones, so normal-quality food and potions are included.
 
+### v1.0.0.32 - buy high quality only
+User: "only HQ items sell tbh". The previous version had broadened the all-world
+tour to both qualities, which was wrong for this account. Added
+`BuyHighQualityOnly` (default on, config version 21) rather than hardcoding it:
+- The planner yields no normal-quality candidates, and an item with no HQ form
+  produces nothing at all, so it is skipped instead of stocked unsellably.
+- The tour does not visit worlds for items it would not buy, and reads only HQ rows.
+- Owned-stock exposure and the low-stock threshold count HQ only, so an NQ pile
+  never suppresses restocking of the HQ form.
+- Selling is untouched: dyes, materia and ethers are normal quality and are still
+  listed from the bags.
+
 ### Deferred (user: low priority, do not break anything)
 - Quieter travel destinations. Only the safe half is in: the summoning-bell leg now
   has its own optional Lifestream command, defaulting to empty, which reuses the
