@@ -2,6 +2,43 @@
 
 Smart Undercutter is a Dalamud SDK 15 plugin for guarded retainer-market repricing and opt-in procurement.
 
+## Keep retainers stocked
+
+1. Enable Lifestream and vnavmesh, and open the summoning-bell retainer list.
+2. Open `/sub`. On **Home**, review **Gil per shopping trip**, minimum expected
+   return, and the quantity to keep in your bags.
+3. Press **Start keeping retainers stocked** (or use `/sub start`). This enables
+   automatic price changes, purchases, listing, gil collection, and repeat checks.
+
+The loop checks every retainer, fills empty slots from eligible bag stock, searches
+for profitable purchases when capacity remains, travels to buy them, then returns
+home to list them. Retainer checks repeat every 5–10 minutes by default, so sold
+slots are detected on the next check. Bag refills get priority before shopping.
+The normal deal search uses Universalis to choose destinations and rechecks each
+purchase against the live in-game listing. Home-world sale history and competing
+listings set the resale estimate; the player's own retainers are excluded.
+
+The gil budget applies **per trip** and resets on the next trip. Repeated trips
+can spend more than that amount in total. Bag-space reserves, per-item limits,
+minimum profit, and sale capacity still apply. If no deal qualifies, slots stay
+empty and another search runs later; filling every slot is a goal, not a guarantee.
+The default buying list contains HQ Grade 4 gemdraughts and HQ Caramel Popcorn.
+Configure additional buying rules in **Shopping**. Existing bag refills use only
+the curated items in complete 99-stacks and keep 100 of each by default. Purchased
+resale stock is queued separately and can use smaller stacks.
+
+Leave the game running and the retainer list open between trips. **Home** shows
+the current action, last checked capacity, and next check. **Stock** shows bag
+inventory, **Shopping** contains buying rules and manual routes, **Earnings**
+shows valuation estimates, and **Advanced** contains pricing, individual switches,
+timing, and the activity log. Settings save automatically.
+
+**Stop all automation** or `/sub stop` stops every controller and disarms recurring
+work, including after a plugin reload. To resume, return to the bell and press
+Start. When a purchase or listing could not be verified, check it in the game
+before restarting. Temporary failures while returning home schedule another home
+attempt; they do not start another shopping route on the visited world.
+
 ## What is implemented
 
 - Starts when the summoning-bell retainer list opens, or manually with `/sub`.
@@ -19,7 +56,7 @@ Smart Undercutter is a Dalamud SDK 15 plugin for guarded retainer-market reprici
 - Shows a Portfolio estimate with wallet and retainer gil, gross asking value, live market-aligned value, per-retainer seller tax, estimated net proceeds, markdown risk, and projected total wealth.
 - Automatically filters bag stock to HQ Grade 4 gemdraughts and HQ Caramel Popcorn, prices them from the current-world market, and fills free retainer slots with complete 99-stacks while preserving 100 of each item for personal use by default.
 - Consolidates inventory stacks before bag filling, skips retainers already at 20/20 during fill-only runs, validates the exact visible safety-seeded row before every write, and returns to the main bell list before idling.
-- Builds diversified purchase plans from Universalis sale history and current listings, constrained by gil, bag slots, retainer sale slots, weekly sales, ROI, and per-item limits.
+- Builds diversified purchase plans from home-world Universalis sale history and competing listings, constrained by gil, bag slots, confirmed retainer sale slots, weekly sales, ROI, and per-item limits.
 - Scans all North American worlds plus Oceania by default and merges them into one travel-ready procurement plan.
 - Uses Lifestream for world and cross-data-center travel and vnavmesh for local approaches, then revalidates every candidate against the live in-game listing before submitting a purchase.
 - Offers a guided deal route that prioritizes Universalis opportunities by world, travels to each market board, flashes the FFXIV taskbar icon, shows expected prices and guarded ceilings, and waits for a manual Done / Next command.
@@ -55,15 +92,15 @@ https://github.com/Neycourt5/AutoUnderCut/releases/latest/download/repo.json
 
 Save it, then search for **Smart Undercutter** in the plugin installer.
 
-Use `/sub guided` to start a fresh guided Universalis deal route, or launch it from the Procurement tab.
+Use `/sub guided` to start a fresh guided Universalis deal route, or launch it from **Shopping**. Guided routes wait for manual buying; they are separate from the automatic stocking loop.
 
 ## Operational notes
 
-Game structures and UI callbacks can change after an FFXIV patch. Rebuild against the current Dalamud release after patches and test in dry-run mode first. Do not interact with the retainer UI while a run is active. Use `/sub stop` or the dashboard's Emergency Stop button to abort.
+Game structures and UI callbacks can change after an FFXIV patch. Rebuild against the current Dalamud release after patches and test in dry-run mode first. Do not interact with the retainer UI while a run is active. Use `/sub stop` or the dashboard's Stop all automation button to abort. Automated tests simulate game services; a successful build does not verify travel plugins or native UI callbacks in a running game.
 
-The procurement workflow expects Lifestream and vnavmesh to be installed. Its default Lifestream shortcut is `/li mb`; this can be changed in the Procurement tab. Automatic procurement only starts while the character is idle at an open summoning-bell retainer list. A completed retainer pass supplies the current free-slot count; newly empty slots trigger an immediate guarded scan, with periodic scans as a fallback.
+The procurement workflow expects Lifestream and vnavmesh to be installed. Its default Lifestream shortcut is `/li mb`; this can be changed in Shopping. Automatic procurement only starts while the character is idle at an open summoning-bell retainer list. A completed retainer pass supplies the current free-slot count; newly empty slots trigger a bag refill first, followed by a guarded deal scan if capacity remains. Shopping skips scans while no unreserved sale slots or bag space are available.
 
-A user Emergency Stop, and a purchase the game accepted but inventory never confirmed, stay halted until explicitly started again. Every other stop - no free sale slot yet, Lifestream busy, a failed Universalis scan - schedules a retry after the procurement interval and resumes only once the character is parked at a summoning bell again, so a single passing failure cannot end unattended shopping for the session. A route that gives up mid-trip returns home to the bell instead of leaving the character on a visited world. Emergency Stop and `/sub stop` also cancel owned Lifestream travel, vnavmesh movement/pathfinding, and pending bag-listing scans. Retainer, bag-listing, and procurement controllers coordinate access to the game UI. Purchases recheck the destination world, open board, purchase arming, inventory reserve, budget, and profit after live buyer tax immediately before submission.
+A user stop, an uncertain purchase submission, and an unverified listing stay halted until explicitly started again. Closing and reopening the retainer window does not clear a safety stop. Passing procurement failures such as Lifestream being busy or a failed Universalis scan schedule a retry after the procurement interval. Failed returns home also retry the home journey while automatic procurement remains enabled. Stop all automation and `/sub stop` cancel owned Lifestream travel, vnavmesh movement/pathfinding, and pending bag-listing scans. Retainer, bag-listing, and procurement controllers coordinate access to the game UI. Purchases recheck the destination world, open board, purchase arming, inventory reserve, budget, and profit after live buyer tax immediately before submission.
 
 World transfers wait for market windows to close and allow up to ten minutes for cross-data-center queues. Approach and interaction failures have bounded retries. The live tour includes larger home-world stacks when calculating the resale floor, even when those stacks exceed the configured purchase size.
 

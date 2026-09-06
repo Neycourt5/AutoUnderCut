@@ -31,8 +31,11 @@ jobs:
         shell: pwsh
         run: |
           dotnet restore SmartUndercutBot.sln
+          if ($LASTEXITCODE -ne 0) { throw "Dependency restore failed." }
           dotnet test tests/SmartUndercutBot.Core.Tests/SmartUndercutBot.Core.Tests.csproj --configuration Release --no-restore
+          if ($LASTEXITCODE -ne 0) { throw "Tests failed; release cancelled." }
           dotnet build src/SmartUndercutBot/SmartUndercutBot.csproj --configuration Release --no-restore
+          if ($LASTEXITCODE -ne 0) { throw "Plugin build failed; release cancelled." }
 
       - name: Create plugin ZIP and repository JSON
         shell: pwsh
@@ -57,6 +60,9 @@ jobs:
           if (-not $manifest.InternalName -or -not $manifest.AssemblyVersion -or -not $manifest.DalamudApiLevel) {
             throw "DalamudPackager did not add InternalName, AssemblyVersion, or DalamudApiLevel to the manifest."
           }
+          if ("v$($manifest.AssemblyVersion)" -ne $env:GITHUB_REF_NAME) {
+            throw "Release tag does not match the packaged plugin version."
+          }
 
           $repositoryUrl = "https://github.com/Neycourt5/AutoUnderCut"
           $downloadUrl = "$repositoryUrl/releases/latest/download/SmartUndercutBot.zip"
@@ -80,6 +86,7 @@ jobs:
           $zip = "release-artifacts/SmartUndercutBot.zip"
           $repo = "release-artifacts/repo.json"
           gh release create $tag "$zip#SmartUndercutBot.zip" "$repo#repo.json" --title $tag --generate-notes --latest
+          if ($LASTEXITCODE -ne 0) { throw "GitHub release publication failed." }
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4

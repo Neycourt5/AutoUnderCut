@@ -41,7 +41,9 @@ public sealed record ProcurementPlanRequest(
     decimal MinimumRoiPercent,
     uint MinimumProfitPerUnit,
     decimal MarketTaxPercent = 5m,
-    decimal BuyerFeePercent = 5m);
+    decimal BuyerFeePercent = 5m,
+    string HomeWorld = "",
+    IReadOnlySet<ulong>? OwnedRetainerIds = null);
 
 public sealed record LiveMarketPlanRequest(
     IReadOnlyList<ProcurementMarketItem> Markets,

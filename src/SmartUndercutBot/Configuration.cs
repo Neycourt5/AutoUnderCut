@@ -46,6 +46,36 @@ public sealed class Configuration : IPluginConfiguration
     public PricingRule GetEffectiveRule(uint itemId) =>
         PerItemRules.TryGetValue(itemId, out var rule) ? rule.Clone() : GlobalRule.Clone();
 
+    public bool KeepsRetainersStocked => AutomationEnabled && ProcessAllRetainers && RepeatBellRuns &&
+        AllowAutomaticWrites && AutomaticProcurementEnabled && AllowAutomaticPurchases &&
+        AllowAutomaticListing && AutomaticCuratedBagListingEnabled && !LiveWorldStockHuntEnabled;
+
+    public void EnableStockAutomation()
+    {
+        AutomationEnabled = true;
+        ProcessAllRetainers = true;
+        RepeatBellRuns = true;
+        AllowAutomaticWrites = true;
+        AutomaticProcurementEnabled = true;
+        AllowAutomaticPurchases = true;
+        AllowAutomaticListing = true;
+        AutomaticCuratedBagListingEnabled = true;
+        AutomaticallyCollectRetainerGil = true;
+        // Use targeted routes for recurring refills. Full live tours remain a manual option.
+        LiveWorldStockHuntEnabled = false;
+    }
+
+    public void DisableStockAutomation()
+    {
+        AutomationEnabled = false;
+        RepeatBellRuns = false;
+        AutomaticProcurementEnabled = false;
+        AutomaticCuratedBagListingEnabled = false;
+        AllowAutomaticWrites = false;
+        AllowAutomaticPurchases = false;
+        AllowAutomaticListing = false;
+    }
+
     public void Normalize()
     {
         if (Version < 2)

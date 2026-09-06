@@ -14,6 +14,7 @@
   <ItemGroup>
     <!-- Exercise the production state machine without loading native game code. -->
     <Compile Include="../../src/SmartUndercutBot/Automation/ProcurementController.cs" Link="Production/ProcurementController.cs" />
+    <Compile Include="../../src/SmartUndercutBot/Automation/StockAutomationController.cs" Link="Production/StockAutomationController.cs" />
     <Compile Include="../../src/SmartUndercutBot/Configuration.cs" Link="Production/Configuration.cs" />
     <Compile Include="../../src/SmartUndercutBot/Services/ProcurementLedger.cs" Link="Production/ProcurementLedger.cs" />
     <Compile Include="../../src/SmartUndercutBot/Services/IMarketPurchaseService.cs" Link="Production/IMarketPurchaseService.cs" />

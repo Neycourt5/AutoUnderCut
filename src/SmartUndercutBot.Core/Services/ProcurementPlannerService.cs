@@ -40,6 +40,18 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
                     continue;
 
                 var targetSalePrice = Median(sales.Select(x => x.PricePerUnit));
+                if (!string.IsNullOrWhiteSpace(request.HomeWorld))
+                {
+                    var homeLowest = market.Listings
+                        .Where(x => x.ItemId == market.ItemId && x.IsHighQuality == quality &&
+                                    x.Quantity > 0 && x.PricePerUnit > 0 &&
+                                    string.Equals(x.WorldName, request.HomeWorld, StringComparison.OrdinalIgnoreCase) &&
+                                    request.OwnedRetainerIds?.Contains(x.RetainerId) != true)
+                        .Select(x => x.PricePerUnit).DefaultIfEmpty().Min();
+                    // Home-world sales supply the median. Do not buy using a regional
+                    // resale estimate or a higher price than local competition supports.
+                    targetSalePrice = Math.Min(targetSalePrice, homeLowest > 1 ? homeLowest - 1 : 0);
+                }
                 if (targetSalePrice == 0)
                     continue;
 
@@ -61,6 +73,7 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
                 foreach (var listing in market.Listings)
                 {
                     if (listing.ItemId != market.ItemId || listing.PricePerUnit == 0 || listing.PricePerUnit > ceiling ||
+                        request.OwnedRetainerIds?.Contains(listing.RetainerId) == true ||
                         string.IsNullOrWhiteSpace(listing.WorldName) ||
                         listing.Quantity == 0 || listing.IsHighQuality != quality ||
                         listing.Quantity > Math.Max(1, rule.TargetStackSize))

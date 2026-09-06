@@ -19,6 +19,7 @@ public sealed class DashboardWindow : Window
     private readonly ProcurementLedger procurementLedger;
     private readonly IMarketDataService marketData;
     private readonly AutomationLog log;
+    private readonly StockAutomationController stockAutomation;
     private int newItemId;
     private uint? selectedItemId;
     private int newProcurementItemId;
@@ -32,7 +33,8 @@ public sealed class DashboardWindow : Window
         IUniversalisService universalis,
         ProcurementLedger procurementLedger,
         IMarketDataService marketData,
-        AutomationLog log)
+        AutomationLog log,
+        StockAutomationController stockAutomation)
         : base("Smart Undercutter##Dashboard")
     {
         this.configuration = configuration;
@@ -43,54 +45,171 @@ public sealed class DashboardWindow : Window
         this.procurementLedger = procurementLedger;
         this.marketData = marketData;
         this.log = log;
+        this.stockAutomation = stockAutomation;
         SizeConstraints = new WindowSizeConstraints
         {
-            MinimumSize = new Vector2(640, 440),
+            MinimumSize = new Vector2(760, 520),
             MaximumSize = new Vector2(float.MaxValue),
         };
     }
 
     public override void Draw()
     {
+        DrawRunControls();
+        ImGui.Separator();
         if (!ImGui.BeginTabBar("DashboardTabs"))
             return;
 
-        if (ImGui.BeginTabItem("Status"))
+        if (ImGui.BeginTabItem("Home"))
         {
-            DrawStatus();
+            DrawHome();
             ImGui.EndTabItem();
         }
-        if (ImGui.BeginTabItem("Queue"))
-        {
-            DrawQueue();
-            ImGui.EndTabItem();
-        }
-        if (ImGui.BeginTabItem("Portfolio"))
-        {
-            DrawPortfolio();
-            ImGui.EndTabItem();
-        }
-        if (ImGui.BeginTabItem("Bag Listing"))
+        if (ImGui.BeginTabItem("Stock"))
         {
             DrawBagListing();
             ImGui.EndTabItem();
         }
-        if (ImGui.BeginTabItem("Pricing Rules"))
-        {
-            DrawRules();
-            ImGui.EndTabItem();
-        }
-        if (ImGui.BeginTabItem("Procurement"))
+        if (ImGui.BeginTabItem("Shopping"))
         {
             DrawProcurement();
             ImGui.EndTabItem();
         }
-        if (ImGui.BeginTabItem("Safety & Data"))
+        if (ImGui.BeginTabItem("Earnings"))
+        {
+            DrawPortfolio();
+            ImGui.EndTabItem();
+        }
+        if (ImGui.BeginTabItem("Advanced"))
+        {
+            DrawAdvanced();
+            ImGui.EndTabItem();
+        }
+        ImGui.EndTabBar();
+        if (configurationDirty)
+            SaveConfiguration();
+    }
+
+    private void DrawRunControls()
+    {
+        var attention = stockAutomation.NeedsAttention;
+        var running = configuration.Current.KeepsRetainersStocked;
+        ImGui.TextColored(attention ? new Vector4(1f, 0.72f, 0.2f, 1f)
+            : running ? new Vector4(0.35f, 0.85f, 0.65f, 1f) : new Vector4(0.75f, 0.75f, 0.75f, 1f),
+            attention ? "Paused - check the message below"
+                : running ? "Keep retainers stocked: ON" : "Keep retainers stocked: OFF");
+        ImGui.BeginDisabled(stockAutomation.StartIssue is not null);
+        if (ImGui.Button("Start keeping retainers stocked"))
+            stockAutomation.Start();
+        ImGui.EndDisabled();
+        ImGui.SameLine();
+        if (ImGui.Button("Stop all automation"))
+            stockAutomation.Stop();
+        if (!stockAutomation.IsBusy && stockAutomation.StartIssue is { } issue)
+            ImGui.TextWrapped(issue);
+    }
+
+    private void DrawHome()
+    {
+        var config = configuration.Current;
+        ImGui.TextWrapped("Check retainers > fill from bags > buy good deals > return home and list > repeat.");
+        ImGui.TextWrapped("Start enables price changes, automatic purchases, listing, gil collection, and repeat checks. " +
+                          "It uses your limits below. Keep the game running and leave the retainer list open between trips.");
+        ImGui.Spacing();
+
+        ImGui.TextUnformatted("What is happening");
+        var detail = procurement.IsActive ? procurement.Status.Detail
+            : automation.IsActive ? automation.Status.Detail
+            : bagListing.IsBusy ? bagListing.Status.Detail
+            : procurement.RequiresManualRestart || procurement.IsWaitingToReturnHome ? procurement.Status.Detail
+            : automation.RequiresManualRestart ? automation.Status.Detail
+            : !config.KeepsRetainersStocked ? "Ready when you are. Review your spending limits, open a summoning bell, and press Start."
+            : !bagListing.IsRetainerListOpen ? "Waiting for the summoning-bell retainer list to open."
+            : automation.LastKnownFreeSaleSlots == 0 ? "All checked retainer slots are filled. Waiting for the next sale check."
+            : procurement.Status.Detail;
+        ImGui.TextWrapped(detail);
+        if (stockAutomation.NeedsAttention)
+            ImGui.TextWrapped("Check the last purchase or listing in the game before restarting. Activity has been held to avoid repeating an unverified action.");
+
+        var status = automation.Status;
+        if (status.TotalRetainers > 0)
+        {
+            var totalSlots = status.TotalRetainers * 20;
+            if (automation.LastKnownFreeSaleSlots is { } free)
+            {
+                ImGui.Spacing();
+                ImGui.ProgressBar((float)(totalSlots - free) / totalSlots, new Vector2(-1, 0),
+                    $"Last completed check: {totalSlots - free} / {totalSlots} sale slots filled");
+                ImGui.Text($"{free} empty slots   |   {procurementLedger.PendingSaleSlots} stacks queued to list");
+            }
+        }
+        else
+            ImGui.TextDisabled("Retainer capacity will appear after the first complete check.");
+
+        if (status.State == AutomationState.WaitingForScheduledRun && status.NextActionAt is { } next)
+            ImGui.Text($"Next retainer check: {next.LocalDateTime:t}");
+        if (!procurement.IsActive && procurement.Status.NextAutomaticScan is { } scan &&
+            automation.LastKnownFreeSaleSlots is > 0)
+            ImGui.Text(scan <= DateTimeOffset.UtcNow
+                ? "Deal search: ready after the retainer check and bag refill."
+                : $"Next deal search / retry: {scan.LocalDateTime:t}");
+        ImGui.TextWrapped("Sold slots are detected on the next retainer check. When no deal meets your limits, empty slots stay open and shopping retries later.");
+        ImGui.Separator();
+
+        ImGui.TextUnformatted("Your limits (saved automatically)");
+        var budget = config.ProcurementBudget;
+        ImGui.SetNextItemWidth(170 * ImGuiHelpers.GlobalScale);
+        if (InputUInt("Gil per shopping trip", ref budget, 1_000, 100_000_000))
+        {
+            config.ProcurementBudget = budget;
+            configurationDirty = true;
+        }
+        ImGui.TextWrapped("This limit resets each trip. Repeated trips can spend more than this amount in total, including gil collected from sales.");
+        var roi = (float)config.ProcurementMinimumRoiPercent;
+        ImGui.SetNextItemWidth(170 * ImGuiHelpers.GlobalScale);
+        if (ImGui.DragFloat("Minimum expected return after fees", ref roi, 0.5f, 0, 1_000, "%.1f%%"))
+        {
+            config.ProcurementMinimumRoiPercent = (decimal)Math.Max(0, roi);
+            configurationDirty = true;
+        }
+        var reserve = config.BagListingReservePerItem;
+        ImGui.SetNextItemWidth(170 * ImGuiHelpers.GlobalScale);
+        if (InputInt("Keep in bags per item", ref reserve, 0, 9_999))
+        {
+            config.BagListingReservePerItem = reserve;
+            configurationDirty = true;
+        }
+        ImGui.TextWrapped($"Bag refills use HQ Grade 4 gemdraughts and HQ Caramel Popcorn in complete 99-stacks, keeping {reserve:N0} of each. " +
+                          "Purchased resale stock is queued separately. Shopping contains the item list and additional limits.");
+        ImGui.Text($"Check retainers every {config.RepeatMinimumMinutes}-{config.RepeatMaximumMinutes} minutes; retry deals every {config.ProcurementIntervalMinutes} minutes.");
+        ImGui.TextWrapped("Travel requires Lifestream and vnavmesh. Live prices and inventory confirmation are checked before another purchase is attempted.");
+    }
+
+    private void DrawAdvanced()
+    {
+        if (!ImGui.BeginTabBar("AdvancedTabs"))
+            return;
+        if (ImGui.BeginTabItem("Individual controls"))
+        {
+            DrawStatus();
+            ImGui.EndTabItem();
+        }
+        if (ImGui.BeginTabItem("Pricing"))
+        {
+            DrawRules();
+            ImGui.EndTabItem();
+        }
+        if (ImGui.BeginTabItem("Listing queue"))
+        {
+            DrawQueue();
+            ImGui.EndTabItem();
+        }
+        if (ImGui.BeginTabItem("Timing & data"))
         {
             DrawSafetySettings();
             ImGui.EndTabItem();
         }
-        if (ImGui.BeginTabItem("Audit Log"))
+        if (ImGui.BeginTabItem("Activity log"))
         {
             DrawLog();
             ImGui.EndTabItem();
@@ -176,12 +295,8 @@ public sealed class DashboardWindow : Window
         if (ImGui.Button("Start / Rescan"))
             automation.StartNow();
         ImGui.SameLine();
-        if (ImGui.Button("Emergency Stop"))
-        {
-            automation.Halt();
-            procurement.Halt();
-            bagListing.Halt();
-        }
+        if (ImGui.Button("Stop all##Advanced"))
+            stockAutomation.Stop();
 
         ImGui.Spacing();
         ImGui.Text($"Progress: {Math.Min(status.CurrentIndex + 1, status.TotalListings)} / {status.TotalListings}");
@@ -537,148 +652,139 @@ public sealed class DashboardWindow : Window
         if (status.NextAutomaticScan is { } nextScan)
             ImGui.Text($"Next automatic procurement scan: {nextScan.LocalDateTime:g}");
 
-        if (ImGui.Button("Scan Universalis"))
+        ImGui.TextUnformatted("One-time actions");
+        ImGui.BeginDisabled(stockAutomation.IsBusy);
+        if (ImGui.Button("Find deals"))
             procurement.ScanNow();
         ImGui.SameLine();
-        if (ImGui.Button("Experimental auto-buy plan"))
+        if (ImGui.Button("Buy planned deals"))
             procurement.RunNow();
         ImGui.SameLine();
         if (ImGui.Button("Run guided deal route"))
             procurement.RunGuidedNow();
-        ImGui.SameLine();
         if (ImGui.Button("Live all-world stock hunt"))
             procurement.RunLiveStockHuntNow();
-        ImGui.SameLine();
-        if (ImGui.Button("Stop procurement"))
-            procurement.Halt();
+        ImGui.EndDisabled();
         ImGui.TextWrapped("The live all-world hunt scans prices on every world first, then makes a separate buying pass. The guided route waits for you to buy manually.");
 
         ImGui.Separator();
         var config = configuration.Current;
-        var fullLoop = config.AutomationEnabled && config.ProcessAllRetainers && config.RepeatBellRuns &&
-                       config.AllowAutomaticWrites && config.AutomaticProcurementEnabled &&
-                       config.AllowAutomaticPurchases && config.AllowAutomaticListing;
-        if (ImGui.Checkbox("Enable experimental complete AFK reprice + restock loop", ref fullLoop))
+        if (ImGui.CollapsingHeader("Individual shopping switches"))
         {
-            config.AutomationEnabled = fullLoop;
-            config.ProcessAllRetainers = fullLoop;
-            config.RepeatBellRuns = fullLoop;
-            config.AllowAutomaticWrites = fullLoop;
-            config.AutomaticProcurementEnabled = fullLoop;
-            config.AllowAutomaticPurchases = fullLoop;
-            config.AllowAutomaticListing = fullLoop;
-            SaveConfiguration();
+            ImGui.TextWrapped("Start on the Home tab sets these for continuous restocking. Use these switches for custom workflows.");
+            var automatic = config.AutomaticProcurementEnabled;
+            if (ImGui.Checkbox("Run procurement automatically while idle at the bell", ref automatic))
+            {
+                config.AutomaticProcurementEnabled = automatic;
+                SaveConfiguration();
+            }
+            var armed = config.AllowAutomaticPurchases;
+            if (ImGui.Checkbox("Arm automatic market-board purchases", ref armed))
+            {
+                config.AllowAutomaticPurchases = armed;
+                SaveConfiguration();
+            }
+            var autoList = config.AllowAutomaticListing;
+            if (ImGui.Checkbox("Automatically list purchased stacks on retainers", ref autoList))
+            {
+                config.AllowAutomaticListing = autoList;
+                SaveConfiguration();
+            }
+            ImGui.TextColored(armed ? new Vector4(1f, 0.72f, 0.2f, 1f) : new Vector4(0.55f, 0.85f, 0.65f, 1f),
+                armed
+                    ? "PURCHASES ARMED: every order is still revalidated against the live in-game listing and price ceiling."
+                    : "DRY RUN: Universalis plans are shown but no purchases are submitted.");
         }
-        ImGui.TextWrapped("Automatic repricing and validated bag restocking can run while idle at the bell. Automatic travel/purchasing is experimental and disarmed after this update; use the guided deal route for the dependable Universalis workflow.");
-        var automatic = config.AutomaticProcurementEnabled;
-        if (ImGui.Checkbox("Run procurement automatically while idle at the bell", ref automatic))
-        {
-            config.AutomaticProcurementEnabled = automatic;
-            SaveConfiguration();
-        }
-        var armed = config.AllowAutomaticPurchases;
-        if (ImGui.Checkbox("Arm automatic market-board purchases", ref armed))
-        {
-            config.AllowAutomaticPurchases = armed;
-            SaveConfiguration();
-        }
-        var autoList = config.AllowAutomaticListing;
-        if (ImGui.Checkbox("Automatically list purchased stacks on retainers", ref autoList))
-        {
-            config.AllowAutomaticListing = autoList;
-            SaveConfiguration();
-        }
-        ImGui.TextColored(armed ? new Vector4(1f, 0.72f, 0.2f, 1f) : new Vector4(0.55f, 0.85f, 0.65f, 1f),
-            armed
-                ? "PURCHASES ARMED: every order is still revalidated against the live in-game listing and price ceiling."
-                : "DRY RUN: Universalis plans are shown but no purchases are submitted.");
 
-        var budget = config.ProcurementBudget;
-        if (InputUInt("Maximum gil budget", ref budget, 1_000, 100_000_000))
+        if (ImGui.CollapsingHeader("Shopping limits and travel settings"))
         {
-            config.ProcurementBudget = budget;
-            configurationDirty = true;
-        }
-        ImGui.SameLine();
-        if (ImGui.SmallButton("20M"))
-        {
-            config.ProcurementBudget = 20_000_000;
-            SaveConfiguration();
-        }
-        ImGui.SameLine();
-        if (ImGui.SmallButton("50M"))
-        {
-            config.ProcurementBudget = 50_000_000;
-            SaveConfiguration();
-        }
-        var guidedWorlds = config.GuidedTourMaximumWorlds;
-        if (InputInt("Maximum worlds per guided route", ref guidedWorlds, 1, 20))
-        {
-            config.GuidedTourMaximumWorlds = guidedWorlds;
-            configurationDirty = true;
-        }
-        ImGui.TextWrapped("Recommended: Run guided deal route. It scans Universalis, ranks worlds by expected profit, uses literal /li world travel, opens each Market Board, and waits for manual review. The budget is a maximum, not a spending target.");
-        var interval = config.ProcurementIntervalMinutes;
-        if (InputInt("Minutes between procurement scans", ref interval, 5, 1_440))
-        {
-            config.ProcurementIntervalMinutes = interval;
-            configurationDirty = true;
-        }
-        var targetSlots = config.ProcurementTargetSaleSlots;
-        if (InputInt("Maximum sale slots to fill", ref targetSlots, 1, 200))
-        {
-            config.ProcurementTargetSaleSlots = targetSlots;
-            configurationDirty = true;
-        }
-        var reserveSlots = config.ProcurementInventoryReserve;
-        if (InputInt("Bag slots to keep free", ref reserveSlots, 1, 100))
-        {
-            config.ProcurementInventoryReserve = reserveSlots;
-            configurationDirty = true;
-        }
-        var roi = (float)config.ProcurementMinimumRoiPercent;
-        if (ImGui.DragFloat("Minimum expected ROI %", ref roi, 0.5f, 0, 1_000, "%.1f%%"))
-        {
-            config.ProcurementMinimumRoiPercent = (decimal)Math.Max(0, roi);
-            configurationDirty = true;
-        }
-        var minimumProfit = config.ProcurementMinimumProfitPerUnit;
-        if (InputUInt("Minimum profit per unit", ref minimumProfit, 0, 100_000_000))
-        {
-            config.ProcurementMinimumProfitPerUnit = minimumProfit;
-            configurationDirty = true;
-        }
-        var dataCenter = config.ProcurementDataCenter;
-        if (ImGui.InputText("Universalis scopes (comma separated)", ref dataCenter, 128))
-        {
-            config.ProcurementDataCenter = dataCenter;
-            configurationDirty = true;
-        }
-        ImGui.TextDisabled("Default scans every North American world plus Oceania: North-America,Oceania");
-        var liveHunt = config.LiveWorldStockHuntEnabled;
-        if (ImGui.Checkbox("Use live in-game markets for automatic procurement", ref liveHunt))
-        {
-            config.LiveWorldStockHuntEnabled = liveHunt;
-            SaveConfiguration();
-        }
-        ImGui.TextWrapped("When enabled, unattended procurement does not use Universalis. It visits every NA and Oceania world, visibly searches each curated HQ item on the Market Board, and uses the live Siren price as the resale anchor. The Scan Universalis button remains available for optional planning.");
-        var lowStockThreshold = config.LiveWorldStockThresholdPerItem;
-        if (InputInt("Live-tour low-stock threshold per item", ref lowStockThreshold, 1, 9999))
-        {
-            config.LiveWorldStockThresholdPerItem = lowStockThreshold;
-            configurationDirty = true;
-        }
-        var liveHuntCooldown = config.LiveWorldStockHuntCooldownMinutes;
-        if (InputInt("Minutes between full live-world tours", ref liveHuntCooldown, 60, 10_080))
-        {
-            config.LiveWorldStockHuntCooldownMinutes = liveHuntCooldown;
-            configurationDirty = true;
-        }
-        var travelCommand = config.MarketBoardTravelCommand;
-        if (ImGui.InputText("Lifestream market-board command", ref travelCommand, 128))
-        {
-            config.MarketBoardTravelCommand = travelCommand;
-            configurationDirty = true;
+            var budget = config.ProcurementBudget;
+            if (InputUInt("Maximum gil per trip", ref budget, 1_000, 100_000_000))
+            {
+                config.ProcurementBudget = budget;
+                configurationDirty = true;
+            }
+            ImGui.SameLine();
+            if (ImGui.SmallButton("20M"))
+            {
+                config.ProcurementBudget = 20_000_000;
+                SaveConfiguration();
+            }
+            ImGui.SameLine();
+            if (ImGui.SmallButton("50M"))
+            {
+                config.ProcurementBudget = 50_000_000;
+                SaveConfiguration();
+            }
+            var guidedWorlds = config.GuidedTourMaximumWorlds;
+            if (InputInt("Maximum worlds per guided route", ref guidedWorlds, 1, 20))
+            {
+                config.GuidedTourMaximumWorlds = guidedWorlds;
+                configurationDirty = true;
+            }
+            ImGui.TextWrapped("Guided routes wait for manual buying. Keep retainers stocked uses automatic purchases. The budget is a per-trip maximum, not a spending target.");
+            var interval = config.ProcurementIntervalMinutes;
+            if (InputInt("Minutes between procurement scans", ref interval, 5, 1_440))
+            {
+                config.ProcurementIntervalMinutes = interval;
+                configurationDirty = true;
+            }
+            var targetSlots = config.ProcurementTargetSaleSlots;
+            if (InputInt("Maximum sale slots to fill", ref targetSlots, 1, 200))
+            {
+                config.ProcurementTargetSaleSlots = targetSlots;
+                configurationDirty = true;
+            }
+            var reserveSlots = config.ProcurementInventoryReserve;
+            if (InputInt("Bag slots to keep free", ref reserveSlots, 1, 100))
+            {
+                config.ProcurementInventoryReserve = reserveSlots;
+                configurationDirty = true;
+            }
+            var roi = (float)config.ProcurementMinimumRoiPercent;
+            if (ImGui.DragFloat("Minimum expected ROI %", ref roi, 0.5f, 0, 1_000, "%.1f%%"))
+            {
+                config.ProcurementMinimumRoiPercent = (decimal)Math.Max(0, roi);
+                configurationDirty = true;
+            }
+            var minimumProfit = config.ProcurementMinimumProfitPerUnit;
+            if (InputUInt("Minimum profit per unit", ref minimumProfit, 0, 100_000_000))
+            {
+                config.ProcurementMinimumProfitPerUnit = minimumProfit;
+                configurationDirty = true;
+            }
+            var dataCenter = config.ProcurementDataCenter;
+            if (ImGui.InputText("Universalis scopes (comma separated)", ref dataCenter, 128))
+            {
+                config.ProcurementDataCenter = dataCenter;
+                configurationDirty = true;
+            }
+            ImGui.TextDisabled("Default scans every North American world plus Oceania: North-America,Oceania");
+            var liveHunt = config.LiveWorldStockHuntEnabled;
+            if (ImGui.Checkbox("Use live in-game markets for automatic procurement", ref liveHunt))
+            {
+                config.LiveWorldStockHuntEnabled = liveHunt;
+                SaveConfiguration();
+            }
+            ImGui.TextWrapped("Full live tours visit every NA and Oceania world before buying and use your home-world price as the resale anchor. Start keeping retainers stocked selects targeted Universalis routes instead.");
+            var lowStockThreshold = config.LiveWorldStockThresholdPerItem;
+            if (InputInt("Live-tour low-stock threshold per item", ref lowStockThreshold, 1, 9999))
+            {
+                config.LiveWorldStockThresholdPerItem = lowStockThreshold;
+                configurationDirty = true;
+            }
+            var liveHuntCooldown = config.LiveWorldStockHuntCooldownMinutes;
+            if (InputInt("Minutes between full live-world tours", ref liveHuntCooldown, 60, 10_080))
+            {
+                config.LiveWorldStockHuntCooldownMinutes = liveHuntCooldown;
+                configurationDirty = true;
+            }
+            var travelCommand = config.MarketBoardTravelCommand;
+            if (ImGui.InputText("Lifestream market-board command", ref travelCommand, 128))
+            {
+                config.MarketBoardTravelCommand = travelCommand;
+                configurationDirty = true;
+            }
         }
 
         ImGui.Separator();
@@ -890,13 +996,7 @@ public sealed class DashboardWindow : Window
 
     private void DrawSaveButton()
     {
-        if (!configurationDirty)
-            return;
-        ImGui.Spacing();
-        if (ImGui.Button("Save configuration"))
-            SaveConfiguration();
-        ImGui.SameLine();
-        ImGui.TextColored(new Vector4(1f, 0.72f, 0.2f, 1f), "Unsaved changes");
+        ImGui.TextDisabled("Changes are saved automatically.");
     }
 
     private void SaveConfiguration()

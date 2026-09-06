@@ -61,6 +61,8 @@ public sealed class BagListingController : IDisposable
     private DateTimeOffset nextAutomaticAttempt;
     private DateTimeOffset bagSortReadyAt;
     private bool automaticStartSuspended;
+    private bool awaitingFillCompletion;
+    private int? lastAttemptFreeSaleSlots;
 
     public BagListingController(
         IFramework framework,
@@ -102,9 +104,22 @@ public sealed class BagListingController : IDisposable
     public bool IsRetainerListOpen => retainerListings.IsRetainerListOpen;
     public bool IsAutomaticRunDue => !automaticStartSuspended &&
         configuration.Current.AutomaticCuratedBagListingEnabled && configuration.Current.AllowAutomaticListing &&
-        timeProvider.GetUtcNow() >= nextAutomaticAttempt && !automation.IsActive &&
+        !automation.RequiresManualRestart &&
+        (timeProvider.GetUtcNow() >= nextAutomaticAttempt ||
+         automation.LastKnownFreeSaleSlots > lastAttemptFreeSaleSlots) && !automation.IsActive &&
         retainerListings.IsRetainerListOpen && automation.LastKnownFreeSaleSlots is > 0;
     private BagListingState State => Status.State;
+
+    public void ResumeAutomatic()
+    {
+        if (IsBusy)
+            return;
+        automaticStartSuspended = false;
+        awaitingFillCompletion = false;
+        lastAttemptFreeSaleSlots = null;
+        nextAutomaticAttempt = timeProvider.GetUtcNow();
+        Refresh();
+    }
 
     public void Refresh()
     {
@@ -233,6 +248,12 @@ public sealed class BagListingController : IDisposable
     {
         if (State == BagListingState.ConsolidatingBags)
         {
+            if (!configuration.Current.AllowAutomaticListing || !retainerListings.IsRetainerListOpen)
+            {
+                Fail("Bag filling paused because listing was disabled or the summoning bell closed.");
+                ScheduleNextAttempt();
+                return;
+            }
             if (this.timeProvider.GetUtcNow() >= bagSortReadyAt)
                 BeginPriceScan();
             return;
@@ -355,10 +376,18 @@ public sealed class BagListingController : IDisposable
             $"Queued {queuedStacks} curated 99-stack(s). Starting the all-retainer listing and live repricing pass.");
         log.Add(AutomationLogLevel.Information, Status.Detail);
         automation.StartBagListingNow();
+        // The fill pass changes capacity. Record its result when it completes,
+        // so only a subsequent sale triggers an immediate new refill attempt.
+        awaitingFillCompletion = true;
     }
 
     private void TryAutomaticStart()
     {
+        if (awaitingFillCompletion && !automation.IsActive)
+        {
+            awaitingFillCompletion = false;
+            lastAttemptFreeSaleSlots = automation.LastKnownFreeSaleSlots;
+        }
         if (!IsAutomaticRunDue || procurement.IsActive)
             return;
         PrepareAutomaticRun();
@@ -442,7 +471,11 @@ public sealed class BagListingController : IDisposable
         .Where(x => x.IsHighQuality && CuratedItems.Contains(x.ItemName))
         .ToArray();
 
-    private void ScheduleNextAttempt() => nextAutomaticAttempt = this.timeProvider.GetUtcNow().AddMinutes(5);
+    private void ScheduleNextAttempt()
+    {
+        lastAttemptFreeSaleSlots = automation.LastKnownFreeSaleSlots;
+        nextAutomaticAttempt = timeProvider.GetUtcNow().AddMinutes(5);
+    }
 
     private void Fail(string message, string? logMessage = null)
     {

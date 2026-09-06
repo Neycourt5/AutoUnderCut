@@ -291,20 +291,197 @@ public sealed class ProcurementControllerTests
 
         run.Tick();
         run.Tick();
-        Assert.Equal(ProcurementState.PlanReady, run.Controller.State);
-        Assert.Equal(1, run.Game.Scans);
+        Assert.Equal(ProcurementState.Idle, run.Controller.State);
+        Assert.Equal(0, run.Game.Scans);
 
         // The "capacity changed" trigger must not fire on its own reserved slots,
         // or the scheduler rescans as fast as Universalis answers.
         for (var tick = 0; tick < 50; tick++)
             run.Tick();
-        Assert.Equal(1, run.Game.Scans);
+        Assert.Equal(0, run.Game.Scans);
 
         // Listing that stock frees the capacity again and earns a fresh scan.
         run.Ledger.MarkListed(1, true, 5);
         run.Tick();
         run.Tick();
         Assert.Equal(2, run.Game.Scans);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData(0)]
+    public void AutomaticShoppingNeedsConfirmedEmptySlots(int? freeSlots)
+    {
+        using var run = new Route();
+        run.Config.Current.EnableStockAutomation();
+        run.Repricing.LastKnownFreeSaleSlots = freeSlots;
+        run.Tick(100_000);
+        Assert.Equal(0, run.Game.Scans);
+        Assert.Empty(run.Game.Commands);
+    }
+
+    [Fact]
+    public void SoldSlotStartsShoppingBeforePeriodicScanIsDue()
+    {
+        using var run = new Route();
+        run.Config.Current.EnableStockAutomation();
+        run.Repricing.LastKnownFreeSaleSlots = 0;
+        run.Tick();
+        Assert.Equal(0, run.Game.Scans);
+        run.Repricing.LastKnownFreeSaleSlots = 1;
+        run.Tick();
+        Assert.Equal(ProcurementState.ScanningUniversalis, run.Controller.State);
+        Assert.Equal(2, run.Game.Scans); // Buying scope plus home resale data.
+    }
+
+    [Fact]
+    public void RetainerSafetyStopPreventsAutomaticShopping()
+    {
+        using var run = new Route();
+        run.Config.Current.EnableStockAutomation();
+        run.Repricing.Halt("Listing verification failed.");
+        run.Tick(100_000);
+        Assert.Equal(0, run.Game.Scans);
+    }
+
+    [Fact]
+    public void CompletedRouteCanRestockAgainAfterItsPurchasesAreListedAndSell()
+    {
+        using var run = new Route();
+        run.Config.Current.EnableStockAutomation();
+        run.Game.AutomaticWorldArrival = true;
+        run.Game.AutomaticPurchaseConfirmation = true;
+        run.Repricing.LastKnownFreeSaleSlots = 1;
+        run.Tick();
+        for (var tick = 0; tick < 200 && run.Controller.IsActive; tick++)
+            run.Tick(2);
+        Assert.Equal(ProcurementState.Completed, run.Controller.State);
+        Assert.Equal(1, run.Game.Purchases);
+        Assert.Equal(1, run.Repricing.Starts);
+
+        run.Ledger.MarkListed(1, true, 99);
+        run.Repricing.IsActive = false;
+        run.Repricing.LastKnownFreeSaleSlots = 0;
+        run.Tick(601);
+        Assert.Equal(2, run.Game.Scans);
+        run.Repricing.LastKnownFreeSaleSlots = 1;
+        run.Tick();
+        for (var tick = 0; tick < 200 && run.Controller.IsActive; tick++)
+            run.Tick(2);
+        Assert.Equal(2, run.Game.Purchases);
+        Assert.Equal(2, run.Repricing.Starts);
+        Assert.Equal("Siren", run.Game.World);
+    }
+
+    [Fact]
+    public void FailedReturnTripRetriesHomeWithoutBuyingAgain()
+    {
+        using var run = new Route();
+        run.Config.Current.EnableStockAutomation();
+        run.ReachPurchase();
+        run.Game.Inventory = 99;
+        for (var tick = 0; tick < 10 && run.Controller.State != ProcurementState.WaitingForHomeWorld; tick++)
+            run.Tick(2);
+        Assert.Equal(ProcurementState.WaitingForHomeWorld, run.Controller.State);
+        run.Tick(601); // The first home transfer times out on the visited world.
+        Assert.Equal(ProcurementState.Halted, run.Controller.State);
+        Assert.True(run.Controller.IsWaitingToReturnHome);
+        Assert.False(run.Controller.RequiresManualRestart);
+        run.Game.AutomaticWorldArrival = true;
+        run.Tick(601);
+        for (var tick = 0; tick < 100 && run.Controller.IsActive; tick++)
+            run.Tick(2);
+        Assert.Equal(ProcurementState.Completed, run.Controller.State);
+        Assert.Equal("Siren", run.Game.World);
+        Assert.Equal(1, run.Game.Purchases);
+        Assert.Equal(1, run.Repricing.Starts);
+    }
+
+    [Fact]
+    public void UnifiedStartResumesStoppedControllersAndChecksRetainersFirst()
+    {
+        using var run = new Route();
+        var bags = new BagListingController();
+        var stock = new StockAutomationController(run.Config, run.Repricing, run.Controller, bags);
+        run.Config.Current.ProcurementBudget = 123_000;
+        run.Config.Current.BagListingReservePerItem = 250;
+        stock.Stop();
+        Assert.False(run.Config.Current.KeepsRetainersStocked);
+        Assert.True(bags.IsSuspended);
+        Assert.False(stock.NeedsAttention);
+        Assert.True(stock.Start());
+        Assert.True(run.Config.Current.KeepsRetainersStocked);
+        Assert.False(run.Controller.RequiresManualRestart);
+        Assert.False(run.Repricing.RequiresManualRestart);
+        Assert.False(bags.IsSuspended);
+        Assert.Equal(1, run.Repricing.Starts);
+        run.Tick(601);
+        Assert.Equal(0, run.Game.Scans); // Repricing still owns the UI.
+        Assert.Equal(123_000u, run.Config.Current.ProcurementBudget);
+        Assert.Equal(250, run.Config.Current.BagListingReservePerItem);
+    }
+
+    [Fact]
+    public void UnifiedStopDisarmsRecurringWorkAndCannotRestartFromBellReopen()
+    {
+        using var run = new Route();
+        var bags = new BagListingController();
+        var stock = new StockAutomationController(run.Config, run.Repricing, run.Controller, bags);
+        Assert.True(stock.Start());
+        stock.Stop();
+        run.Game.BellOpen = false;
+        run.Tick();
+        run.Game.BellOpen = true;
+        run.Tick(100_000);
+        Assert.False(run.Config.Current.AutomationEnabled);
+        Assert.False(run.Config.Current.RepeatBellRuns);
+        Assert.False(run.Config.Current.AllowAutomaticPurchases);
+        Assert.False(run.Config.Current.AllowAutomaticListing);
+        Assert.False(run.Config.Current.AllowAutomaticWrites);
+        Assert.Equal(ProcurementState.Halted, run.Controller.State);
+        Assert.True(bags.IsSuspended);
+        Assert.Equal(0, run.Game.Scans);
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, true)]
+    public void UnifiedStartDoesNotArmWhenBellIsClosedOrAnotherOperationIsBusy(bool bellOpen, bool busy)
+    {
+        using var run = new Route();
+        var bags = new BagListingController { IsRetainerListOpen = bellOpen, IsBusy = busy };
+        var stock = new StockAutomationController(run.Config, run.Repricing, run.Controller, bags);
+        Assert.False(stock.Start());
+        Assert.NotNull(stock.StartIssue);
+        Assert.False(run.Config.Current.KeepsRetainersStocked);
+        Assert.Equal(0, run.Repricing.Starts);
+    }
+
+    [Fact]
+    public void MissingHomeResaleDataDoesNotStartTravel()
+    {
+        using var run = new Route();
+        run.Game.MissingHomeListings = true;
+        run.Controller.RunNow();
+        run.Tick();
+        Assert.Empty(run.Controller.Plan.Orders);
+        Assert.Empty(run.Game.Commands);
+    }
+
+    [Fact]
+    public void SubmissionExceptionNeverRetriesAnUncertainPurchase()
+    {
+        using var run = new Route();
+        run.Config.Current.EnableStockAutomation();
+        run.Game.ThrowAfterPurchaseSubmission = true;
+        run.ReachPurchase();
+        Assert.Equal(1, run.Game.Purchases);
+        Assert.True(run.Controller.RequiresManualRestart);
+        Assert.Contains("OUTCOME UNKNOWN", run.Controller.Status.Detail);
+        run.Game.BellOpen = true;
+        run.Tick(100_000);
+        Assert.Equal(1, run.Game.Purchases);
+        Assert.Equal(ProcurementState.Halted, run.Controller.State);
     }
 
     private sealed class Clock : TimeProvider
@@ -375,6 +552,7 @@ public sealed class ProcurementControllerTests
         public bool InteractionSucceeds { get; set; } = true;
         public bool AutomaticWorldArrival { get; set; }
         public bool AutomaticPurchaseConfirmation { get; set; }
+        public bool ThrowAfterPurchaseSubmission { get; set; }
         public bool ListingsReady { get; set; } = true;
         public bool CheapOversizedHomeStack { get; set; }
         public bool MissingHomeListings { get; set; }
@@ -407,8 +585,12 @@ public sealed class ProcurementControllerTests
             string dataCenter, CancellationToken cancellationToken)
         {
             Scans++;
+            if (dataCenter == "Siren" && MissingHomeListings)
+                return Task.FromResult<IReadOnlyList<ProcurementMarketItem>>([]);
             return Task.FromResult<IReadOnlyList<ProcurementMarketItem>>(
-                [new(1, "Popcorn", [new(1, 10, 20, "Cactuar", 1, 1_000, 99, true)],
+                [new(1, "Popcorn", dataCenter == "Siren"
+                        ? [new(1, 11, 21, "Siren", 2, 2_000, 99, true)]
+                        : [new(1, 10, 20, "Cactuar", 1, 1_000, 99, true)],
                     [new(2_000, 99, true, DateTimeOffset.UtcNow)])]);
         }
         public int GetInventoryCount(uint itemId, bool highQuality) => Inventory;
@@ -441,6 +623,7 @@ public sealed class ProcurementControllerTests
         public bool SubmitPurchase(LivePurchaseListing listing)
         {
             Purchases++;
+            if (ThrowAfterPurchaseSubmission) throw new InvalidOperationException("Submission response lost.");
             if (AutomaticPurchaseConfirmation) Inventory += (int)listing.Quantity;
             return true;
         }

@@ -147,6 +147,7 @@ public sealed class AutomationController : IDisposable
     public Func<bool>? IsStartBlocked { get; set; }
     public AutomationState State { get; private set; } = AutomationState.Idle;
     public int? LastKnownFreeSaleSlots { get; private set; }
+    public bool RequiresManualRestart { get; private set; }
     public bool IsActive => State is not (AutomationState.Idle or AutomationState.Completed or AutomationState.Halted or AutomationState.Faulted or AutomationState.WaitingForScheduledRun);
 
     public AutomationStatus Status => new(
@@ -195,6 +196,7 @@ public sealed class AutomationController : IDisposable
     {
         if (IsActive || IsStartBlocked?.Invoke() == true)
             return;
+        RequiresManualRestart = false;
         requestedFillOnlyRun = false;
         if (retainerListings.IsRetainerListOpen)
             BeginBellSession();
@@ -208,6 +210,7 @@ public sealed class AutomationController : IDisposable
     {
         if (IsActive || IsStartBlocked?.Invoke() == true)
             return;
+        RequiresManualRestart = false;
         requestedFillOnlyRun = true;
         if (retainerListings.IsRetainerListOpen)
             BeginBellSession();
@@ -217,6 +220,7 @@ public sealed class AutomationController : IDisposable
 
     public void Halt(string reason = "Stopped by user.")
     {
+        RequiresManualRestart = true;
         sessionCancellation?.Cancel();
         marketTask = null;
         currentMarket = null;
@@ -239,6 +243,7 @@ public sealed class AutomationController : IDisposable
         }
         catch (Exception ex)
         {
+            RequiresManualRestart = true;
             sessionCancellation?.Cancel();
             retainerListings.CancelBankDialog();
             State = AutomationState.Faulted;
@@ -407,7 +412,7 @@ public sealed class AutomationController : IDisposable
         if (!retainerListings.IsSellListOpen)
             handledSellList = false;
 
-        if (State is AutomationState.Halted or AutomationState.Faulted &&
+        if (!RequiresManualRestart && (State is AutomationState.Halted or AutomationState.Faulted) &&
             !retainerListings.IsRetainerListOpen && !retainerListings.IsRetainerMenuOpen &&
             !retainerListings.IsSellListOpen && !retainerListings.IsPriceEditorOpen &&
             !retainerListings.IsBankOpen)
@@ -419,6 +424,8 @@ public sealed class AutomationController : IDisposable
 
     private void TryAutoStart()
     {
+        if (RequiresManualRestart)
+            return;
         if (State is AutomationState.Halted or AutomationState.Faulted)
             return;
         if (!configuration.Current.AutomationEnabled)
@@ -1217,6 +1224,7 @@ public sealed class AutomationController : IDisposable
 
     private void AbortFreshAutoListing(string reason)
     {
+        RequiresManualRestart = true;
         retainerListings.CloseComparePrices();
         if (retainerListings.IsPriceEditorOpen)
             retainerListings.CancelPriceEditor();

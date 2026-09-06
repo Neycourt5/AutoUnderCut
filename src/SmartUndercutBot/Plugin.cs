@@ -32,6 +32,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly UniversalisService universalis;
     private readonly ProcurementController procurement;
     private readonly BagListingController bagListing;
+    private readonly StockAutomationController stockAutomation;
     private readonly DashboardWindow dashboard;
     private readonly GuidedProcurementWindow guidedProcurement;
     private readonly TaskbarAttentionService taskbarAttention;
@@ -89,9 +90,10 @@ public sealed class Plugin : IDalamudPlugin
             automationLog);
         automation.IsStartBlocked = () => procurement.IsActive || bagListing.IsBusy;
         procurement.IsStartBlocked = () => automation.IsActive || bagListing.IsBusy || bagListing.IsAutomaticRunDue;
+        stockAutomation = new StockAutomationController(configuration, automation, procurement, bagListing);
         dashboard = new DashboardWindow(
             configuration, automation, procurement, bagListing, universalis, procurementLedger, marketData,
-            automationLog);
+            automationLog, stockAutomation);
         guidedProcurement = new GuidedProcurementWindow(procurement);
         automation.RetainerInterfaceOpened += OnRetainerInterfaceOpened;
         procurement.GuidedReviewRequested += OnGuidedReviewRequested;
@@ -103,7 +105,7 @@ public sealed class Plugin : IDalamudPlugin
         PluginInterface.UiBuilder.OpenConfigUi += ToggleDashboard;
         CommandManager.AddHandler(CommandName, new CommandInfo(OnCommand)
         {
-            HelpMessage = "Open Smart Undercutter. Use /sub guided for a manual deal route or /sub stop to abort.",
+            HelpMessage = "Open Smart Undercutter. /sub start keeps retainers stocked; /sub stop stops all automation; /sub guided opens a manual deal route.",
         });
         PluginLog.Information("Smart Undercutter initialized.");
     }
@@ -112,9 +114,12 @@ public sealed class Plugin : IDalamudPlugin
     {
         if (arguments.Trim().Equals("stop", StringComparison.OrdinalIgnoreCase))
         {
-            automation.Halt("Stopped with /sub stop.");
-            procurement.Halt("Procurement stopped with /sub stop.");
-            bagListing.Halt("Bag listing stopped with /sub stop.");
+            stockAutomation.Stop("Stopped with /sub stop. Start again from the dashboard when ready.");
+        }
+        else if (arguments.Trim().Equals("start", StringComparison.OrdinalIgnoreCase))
+        {
+            stockAutomation.Start();
+            dashboard.IsOpen = true;
         }
         else if (arguments.Trim().Equals("guided", StringComparison.OrdinalIgnoreCase))
             procurement.RunGuidedNow();

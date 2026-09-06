@@ -59,9 +59,20 @@ namespace SmartUndercutBot.Automation
     {
         public int? LastKnownFreeSaleSlots { get; set; } = 5;
         public bool IsActive { get; set; }
+        public bool RequiresManualRestart { get; set; }
         public int Starts { get; private set; }
-        public void Halt(string reason) => IsActive = false;
-        public void StartNow() { Starts++; IsActive = true; }
+        public void Halt(string reason) { IsActive = false; RequiresManualRestart = true; }
+        public void StartNow() { Starts++; IsActive = true; RequiresManualRestart = false; }
+    }
+
+    public sealed class BagListingController
+    {
+        public bool IsBusy { get; set; }
+        public bool IsRetainerListOpen { get; set; } = true;
+        public bool IsSuspended { get; private set; }
+        public int Resumes { get; private set; }
+        public void ResumeAutomatic() { IsSuspended = false; Resumes++; }
+        public void Halt(string reason) { IsBusy = false; IsSuspended = true; }
     }
 }
 

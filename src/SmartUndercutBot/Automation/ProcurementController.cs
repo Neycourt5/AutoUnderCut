@@ -97,6 +97,8 @@ public sealed class ProcurementController : IDisposable
     private ProcurementRunMode runAfterScan;
     private ProcurementRunMode activeRunMode;
     private string homeWorld = string.Empty;
+    private string planningHomeWorld = string.Empty;
+    private bool retryReturnHome;
     private string detail = "Procurement is idle.";
     private uint gilSpent;
     private int localTravelAttempts;
@@ -155,6 +157,26 @@ public sealed class ProcurementController : IDisposable
     public ProcurementPlan Plan { get; private set; } = ProcurementPlan.Empty;
     public event Action? GuidedReviewRequested;
     public Func<bool>? IsStartBlocked { get; set; }
+    public bool RequiresManualRestart => (State is ProcurementState.Halted or ProcurementState.Faulted) &&
+        resumeStoppedRouteAt == DateTimeOffset.MaxValue;
+    public bool IsWaitingToReturnHome => retryReturnHome && !RequiresManualRestart;
+    public string? TravelReadinessIssue => !lifestream.IsAvailable
+        ? "Enable Lifestream to travel and return home."
+        : lifestream.IsBusy ? "Wait for the current Lifestream journey to finish."
+        : !vnavmesh.IsReady ? "Enable vnavmesh and wait for its navigation mesh to load." : null;
+
+    public void ResumeAutomatic()
+    {
+        if (IsActive)
+            return;
+        resumeStoppedRouteAt = DateTimeOffset.MaxValue;
+        retryReturnHome = false;
+        nextAutomaticScan = timeProvider.GetUtcNow();
+        lastScannedFreeSaleSlots = -1;
+        Plan = ProcurementPlan.Empty;
+        State = ProcurementState.Idle;
+        detail = "Waiting for the retainer check and bag refill before shopping.";
+    }
     public bool IsActive => State is not (ProcurementState.Idle or ProcurementState.PlanReady or ProcurementState.Completed or ProcurementState.Halted or ProcurementState.Faulted);
     public bool IsGuidedReviewPending => State == ProcurementState.AwaitingManualReview;
     public string CurrentGuidedWorld => IsGuidedReviewPending ? WorldName : string.Empty;
@@ -164,8 +186,9 @@ public sealed class ProcurementController : IDisposable
         IsGuidedReviewPending && worldIndex < worldGroups.Count ? worldGroups[worldIndex].ToArray() : [];
     public ProcurementStatus Status => new(
         State, detail, confirmedPurchases, Plan.Orders.Count, gilSpent,
-        configuration.Current.AutomaticProcurementEnabled && State is not (ProcurementState.Halted or ProcurementState.Faulted)
-            ? configuration.Current.LiveWorldStockHuntEnabled ? nextLiveStockHunt : nextAutomaticScan : null);
+        configuration.Current.AutomaticProcurementEnabled && !RequiresManualRestart
+            ? State is ProcurementState.Halted or ProcurementState.Faulted ? resumeStoppedRouteAt
+                : configuration.Current.LiveWorldStockHuntEnabled ? nextLiveStockHunt : nextAutomaticScan : null);
 
     public void ScanNow() => StartScan(ProcurementRunMode.None);
 
@@ -208,6 +231,8 @@ public sealed class ProcurementController : IDisposable
 
     private void StopRoute(string reason, DateTimeOffset resumeAt)
     {
+        retryReturnHome = resumeAt != DateTimeOffset.MaxValue && activeRunMode != ProcurementRunMode.None &&
+            !string.IsNullOrWhiteSpace(homeWorld) && !retainerListings.IsRetainerListOpen;
         cancellation?.Cancel();
         scanTask = null;
         vnavmesh.Stop();
@@ -238,12 +263,18 @@ public sealed class ProcurementController : IDisposable
             HaltForRetry("No procurement items are configured. Add the favorite defaults in the Procurement tab.");
             return;
         }
+        if (!TryGetHomeWorld(out planningHomeWorld))
+        {
+            HaltForRetry("Wait for the character's home world to load before searching for resale stock.");
+            return;
+        }
 
         cancellation?.Cancel();
         cancellation?.Dispose();
         cancellation = new CancellationTokenSource();
         runAfterScan = mode;
-        scanTask = universalis.ScanAsync(configuration.Current.ProcurementRules, dataCenter, cancellation.Token);
+        scanTask = ScanWithHomeResaleAsync(configuration.Current.ProcurementRules.ToArray(),
+            dataCenter, planningHomeWorld, cancellation.Token);
         deadline = timeProvider.GetUtcNow().AddSeconds(90);
         Plan = ProcurementPlan.Empty;
         confirmedPurchases = 0;
@@ -254,6 +285,27 @@ public sealed class ProcurementController : IDisposable
         log.Add(AutomationLogLevel.Information, detail);
     }
 
+    private async Task<IReadOnlyList<ProcurementMarketItem>> ScanWithHomeResaleAsync(
+        IReadOnlyList<ProcurementRule> rules, string scope, string resaleWorld, CancellationToken token)
+    {
+        var regional = universalis.ScanAsync(rules, scope, token);
+        var local = string.Equals(scope, resaleWorld, StringComparison.OrdinalIgnoreCase)
+            ? regional : universalis.ScanAsync(rules, resaleWorld, token);
+        await Task.WhenAll(regional, local).ConfigureAwait(false);
+        var homeMarkets = local.Result.ToDictionary(x => x.ItemId);
+        return regional.Result.Select(market =>
+        {
+            homeMarkets.TryGetValue(market.ItemId, out var home);
+            return market with
+            {
+                RecentSales = home?.RecentSales ?? [],
+                Listings = market.Listings
+                    .Where(x => !string.Equals(x.WorldName, resaleWorld, StringComparison.OrdinalIgnoreCase))
+                    .Concat(home?.Listings ?? []).Distinct().ToArray(),
+            };
+        }).ToArray();
+    }
+
     private void OnFrameworkUpdate(IFramework _)
     {
         try
@@ -262,6 +314,15 @@ public sealed class ProcurementController : IDisposable
         }
         catch (Exception ex)
         {
+            // Never restart buying after an exception while a submitted purchase
+            // is awaiting confirmation. Its outcome must be checked by the user.
+            if (State == ProcurementState.WaitingForPurchase)
+            {
+                Halt($"PURCHASE OUTCOME UNKNOWN: {ex.Message}. Check inventory before restarting.");
+                return;
+            }
+            retryReturnHome = activeRunMode != ProcurementRunMode.None &&
+                !string.IsNullOrWhiteSpace(homeWorld) && !retainerListings.IsRetainerListOpen;
             cancellation?.Cancel();
             scanTask = null;
             if (activeRunMode != ProcurementRunMode.None)
@@ -424,6 +485,10 @@ public sealed class ProcurementController : IDisposable
             return;
         }
         var config = configuration.Current;
+        var hasHomeResaleData = scanTask.Result.Any(x => x.RecentSales.Count > 0 &&
+            x.Listings.Any(y => string.Equals(y.WorldName, planningHomeWorld, StringComparison.OrdinalIgnoreCase) &&
+                                y.PricePerUnit > 0 && y.Quantity > 0 &&
+                                !retainerListings.OwnedRetainerIds.Contains(y.RetainerId)));
         var freeSaleSlots = repricing.LastKnownFreeSaleSlots ?? config.ProcurementTargetSaleSlots;
         var plannedSaleSlots = PlannedSaleSlots(freeSaleSlots);
         var freeInventorySlots = Math.Max(0, (int)market.FreeInventorySlots - config.ProcurementInventoryReserve);
@@ -434,13 +499,17 @@ public sealed class ProcurementController : IDisposable
             plannedSaleSlots,
             freeInventorySlots,
             config.ProcurementMinimumRoiPercent,
-            config.ProcurementMinimumProfitPerUnit));
+            config.ProcurementMinimumProfitPerUnit,
+            HomeWorld: planningHomeWorld,
+            OwnedRetainerIds: retainerListings.OwnedRetainerIds));
         lastScannedFreeSaleSlots = plannedSaleSlots;
         scanTask = null;
         nextAutomaticScan = timeProvider.GetUtcNow().AddMinutes(config.ProcurementIntervalMinutes);
         State = ProcurementState.PlanReady;
         detail = Plan.Orders.Count == 0
-            ? "No deals passed the volume, margin, budget, bag-slot, and sale-slot guards."
+            ? !hasHomeResaleData
+                ? $"No usable sale history and competing prices were found for {planningHomeWorld}. Waiting for home-world resale data before buying."
+                : "No deals passed the volume, margin, budget, bag-slot, and sale-slot guards."
             : $"Plan ready: {Plan.Orders.Count} stack(s), {Plan.TotalCost:N0} gil, about {Plan.ExpectedProfit:N0} gil expected profit.";
         log.Add(AutomationLogLevel.Information, detail);
         if (runAfterScan != ProcurementRunMode.None && Plan.Orders.Count > 0)
@@ -969,19 +1038,21 @@ public sealed class ProcurementController : IDisposable
         }
         inventoryBefore = market.GetInventoryCount(live.ItemId, live.IsHighQuality);
         currentLiveListing = live;
+        // Once submission begins, an exception cannot prove that the game did
+        // not receive the request. Enter verification before crossing that boundary.
+        Wait(ProcurementState.WaitingForPurchase, $"Waiting for {currentOrder.ItemName} purchase confirmation.", 10);
         if (!market.SubmitPurchase(live))
         {
             SkipCurrentOrder($"SKIPPED BUY {currentOrder.ItemName}: the live purchase request was rejected.");
             return;
         }
-        Wait(ProcurementState.WaitingForPurchase, $"Waiting for {currentOrder.ItemName} purchase confirmation.", 10);
     }
 
     private void PollPurchase()
     {
         if (currentOrder is null || currentLiveListing is null)
         {
-            SkipCurrentOrder("Purchase state was lost; skipping the order.");
+            Halt("PURCHASE OUTCOME UNKNOWN: purchase state was lost. Check inventory before restarting.");
             return;
         }
         var count = market.GetInventoryCount(currentLiveListing.ItemId, currentLiveListing.IsHighQuality);
@@ -1244,7 +1315,13 @@ public sealed class ProcurementController : IDisposable
     {
         if (IsStartBlocked?.Invoke() == true || !configuration.Current.AllowAutomaticPurchases ||
             !configuration.Current.AutomaticProcurementEnabled || !retainerListings.IsRetainerListOpen ||
-            repricing.IsActive)
+            repricing.IsActive || repricing.RequiresManualRestart || !playerState.IsLoaded)
+            return;
+
+        // Never buy against the fallback UI target before an actual retainer pass.
+        // Pending inventory already reserves sale capacity and must be listed first.
+        if (repricing.LastKnownFreeSaleSlots is not > 0 || AvailablePurchaseSlots() <= 0 ||
+            market.FreeInventorySlots <= configuration.Current.ProcurementInventoryReserve)
             return;
 
         if (configuration.Current.LiveWorldStockHuntEnabled)
@@ -1417,7 +1494,19 @@ public sealed class ProcurementController : IDisposable
     private void TryResumeAfterStop()
     {
         if (timeProvider.GetUtcNow() < resumeStoppedRouteAt || lifestream.IsBusy ||
-            !playerState.IsLoaded || !retainerListings.IsRetainerListOpen)
+            !playerState.IsLoaded)
+            return;
+        if (retryReturnHome && configuration.Current.AutomaticProcurementEnabled)
+        {
+            if (IsStartBlocked?.Invoke() == true)
+                return;
+            retryReturnHome = false;
+            resumeStoppedRouteAt = DateTimeOffset.MaxValue;
+            activeRunMode = ProcurementRunMode.AutomaticPurchase;
+            ReturnHome();
+            return;
+        }
+        if (!retainerListings.IsRetainerListOpen)
             return;
         resumeStoppedRouteAt = DateTimeOffset.MaxValue;
         State = ProcurementState.Idle;
