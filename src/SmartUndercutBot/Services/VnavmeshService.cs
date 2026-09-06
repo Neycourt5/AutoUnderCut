@@ -16,19 +16,23 @@ public sealed class VnavmeshService : IVnavmeshService
 {
     private readonly ICallGateSubscriber<bool> isReady;
     private readonly ICallGateSubscriber<bool> isRunning;
+    private readonly ICallGateSubscriber<bool> pathfindInProgress;
     private readonly ICallGateSubscriber<Vector3, bool, float, bool> moveCloseTo;
-    private readonly ICallGateSubscriber<bool> stop;
+    private readonly ICallGateSubscriber<object> stop;
+    private readonly ICallGateSubscriber<object> cancelPathfind;
 
     public VnavmeshService(IDalamudPluginInterface pluginInterface)
     {
-        isReady = pluginInterface.GetIpcSubscriber<bool>("Nav.IsReady");
-        isRunning = pluginInterface.GetIpcSubscriber<bool>("Path.IsRunning");
-        moveCloseTo = pluginInterface.GetIpcSubscriber<Vector3, bool, float, bool>("SimpleMove.PathfindAndMoveCloseTo");
-        stop = pluginInterface.GetIpcSubscriber<bool>("Path.Stop");
+        isReady = pluginInterface.GetIpcSubscriber<bool>("vnavmesh.Nav.IsReady");
+        isRunning = pluginInterface.GetIpcSubscriber<bool>("vnavmesh.Path.IsRunning");
+        pathfindInProgress = pluginInterface.GetIpcSubscriber<bool>("vnavmesh.SimpleMove.PathfindInProgress");
+        moveCloseTo = pluginInterface.GetIpcSubscriber<Vector3, bool, float, bool>("vnavmesh.SimpleMove.PathfindAndMoveCloseTo");
+        stop = pluginInterface.GetIpcSubscriber<object>("vnavmesh.Path.Stop");
+        cancelPathfind = pluginInterface.GetIpcSubscriber<object>("vnavmesh.Nav.PathfindCancelAll");
     }
 
     public bool IsReady => TryInvoke(isReady);
-    public bool IsRunning => TryInvoke(isRunning);
+    public bool IsRunning => TryInvoke(isRunning) || TryInvoke(pathfindInProgress);
 
     public bool MoveTo(Vector3 destination, float tolerance = 3f)
     {
@@ -46,6 +50,10 @@ public sealed class VnavmeshService : IVnavmeshService
     {
         try
         {
+            // Stopping only the current path lets a pending async path start
+            // moving the character again after the route was cancelled.
+            if (TryInvoke(pathfindInProgress) && cancelPathfind.HasAction)
+                cancelPathfind.InvokeAction();
             if (stop.HasAction)
                 stop.InvokeAction();
         }

@@ -180,6 +180,7 @@ public sealed class DashboardWindow : Window
         {
             automation.Halt();
             procurement.Halt();
+            bagListing.Halt();
         }
 
         ImGui.Spacing();
@@ -550,6 +551,7 @@ public sealed class DashboardWindow : Window
         ImGui.SameLine();
         if (ImGui.Button("Stop procurement"))
             procurement.Halt();
+        ImGui.TextWrapped("The live all-world hunt scans prices on every world first, then makes a separate buying pass. The guided route waits for you to buy manually.");
 
         ImGui.Separator();
         var config = configuration.Current;

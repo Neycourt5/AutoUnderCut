@@ -21,7 +21,8 @@ public sealed record ProcurementMarketListing(
     uint WorldId,
     uint PricePerUnit,
     uint Quantity,
-    bool IsHighQuality);
+    bool IsHighQuality,
+    string SourceListingId = "");
 
 public sealed record ProcurementSale(uint PricePerUnit, uint Quantity, bool IsHighQuality, DateTimeOffset SoldAt);
 

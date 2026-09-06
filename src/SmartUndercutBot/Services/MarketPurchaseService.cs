@@ -12,38 +12,6 @@ using SmartUndercutBot.Core.Models;
 
 namespace SmartUndercutBot.Services;
 
-public sealed record LivePurchaseListing(
-    int Index,
-    uint ItemId,
-    ulong ListingId,
-    ulong RetainerId,
-    uint PricePerUnit,
-    uint Quantity,
-    bool IsHighQuality,
-    uint TotalTax);
-
-public interface IMarketPurchaseService
-{
-    bool IsMarketBoardOpen { get; }
-    uint FreeInventorySlots { get; }
-    uint Gil { get; }
-    int GetInventoryCount(uint itemId, bool highQuality);
-    Vector3? FindNearest(string objectName);
-    float DistanceTo(Vector3 position);
-    bool InteractNearest(string objectName, float maximumDistance = 5f);
-    bool RequestListings(uint itemId);
-    bool AreListingsReady(uint itemId);
-    void ResetListingRequest();
-    IReadOnlyList<LivePurchaseListing> ReadLiveListings(uint itemId);
-    bool TrySelectLiveListing(
-        ProcurementOrder expected,
-        IReadOnlySet<ulong> excludedRetainerIds,
-        out LivePurchaseListing? listing);
-    bool SubmitPurchase(LivePurchaseListing listing);
-    void CloseMarketBoard();
-    void CloseRetainerList();
-}
-
 public sealed unsafe class MarketPurchaseService : IMarketPurchaseService
 {
     private readonly IObjectTable objectTable;
@@ -52,6 +20,7 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService
     private readonly AutomationLog log;
     private uint visibleSearchItemId;
     private bool visibleSearchResultSelected;
+    private bool visibleListingsReported;
     private DateTimeOffset nextVisibleSelectionAt;
     private DateTimeOffset nextSearchDiagnosticAt;
 
@@ -130,7 +99,9 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService
 
         ResetListingRequest();
         addon->SearchTextInput->SetText(item.Name.ToString());
-        addon->RunSearch(false);
+        // Procurement searches an exact configured item. A category left over
+        // from manual browsing must not hide it from the results.
+        addon->RunSearch(true);
         visibleSearchItemId = itemId;
         visibleSearchResultSelected = false;
         log.Add(AutomationLogLevel.Debug, $"MARKET BUY search typed '{item.Name}' ({itemId}).");
@@ -146,8 +117,18 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService
         var resultAddon = gameGui.GetAddonByName<AtkUnitBase>("ItemSearchResult");
         if (resultAddon != null && resultAddon->IsVisible)
         {
-            if (proxy->SearchItemId == itemId)
-                return !proxy->WaitingForListings;
+            if (proxy->SearchItemId == itemId && visibleSearchResultSelected)
+            {
+                if (proxy->WaitingForListings)
+                    return false;
+                if (!visibleListingsReported)
+                {
+                    visibleListingsReported = true;
+                    log.Add(AutomationLogLevel.Information,
+                        $"MARKET BUY live results ready for item {itemId}: {proxy->ListingCount} listing(s).");
+                }
+                return true;
+            }
 
             // Never accept data from a previously opened item. Wait for an
             // in-flight request, or close the stale result so the exact search
@@ -155,6 +136,7 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService
             if (proxy->WaitingForListings)
                 return false;
             resultAddon->Close(true);
+            return false;
         }
 
         if (proxy->WaitingForListings)
@@ -163,6 +145,7 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService
         if (visibleSearchResultSelected && DateTimeOffset.UtcNow < nextVisibleSelectionAt)
             return false;
         visibleSearchResultSelected = false;
+        visibleListingsReported = false;
 
         var addon = gameGui.GetAddonByName<AddonItemSearch>("ItemSearch");
         var agent = AgentItemSearch.Instance();
@@ -215,6 +198,7 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService
         CloseAddon("ItemSearchResult");
         visibleSearchItemId = 0;
         visibleSearchResultSelected = false;
+        visibleListingsReported = false;
         nextVisibleSelectionAt = default;
         nextSearchDiagnosticAt = default;
     }
@@ -283,7 +267,17 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService
                 row->Quantity != listing.Quantity || row->IsHqItem != listing.IsHighQuality ||
                 row->TotalTax != listing.TotalTax)
                 return false;
-            return proxy->SetLastPurchasedItem(row) && proxy->SendPurchaseRequestPacket();
+            if (!proxy->SetLastPurchasedItem(row))
+            {
+                log.Add(AutomationLogLevel.Warning, $"MARKET BUY could not prepare listing {listing.ListingId} for purchase.");
+                return false;
+            }
+            var sent = proxy->SendPurchaseRequestPacket();
+            log.Add(sent ? AutomationLogLevel.Information : AutomationLogLevel.Warning,
+                $"MARKET BUY request {(sent ? "sent" : "rejected locally")} for item {listing.ItemId}, " +
+                $"listing {listing.ListingId}, quantity {listing.Quantity}, unit price {listing.PricePerUnit:N0}. " +
+                (sent ? "Waiting for inventory confirmation." : "No purchase confirmation received."));
+            return sent;
         }
     }
 

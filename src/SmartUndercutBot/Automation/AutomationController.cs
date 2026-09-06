@@ -144,6 +144,7 @@ public sealed class AutomationController : IDisposable
     }
 
     public event Action? RetainerInterfaceOpened;
+    public Func<bool>? IsStartBlocked { get; set; }
     public AutomationState State { get; private set; } = AutomationState.Idle;
     public int? LastKnownFreeSaleSlots { get; private set; }
     public bool IsActive => State is not (AutomationState.Idle or AutomationState.Completed or AutomationState.Halted or AutomationState.Faulted or AutomationState.WaitingForScheduledRun);
@@ -192,6 +193,8 @@ public sealed class AutomationController : IDisposable
 
     public void StartNow()
     {
+        if (IsActive || IsStartBlocked?.Invoke() == true)
+            return;
         requestedFillOnlyRun = false;
         if (retainerListings.IsRetainerListOpen)
             BeginBellSession();
@@ -203,6 +206,8 @@ public sealed class AutomationController : IDisposable
 
     public void StartBagListingNow()
     {
+        if (IsActive || IsStartBlocked?.Invoke() == true)
+            return;
         requestedFillOnlyRun = true;
         if (retainerListings.IsRetainerListOpen)
             BeginBellSession();
@@ -244,6 +249,8 @@ public sealed class AutomationController : IDisposable
 
     private void Tick()
     {
+        if (IsStartBlocked?.Invoke() == true)
+            return;
         TrackInterfaceLifecycle();
 
         if (State is AutomationState.Idle or AutomationState.Completed or AutomationState.Halted or AutomationState.Faulted)
@@ -635,14 +642,14 @@ public sealed class AutomationController : IDisposable
                 return;
             }
             log.Add(AutomationLogLevel.Error,
-                $"AUTO-LIST FAILED {pendingAutoListing.ItemName} x{pendingAutoListing.Quantity}; continuing without recording it.");
+                $"AUTO-LIST OUTCOME UNKNOWN {pendingAutoListing.ItemName} x{pendingAutoListing.Quantity}; stopping further listing attempts.");
             pendingAutoListing = null;
             if (fillOnlyRun)
             {
                 AbortFreshAutoListing("The game did not verify the newly created retainer listing.");
                 return;
             }
-            Transition(AutomationState.ReadingListings, "Automatic listing verification failed; reading listings.");
+            Halt("Automatic listing outcome is unknown; stopped to prevent listing the same queued stock twice.");
             return;
         }
 
@@ -1261,12 +1268,12 @@ public sealed class AutomationController : IDisposable
                 $"No gil to collect from {retainerListings.ActiveRetainerName}; dismissing retainer.");
             return;
         }
-        if (!retainerListings.SelectEntrustGil())
+        if (!retainerListings.SelectEntrustGil(out var selectionMessage))
         {
-            SkipGilCollection("Could not find the localized 'Entrust or withdraw gil' retainer-menu entry.");
+            SkipGilCollection(selectionMessage);
             return;
         }
-        WaitFor(AutomationState.WaitingForBank, "Waiting for the retainer gil window.");
+        WaitFor(AutomationState.WaitingForBank, $"{selectionMessage} Waiting for the retainer gil window.");
     }
 
     private void PrepareGilWithdrawal()

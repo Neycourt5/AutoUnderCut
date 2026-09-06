@@ -11,4 +11,13 @@
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.1" />
     <ProjectReference Include="..\..\src\SmartUndercutBot.Core\SmartUndercutBot.Core.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- Exercise the production state machine without loading native game code. -->
+    <Compile Include="../../src/SmartUndercutBot/Automation/ProcurementController.cs" Link="Production/ProcurementController.cs" />
+    <Compile Include="../../src/SmartUndercutBot/Configuration.cs" Link="Production/Configuration.cs" />
+    <Compile Include="../../src/SmartUndercutBot/Services/ProcurementLedger.cs" Link="Production/ProcurementLedger.cs" />
+    <Compile Include="../../src/SmartUndercutBot/Services/IMarketPurchaseService.cs" Link="Production/IMarketPurchaseService.cs" />
+    <Compile Include="../../src/SmartUndercutBot/Services/VnavmeshService.cs" Link="Production/VnavmeshService.cs" />
+    <Compile Include="../../src/SmartUndercutBot/Services/LifestreamService.cs" Link="Production/LifestreamService.cs" />
+  </ItemGroup>
 </Project>

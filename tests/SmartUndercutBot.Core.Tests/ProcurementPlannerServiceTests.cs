@@ -9,6 +9,31 @@ public sealed class ProcurementPlannerServiceTests
     private readonly ProcurementPlannerService planner = new();
 
     [Fact]
+    public void OversizedHomeStacksStillSetTheResaleFloor()
+    {
+        var market = new ProcurementMarketItem(1, "Popcorn",
+            [new(1, 10, 20, "Siren", 1, 900, 999, true),
+             new(1, 11, 21, "Siren", 1, 2_000, 99, true),
+             new(1, 12, 22, "Cactuar", 2, 1_000, 99, true)], []);
+        var rule = new ProcurementRule { ItemId = 1, RequireHighQuality = true };
+        var plan = planner.BuildLiveMarketPlan(new([market], [rule], "Siren", new HashSet<ulong>(),
+            500_000, 5, 5, 20m, 100));
+        Assert.Empty(plan.Orders);
+    }
+
+    [Fact]
+    public void LivePlanRejectsWrongItemAndZeroQuantityAnchors()
+    {
+        var market = new ProcurementMarketItem(1, "Popcorn",
+            [new(2, 10, 20, "Siren", 1, 2_000, 99, true),
+             new(1, 11, 21, "Siren", 1, 2_000, 0, true),
+             new(1, 12, 22, "Cactuar", 2, 1_000, 99, true)], []);
+        var rule = new ProcurementRule { ItemId = 1, RequireHighQuality = true };
+        Assert.Empty(planner.BuildLiveMarketPlan(new([market], [rule], "Siren", new HashSet<ulong>(),
+            500_000, 5, 5, 20m, 100)).Orders);
+    }
+
+    [Fact]
     public void BuildsProfitablePlanWithinBudgetAndSlots()
     {
         var now = DateTimeOffset.UtcNow;

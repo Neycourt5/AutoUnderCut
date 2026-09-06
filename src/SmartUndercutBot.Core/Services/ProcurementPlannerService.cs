@@ -58,7 +58,8 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
             foreach (var listing in market.Listings)
             {
                 if (listing.ItemId != market.ItemId || listing.PricePerUnit == 0 || listing.PricePerUnit > ceiling ||
-                    listing.Quantity == 0 || listing.IsHighQuality && !rule.AllowHighQuality ||
+                    string.IsNullOrWhiteSpace(listing.WorldName) ||
+                    listing.Quantity == 0 || listing.IsHighQuality && !rule.AllowHighQuality && !rule.RequireHighQuality ||
                     rule.RequireHighQuality && !listing.IsHighQuality ||
                     listing.Quantity > Math.Max(1, rule.TargetStackSize))
                     continue;
@@ -144,6 +145,7 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
             // the cheapest live, in-game listing on the home world, excluding the
             // player's own retainers so a self-listing cannot manufacture a deal.
             var targetSalePrice = market.Listings
+                .Where(x => x.ItemId == market.ItemId && x.Quantity > 0)
                 .Where(x => string.Equals(x.WorldName, request.HomeWorld, StringComparison.OrdinalIgnoreCase))
                 .Where(QualityMatches)
                 .Where(x => x.PricePerUnit > 0 && !request.OwnedRetainerIds.Contains(x.RetainerId))
@@ -170,7 +172,8 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
 
             foreach (var listing in market.Listings)
             {
-                if (!QualityMatches(listing) || request.OwnedRetainerIds.Contains(listing.RetainerId) ||
+                if (listing.ItemId != market.ItemId || string.IsNullOrWhiteSpace(listing.WorldName) ||
+                    !QualityMatches(listing) || request.OwnedRetainerIds.Contains(listing.RetainerId) ||
                     listing.PricePerUnit == 0 || listing.PricePerUnit > ceiling || listing.Quantity == 0 ||
                     listing.Quantity > Math.Max(1, rule.TargetStackSize))
                     continue;

@@ -3,6 +3,7 @@ using System.Globalization;
 using System.Text.RegularExpressions;
 using Dalamud.Memory;
 using Dalamud.Plugin.Services;
+using Dalamud.Utility;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.UI;
 using FFXIVClientStructs.FFXIV.Component.GUI;
@@ -62,7 +63,7 @@ public interface IRetainerListingService
     void CancelPriceEditor();
     PriceUpdateResult CommitPrice(RetainerListing expected, uint targetPrice);
     bool CloseSellList();
-    bool SelectEntrustGil();
+    bool SelectEntrustGil(out string message);
     bool SetWithdrawAllRetainerGil(out uint amount, out string message);
     bool ConfirmGilWithdrawal();
     void CancelBankDialog();
@@ -436,31 +437,43 @@ public sealed unsafe class RetainerListingService : IRetainerListingService
         return true;
     }
 
-    public bool SelectEntrustGil()
+    public bool SelectEntrustGil(out string message)
     {
+        message = string.Empty;
         var addon = gameGui.GetAddonByName<AddonSelectString>("SelectString");
         if (addon == null || !addon->AtkUnitBase.IsVisible ||
             addon->PopupMenu.PopupMenu.EntryNames == null)
+        {
+            message = "The active retainer menu is unavailable.";
             return false;
+        }
 
         var expected = dataManager.GetExcelSheet<Addon>().TryGetRow(2379, out var row)
-            ? row.Text.ToString().Trim()
+            ? row.Text.ToDalamudString().TextValue.Trim()
             : string.Empty;
-        if (string.IsNullOrWhiteSpace(expected))
-            return false;
 
         var count = Math.Clamp(addon->PopupMenu.PopupMenu.EntryCount, 0, 32);
+        var entries = new List<string>(count);
         for (var index = 0; index < count; index++)
         {
             var pointer = addon->PopupMenu.PopupMenu.EntryNames[index].Value;
-            if (pointer == null)
-                continue;
-            var text = MemoryHelper.ReadSeStringNullTerminated((nint)pointer).TextValue.Trim();
-            if (!string.Equals(text, expected, StringComparison.Ordinal))
-                continue;
-            FireCallback(&addon->AtkUnitBase, index);
+            entries.Add(pointer == null
+                ? string.Empty
+                : MemoryHelper.ReadSeStringNullTerminated((nint)pointer).TextValue.Trim());
+        }
+
+        var match = RetainerMenuMatcher.FindEntrustGilEntry(entries, expected);
+        if (match >= 0)
+        {
+            FireCallback(&addon->AtkUnitBase, match);
+            message = $"Selected retainer menu row {match + 1}: {entries[match]}";
             return true;
         }
+
+        var choices = entries.Count == 0
+            ? "no visible choices"
+            : string.Join(" | ", entries.Select((entry, index) => $"{index + 1}:{entry}"));
+        message = $"Could not match localized gil entry '{expected}'. Menu choices: {choices}.";
         return false;
     }
 

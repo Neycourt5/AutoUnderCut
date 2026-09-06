@@ -21,7 +21,7 @@ Smart Undercutter is a Dalamud SDK 15 plugin for guarded retainer-market reprici
 - Consolidates inventory stacks before bag filling, skips retainers already at 20/20 during fill-only runs, validates the exact visible safety-seeded row before every write, and returns to the main bell list before idling.
 - Builds diversified purchase plans from Universalis sale history and current listings, constrained by gil, bag slots, retainer sale slots, weekly sales, ROI, and per-item limits.
 - Scans all North American worlds plus Oceania by default and merges them into one travel-ready procurement plan.
-- Uses Lifestream and vnavmesh to visit same-data-center worlds, then revalidates every candidate against the live in-game listing before submitting a purchase.
+- Uses Lifestream for world and cross-data-center travel and vnavmesh for local approaches, then revalidates every candidate against the live in-game listing before submitting a purchase.
 - Offers a guided deal route that prioritizes Universalis opportunities by world, travels to each market board, flashes the FFXIV taskbar icon, shows expected prices and guarded ceilings, and waits for a manual Done / Next command.
 - Returns home, opens a summoning bell, distributes purchased stacks into open retainer slots, and feeds them through the normal live repricing pass.
 - The curated procurement set is HQ Grade 4 gemdraughts plus HQ Caramel Popcorn; legacy Grade 3 gemdraught and food defaults are removed during migration.
@@ -33,7 +33,7 @@ Dry-run mode remains available. Repricing writes, purchases, automatic listing, 
 
 - `src/SmartUndercutBot.Core`: pure pricing, procurement, and portfolio valuation models and services.
 - `src/SmartUndercutBot`: Dalamud plugin, automation controller, live market-data service, game UI adapter, and dashboard.
-- `tests/SmartUndercutBot.Core.Tests`: pricing, procurement, and portfolio valuation behavior tests.
+- `tests/SmartUndercutBot.Core.Tests`: pricing, procurement, portfolio valuation, Universalis parsing, and automation regression tests. The route tests run the production controller with simulated game services and a controllable clock.
 
 ## Build
 
@@ -62,5 +62,11 @@ Use `/sub guided` to start a fresh guided Universalis deal route, or launch it f
 Game structures and UI callbacks can change after an FFXIV patch. Rebuild against the current Dalamud release after patches and test in dry-run mode first. Do not interact with the retainer UI while a run is active. Use `/sub stop` or the dashboard's Emergency Stop button to abort.
 
 The procurement workflow expects Lifestream and vnavmesh to be installed. Its default Lifestream shortcut is `/li mb`; this can be changed in the Procurement tab. Automatic procurement only starts while the character is idle at an open summoning-bell retainer list. A completed retainer pass supplies the current free-slot count; newly empty slots trigger an immediate guarded scan, with periodic scans as a fallback.
+
+Procurement stops remain halted until explicitly started again. Emergency Stop and `/sub stop` also cancel owned Lifestream travel, vnavmesh movement/pathfinding, and pending bag-listing scans. Retainer, bag-listing, and procurement controllers coordinate access to the game UI. Purchases recheck the destination world, open board, purchase arming, inventory reserve, budget, and profit after live buyer tax immediately before submission.
+
+World transfers wait for market windows to close and allow up to ten minutes for cross-data-center queues. Approach and interaction failures have bounded retries. The live tour includes larger home-world stacks when calculating the resale floor, even when those stacks exceed the configured purchase size.
+
+The live hunt scans all worlds before starting its buying pass. Item searches ignore leftover manual category filters and retry timed-out searches up to three attempts, with 30 seconds per attempt. Completion reports confirmed purchases and skipped orders; an empty plan distinguishes missing home-world resale data from deals rejected by the configured guards. The audit log records loaded listing counts, purchase requests sent, and inventory-confirmed purchases separately.
 
 Automation may be restricted by the game's terms or server rules; the operator is responsible for checking those rules.

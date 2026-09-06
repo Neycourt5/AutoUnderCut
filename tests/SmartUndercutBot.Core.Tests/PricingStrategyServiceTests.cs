@@ -9,6 +9,26 @@ public sealed class PricingStrategyServiceTests
     private readonly PricingStrategyService service = new();
 
     [Fact]
+    public void RejectsSnapshotForADifferentItem()
+    {
+        var context = Context(current: 2_000, lowest: 1_500);
+        var decision = service.Evaluate(context with { Market = context.Market with { ItemId = context.Listing.ItemId + 1 } });
+        Assert.Equal(PriceDecisionKind.InvalidData, decision.Kind);
+        Assert.False(decision.ShouldUpdate);
+    }
+
+    [Fact]
+    public void EmptyListingCannotSetTheUndercutPrice()
+    {
+        var context = Context(current: 2_000, lowest: 1_500);
+        var decision = service.Evaluate(context with
+        {
+            Market = context.Market with { Listings = [new(1, 0, false)] },
+        });
+        Assert.Equal(PriceDecisionKind.NoMarketData, decision.Kind);
+    }
+
+    [Fact]
     public void UndercutsLowestCompetitorByConfiguredAmount()
     {
         var decision = service.Evaluate(Context(current: 2_000, lowest: 1_500));

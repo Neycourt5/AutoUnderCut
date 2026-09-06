@@ -59,6 +59,7 @@ public sealed class BagListingController : IDisposable
     private DateTimeOffset deadline;
     private DateTimeOffset nextAutomaticAttempt;
     private DateTimeOffset bagSortReadyAt;
+    private bool automaticStartSuspended;
 
     public BagListingController(
         IFramework framework,
@@ -127,6 +128,8 @@ public sealed class BagListingController : IDisposable
             return;
         }
 
+        automaticStartSuspended = false;
+
         ScheduleNextAttempt();
         if (commandManager.ProcessCommand("/isort execute inventory"))
         {
@@ -176,7 +179,7 @@ public sealed class BagListingController : IDisposable
 
     public bool List(BagListingCandidate candidate, uint quantity, uint unitPrice)
     {
-        if (IsBusy)
+        if (IsBusy || automation.IsActive || procurement.IsActive)
             return false;
         if (!retainerListings.TryListBagItem(candidate, quantity, unitPrice, out pending, out var message) ||
             pending is null)
@@ -192,6 +195,28 @@ public sealed class BagListingController : IDisposable
     }
 
     private void OnFrameworkUpdate(IFramework _)
+    {
+        try
+        {
+            Tick();
+        }
+        catch (Exception ex)
+        {
+            Halt($"Bag listing failed: {ex.Message}");
+        }
+    }
+
+    public void Halt(string reason = "Bag listing stopped by user.")
+    {
+        scanCancellation?.Cancel();
+        scanTask = null;
+        pending = null;
+        automaticStartSuspended = true;
+        ledger.ClearBagStockQueue();
+        Fail(reason);
+    }
+
+    private void Tick()
     {
         if (State == BagListingState.ConsolidatingBags)
         {
@@ -308,7 +333,7 @@ public sealed class BagListingController : IDisposable
 
     private void TryAutomaticStart()
     {
-        if (!configuration.Current.AutomaticCuratedBagListingEnabled || DateTimeOffset.UtcNow < nextAutomaticAttempt ||
+        if (automaticStartSuspended || !configuration.Current.AutomaticCuratedBagListingEnabled || DateTimeOffset.UtcNow < nextAutomaticAttempt ||
             automation.IsActive || procurement.IsActive || !retainerListings.IsRetainerListOpen ||
             automation.LastKnownFreeSaleSlots is not > 0)
             return;

@@ -1,4 +1,4 @@
-using System.Globalization;
+using SmartUndercutBot.Core.Services;
 using System.Text.Json;
 using Dalamud.Plugin.Services;
 using Lumina.Excel.Sheets;
@@ -84,7 +84,7 @@ public sealed class UniversalisService : IUniversalisService, IDisposable
                 group.Key,
                 group.First().ItemName,
                 group.SelectMany(x => x.Listings)
-                    .DistinctBy(x => (x.WorldId, x.ListingId, x.RetainerId))
+                    .Distinct()
                     .ToArray(),
                 group.SelectMany(x => x.RecentSales)
                     .DistinctBy(x => (x.SoldAt, x.PricePerUnit, x.Quantity, x.IsHighQuality))
@@ -104,104 +104,8 @@ public sealed class UniversalisService : IUniversalisService, IDisposable
         response.EnsureSuccessStatusCode();
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
         using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken).ConfigureAwait(false);
-        var root = document.RootElement;
-        var ruleNames = enabled.ToDictionary(x => x.ItemId, x => x.ItemName);
-        var results = new List<ProcurementMarketItem>();
-
-        if (root.TryGetProperty("items", out var items) && items.ValueKind == JsonValueKind.Object)
-        {
-            foreach (var item in items.EnumerateObject())
-            {
-                if (uint.TryParse(item.Name, NumberStyles.None, CultureInfo.InvariantCulture, out var itemId))
-                    results.Add(ParseItem(itemId, ruleNames.GetValueOrDefault(itemId) ?? $"Item #{itemId}", item.Value));
-            }
-        }
-        else if (GetUInt32(root, "itemID") is var itemId && itemId != 0)
-        {
-            results.Add(ParseItem(itemId, ruleNames.GetValueOrDefault(itemId) ?? $"Item #{itemId}", root));
-        }
-        return results;
-    }
-
-    private static ProcurementMarketItem ParseItem(uint itemId, string itemName, JsonElement item)
-    {
-        var listings = new List<ProcurementMarketListing>();
-        if (item.TryGetProperty("listings", out var listingArray) && listingArray.ValueKind == JsonValueKind.Array)
-        {
-            foreach (var listing in listingArray.EnumerateArray())
-            {
-                var worldName = GetString(listing, "worldName");
-                var price = GetUInt32(listing, "pricePerUnit");
-                var quantity = GetUInt32(listing, "quantity");
-                if (string.IsNullOrWhiteSpace(worldName) || price == 0 || quantity == 0)
-                    continue;
-                listings.Add(new(
-                    itemId,
-                    GetUInt64(listing, "listingID"),
-                    GetUInt64(listing, "retainerID"),
-                    worldName,
-                    GetUInt32(listing, "worldID"),
-                    price,
-                    quantity,
-                    GetBoolean(listing, "hq")));
-            }
-        }
-
-        var sales = new List<ProcurementSale>();
-        if (item.TryGetProperty("recentHistory", out var historyArray) && historyArray.ValueKind == JsonValueKind.Array)
-        {
-            foreach (var sale in historyArray.EnumerateArray())
-            {
-                var price = GetUInt32(sale, "pricePerUnit");
-                var quantity = GetUInt32(sale, "quantity");
-                var timestamp = GetInt64(sale, "timestamp");
-                if (price == 0 || quantity == 0 || timestamp <= 0)
-                    continue;
-                sales.Add(new(price, quantity, GetBoolean(sale, "hq"), DateTimeOffset.FromUnixTimeSeconds(timestamp)));
-            }
-        }
-        return new(itemId, itemName, listings, sales);
-    }
-
-    private static string GetString(JsonElement element, string name) =>
-        element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() ?? string.Empty : string.Empty;
-    private static uint GetUInt32(JsonElement element, string name)
-    {
-        if (!element.TryGetProperty(name, out var value))
-            return 0;
-        if (value.ValueKind == JsonValueKind.Number && value.TryGetUInt32(out var number))
-            return number;
-        return value.ValueKind == JsonValueKind.String &&
-               uint.TryParse(value.GetString(), NumberStyles.None, CultureInfo.InvariantCulture, out number) ? number : 0;
-    }
-    private static ulong GetUInt64(JsonElement element, string name)
-    {
-        if (!element.TryGetProperty(name, out var value))
-            return 0;
-        if (value.ValueKind == JsonValueKind.Number && value.TryGetUInt64(out var number))
-            return number;
-        return value.ValueKind == JsonValueKind.String &&
-               ulong.TryParse(value.GetString(), NumberStyles.None, CultureInfo.InvariantCulture, out number) ? number : 0;
-    }
-    private static long GetInt64(JsonElement element, string name)
-    {
-        if (!element.TryGetProperty(name, out var value))
-            return 0;
-        if (value.ValueKind == JsonValueKind.Number && value.TryGetInt64(out var number))
-            return number;
-        return value.ValueKind == JsonValueKind.String &&
-               long.TryParse(value.GetString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out number) ? number : 0;
-    }
-    private static bool GetBoolean(JsonElement element, string name)
-    {
-        if (!element.TryGetProperty(name, out var value))
-            return false;
-        if (value.ValueKind == JsonValueKind.True)
-            return true;
-        if (value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var number))
-            return number != 0;
-        return value.ValueKind == JsonValueKind.String &&
-               (bool.TryParse(value.GetString(), out var boolean) ? boolean : value.GetString() == "1");
+        return UniversalisResponseParser.Parse(document.RootElement,
+            enabled.ToDictionary(x => x.ItemId, x => x.ItemName));
     }
 
     public void Dispose() => httpClient.Dispose();

@@ -18,7 +18,8 @@ public sealed class PricingStrategyService : IPricingStrategyService
         var market = context.Market;
         var rule = context.Rule;
 
-        if (listing.ItemId == 0 || listing.CurrentPrice is 0 or > MaximumListingPrice ||
+        if (listing.ItemId == 0 || market.ItemId != listing.ItemId ||
+            listing.CurrentPrice is 0 or > MaximumListingPrice ||
             rule.PriceWarDropPercent is < 0 or >= 100 || rule.MinimumMarginPercent < 0 ||
             rule.PercentageTolerance < 0)
         {
@@ -28,6 +29,7 @@ public sealed class PricingStrategyService : IPricingStrategyService
         var floor = CalculateFloor(listing, rule);
         var ownedRetainers = context.OwnedRetainerIds;
         var competitors = market.Listings
+            .Where(x => x.Quantity > 0)
             .Where(x => x.PricePerUnit is > 0 and <= MaximumListingPrice)
             .Where(x => IsQualityAllowed(x.IsHighQuality, listing.IsHighQuality, rule.QualityFilter))
             .Where(x => x.RetainerId == 0 ||

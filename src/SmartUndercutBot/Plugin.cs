@@ -87,6 +87,8 @@ public sealed class Plugin : IDalamudPlugin
             automation,
             procurement,
             automationLog);
+        automation.IsStartBlocked = () => procurement.IsActive || bagListing.IsBusy;
+        procurement.IsStartBlocked = () => automation.IsActive || bagListing.IsBusy;
         dashboard = new DashboardWindow(
             configuration, automation, procurement, bagListing, universalis, procurementLedger, marketData,
             automationLog);
@@ -112,6 +114,7 @@ public sealed class Plugin : IDalamudPlugin
         {
             automation.Halt("Stopped with /sub stop.");
             procurement.Halt("Procurement stopped with /sub stop.");
+            bagListing.Halt("Bag listing stopped with /sub stop.");
         }
         else if (arguments.Trim().Equals("guided", StringComparison.OrdinalIgnoreCase))
             procurement.RunGuidedNow();
