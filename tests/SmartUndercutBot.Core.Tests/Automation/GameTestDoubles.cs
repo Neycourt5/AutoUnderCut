@@ -58,6 +58,7 @@ namespace SmartUndercutBot.Automation
     public sealed class AutomationController
     {
         public int? LastKnownFreeSaleSlots { get; set; } = 5;
+        public IReadOnlyList<StockExposure> ListedStock { get; set; } = [];
         public bool IsActive { get; set; }
         public bool RequiresManualRestart { get; set; }
         public int Starts { get; private set; }

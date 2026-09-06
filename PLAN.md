@@ -1,5 +1,46 @@
 # Retainer automation and UI plan
 
+## Active update: reinvestment, diversification, and bag awareness
+User requests: use available gil for profitable purchases (starting from 0), avoid
+overbuying when retainers are saturated, diversify into fast-selling dyes, scan
+bags, and publish the update for in-game installation.
+
+- [x] Add wallet-based reinvestment with optional cap and visible travel reserve;
+  wait at 0 gil and recheck when income arrives.
+- [x] Count owned listings and resale bag stock before planning purchases; apply
+  per-item exposure limits across trips and observed sales-volume limits.
+- [x] Improve budget allocation for small wallets and limited sale slots.
+- [x] Dyes and materia are sell-only, not stock to buy (user revised this: they
+  carry no dye or materia inventory and want existing holdings cleared).
+- [x] Scan bag inventory, show stock, and use eligible configured stock before
+  shopping without listing unrelated equipment or other unconfigured items.
+- [x] Update UI/docs, add regression tests, build, and publish next version.
+
+### Wiring completed this session
+The previous session defined the settings and planner inputs but never connected
+them; `ResaleStockPolicy.SpendableGil` and `ProcurementWeeklySalesSharePercent`
+were dead code and `OwnedStock` was never passed. Now:
+- `SpendableGil()` replaces the fixed `Math.Min(budget, gil)` in both planners, the
+  live-tour capacity guard, and the per-purchase budget check.
+- `CollectOwnedStock()` feeds listed retainer stacks plus bag holdings to the
+  planner so per-item exposure spans trips.
+- The weekly-sales share always permits one full target stack. Without that floor a
+  20-per-week minimum and a 25% share can never admit a 99-stack, so the planner
+  would have bought nothing at all.
+- `ProcurementRule.LiquidateOnly` marks sell-only stock. Dyes and materia are
+  seeded with it, are listed from bags with no reserve, and are excluded from every
+  purchase plan. Config migrates to version 19 and re-seeds both.
+
+### Deferred (user: low priority, do not break anything)
+- Quieter travel destinations. Only the safe half is in: the summoning-bell leg now
+  has its own optional Lifestream command, defaulting to empty, which reuses the
+  market-board command and so changes nothing. Choosing older-expansion cities or
+  ranking market boards by how busy they are is not implemented.
+
+No running FFXIV inventory has been inspected by this session. Bag scanning will
+run through the plugin's game adapter; do not claim actual bag contents were read
+from the workspace.
+
 ## Goal
 Make the everyday workflow easy to understand: check every retainer, refill empty
 sale slots from eligible bag stock, travel to buy profitable stock when needed,

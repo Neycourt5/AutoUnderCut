@@ -617,15 +617,15 @@ public sealed unsafe class RetainerListingService : IRetainerListingService
                     continue;
                 if (entry.RequireFullStacks && item->Quantity < entry.TargetStackSize)
                     continue;
-                if (entry.ReserveQuantity > 0 &&
-                    GetBagQuantity(manager, entry.ItemId, entry.IsHighQuality) <
-                    entry.ReserveQuantity + (uint)entry.TargetStackSize)
-                    continue;
                 var quantity = entry.RequireFullStacks
                     ? (uint)entry.TargetStackSize
                     : Math.Min((uint)item->Quantity, Math.Min(entry.PendingQuantity, (uint)entry.TargetStackSize));
                 quantity = Math.Min(quantity, entry.PendingQuantity);
-                if (quantity == 0 || entry.TargetSalePrice == 0)
+                var bagQuantity = GetBagQuantity(manager, entry.ItemId, entry.IsHighQuality);
+                var surplus = bagQuantity > entry.ReserveQuantity ? bagQuantity - entry.ReserveQuantity : 0;
+                quantity = Math.Min(quantity, surplus);
+                if (quantity == 0 || entry.RequireFullStacks && quantity < entry.TargetStackSize ||
+                    !MarketPriceSafety.IsSafeAutomaticUnitPrice(entry.ItemName, entry.TargetSalePrice, quantity))
                     continue;
 
                 manager->MoveToRetainerMarket(type, sourceSlot, InventoryType.RetainerMarket,

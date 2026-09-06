@@ -15,14 +15,16 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
         ArgumentNullException.ThrowIfNull(request);
         if (request.GilBudget == 0 || request.FreeSaleSlots <= 0 || request.FreeInventorySlots <= 0 ||
             request.MarketTaxPercent is < 0 or > 100 || request.BuyerFeePercent is < 0 or > 100 ||
-            request.MinimumRoiPercent is < 0 or > 1_000)
+            request.MinimumRoiPercent is < 0 or > 1_000 ||
+            request.MaximumWeeklySalesSharePercent is <= 0 or > 100)
             return ProcurementPlan.Empty;
 
         var rules = request.Rules
-            .Where(x => x.Enabled && x.ItemId != 0)
+            .Where(x => x.Enabled && x.ItemId != 0 && !x.LiquidateOnly)
             .GroupBy(x => x.ItemId)
             .ToDictionary(x => x.Key, x => x.First());
         var candidates = new List<ProcurementOrder>();
+        var remainingUnits = new Dictionary<(uint, bool), ulong>();
 
         foreach (var market in request.Markets)
         {
@@ -38,6 +40,18 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
                     .ToArray();
                 if (sales.Sum(x => (long)x.Quantity) < rule.MinimumWeeklyUnitsSold)
                     continue;
+                // Cap how much of an item may be held at once, measured against what
+                // the market actually absorbs in a week. One target stack is always
+                // permitted: the stack size is the declared trade unit, and without
+                // this floor a 20-units-per-week minimum and a 25% share can never
+                // admit a single 99-stack, so nothing would ever be bought.
+                var observedLimit = Math.Max(
+                    (ulong)Math.Max(1, rule.TargetStackSize),
+                    (ulong)decimal.Floor(sales.Sum(x => (decimal)x.Quantity) *
+                        request.MaximumWeeklySalesSharePercent / 100m));
+                var ownedUnits = (ulong)(request.OwnedStock ?? []).Where(x =>
+                    x.ItemId == market.ItemId && x.IsHighQuality == quality).Sum(x => (long)x.Quantity);
+                remainingUnits[(market.ItemId, quality)] = observedLimit > ownedUnits ? observedLimit - ownedUnits : 0;
 
                 var targetSalePrice = Median(sales.Select(x => x.PricePerUnit));
                 if (!string.IsNullOrWhiteSpace(request.HomeWorld))
@@ -105,33 +119,9 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
             }
         }
 
-        var slotLimit = Math.Min(request.FreeSaleSlots, request.FreeInventorySlots);
-        var orders = new List<ProcurementOrder>(slotLimit);
-        var itemSlots = new Dictionary<uint, int>();
-        ulong spent = 0;
-        ulong profit = 0;
-        foreach (var candidate in candidates
-                     .OrderByDescending(x => x.ExpectedProfit)
-                     .ThenBy(x => x.PricePerUnit))
-        {
-            var rule = rules[candidate.ItemId];
-            var usedForItem = itemSlots.GetValueOrDefault(candidate.ItemId);
-            var cost = PurchaseCost(candidate.PricePerUnit, candidate.Quantity, request.BuyerFeePercent);
-            if (orders.Count >= slotLimit || usedForItem >= rule.MaximumSaleSlots || spent + cost > request.GilBudget)
-                continue;
-
-            orders.Add(candidate);
-            itemSlots[candidate.ItemId] = usedForItem + candidate.SaleSlots;
-            spent += cost;
-            profit += candidate.ExpectedProfit;
-        }
-
-        return new ProcurementPlan(
-            DateTimeOffset.UtcNow,
-            orders,
-            (uint)Math.Min(spent, uint.MaxValue),
-            (uint)Math.Min(profit, uint.MaxValue),
-            orders.Sum(x => x.SaleSlots));
+        return Allocate(candidates, rules, request.GilBudget,
+            Math.Min(request.FreeSaleSlots, request.FreeInventorySlots), request.BuyerFeePercent,
+            request.OwnedStock ?? [], remainingUnits);
     }
 
     public ProcurementPlan BuildLiveMarketPlan(LiveMarketPlanRequest request)
@@ -143,7 +133,7 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
             return ProcurementPlan.Empty;
 
         var rules = request.Rules
-            .Where(x => x.Enabled && x.ItemId != 0)
+            .Where(x => x.Enabled && x.ItemId != 0 && !x.LiquidateOnly)
             .GroupBy(x => x.ItemId)
             .ToDictionary(x => x.Key, x => x.First());
         var candidates = new List<ProcurementOrder>();
@@ -217,32 +207,54 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
             }
         }
 
-        var slotLimit = Math.Min(request.FreeSaleSlots, request.FreeInventorySlots);
-        var orders = new List<ProcurementOrder>(slotLimit);
-        var itemSlots = new Dictionary<uint, int>();
-        ulong spent = 0;
-        ulong profit = 0;
-        foreach (var candidate in candidates
-                     .OrderByDescending(x => x.ExpectedProfit)
-                     .ThenBy(x => x.PricePerUnit))
-        {
-            var usedForItem = itemSlots.GetValueOrDefault(candidate.ItemId);
-            var cost = PurchaseCost(candidate.PricePerUnit, candidate.Quantity, request.BuyerFeePercent);
-            if (orders.Count >= slotLimit || usedForItem >= rules[candidate.ItemId].MaximumSaleSlots ||
-                spent + cost > request.GilBudget)
-                continue;
-            orders.Add(candidate);
-            itemSlots[candidate.ItemId] = usedForItem + 1;
-            spent += cost;
-            profit += candidate.ExpectedProfit;
-        }
+        return Allocate(candidates, rules, request.GilBudget,
+            Math.Min(request.FreeSaleSlots, request.FreeInventorySlots), request.BuyerFeePercent,
+            request.OwnedStock ?? [], null);
+    }
 
-        return new(
-            DateTimeOffset.UtcNow,
-            orders,
-            (uint)Math.Min(spent, uint.MaxValue),
-            (uint)Math.Min(profit, uint.MaxValue),
-            orders.Count);
+    private static ProcurementPlan Allocate(List<ProcurementOrder> candidates,
+        IReadOnlyDictionary<uint, ProcurementRule> rules, uint budget, int slotLimit, decimal buyerFee,
+        IReadOnlyList<StockExposure> owned, IReadOnlyDictionary<(uint, bool), ulong>? quantityLimits)
+    {
+        // Absolute profit works well when slots are scarce; ROI can buy more
+        // profitable combinations with a small wallet. Compare complete feasible
+        // plans instead of letting one expensive stack consume the whole budget.
+        ulong Cost(ProcurementOrder x) => PurchaseCost(x.PricePerUnit, x.Quantity, buyerFee);
+        var strategies = new[]
+        {
+            candidates.OrderByDescending(x => (double)x.ExpectedProfit).ThenBy(Cost),
+            candidates.OrderByDescending(x => (double)x.ExpectedProfit / Math.Max(1UL, Cost(x))).ThenBy(Cost),
+            candidates.OrderByDescending(x => x.ExpectedProfit / Math.Sqrt(Math.Max(1UL, Cost(x)))).ThenBy(Cost),
+        };
+        var plans = new List<ProcurementPlan>();
+        foreach (var strategy in strategies)
+        {
+            var itemSlots = owned.GroupBy(x => x.ItemId).ToDictionary(x => x.Key, x => x.Sum(y => y.SaleSlots));
+            var boughtUnits = new Dictionary<(uint, bool), ulong>();
+            var orders = new List<ProcurementOrder>();
+            ulong spent = 0, profit = 0;
+            foreach (var candidate in strategy)
+            {
+                var key = (candidate.ItemId, candidate.IsHighQuality);
+                var cost = Cost(candidate);
+                var used = itemSlots.GetValueOrDefault(candidate.ItemId);
+                if (orders.Count >= slotLimit || used >= rules[candidate.ItemId].MaximumSaleSlots ||
+                    spent + cost > budget || quantityLimits is not null &&
+                    boughtUnits.GetValueOrDefault(key) + candidate.Quantity > quantityLimits.GetValueOrDefault(key))
+                    continue;
+                orders.Add(candidate);
+                itemSlots[candidate.ItemId] = used + 1;
+                boughtUnits[key] = boughtUnits.GetValueOrDefault(key) + candidate.Quantity;
+                spent += cost;
+                profit += candidate.ExpectedProfit;
+            }
+            plans.Add(new(DateTimeOffset.UtcNow, orders, (uint)spent,
+                (uint)Math.Min(profit, uint.MaxValue), orders.Count));
+        }
+        return plans.OrderByDescending(x => x.Orders.Sum(y => (long)y.ExpectedProfit))
+            .ThenByDescending(x => x.Orders.Select(y => y.ItemId).Distinct().Count())
+            .ThenBy(x => x.Orders.Select(y => y.WorldName).Distinct(StringComparer.OrdinalIgnoreCase).Count())
+            .ThenBy(x => x.TotalCost).First();
     }
 
     private static IEnumerable<bool> EligibleQualities(ProcurementRule rule)

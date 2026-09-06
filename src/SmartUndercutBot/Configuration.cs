@@ -6,7 +6,7 @@ namespace SmartUndercutBot;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 17;
+    public int Version { get; set; } = 19;
     public bool AutomationEnabled { get; set; }
     public bool ProcessAllRetainers { get; set; } = true;
     public bool RepeatBellRuns { get; set; }
@@ -29,12 +29,19 @@ public sealed class Configuration : IPluginConfiguration
     public int BagListingReservePerItem { get; set; } = 100;
     public int ProcurementIntervalMinutes { get; set; } = 10;
     public uint ProcurementBudget { get; set; } = 5_000_000;
+    public bool ReinvestAvailableGil { get; set; } = true;
+    public uint ProcurementTravelReserve { get; set; } = 5_000;
+    public decimal ProcurementWeeklySalesSharePercent { get; set; } = 25m;
+    public bool DyeRulesSeeded { get; set; }
+    public bool MateriaRulesSeeded { get; set; }
     public int ProcurementTargetSaleSlots { get; set; } = 60;
     public int ProcurementInventoryReserve { get; set; } = 10;
     public decimal ProcurementMinimumRoiPercent { get; set; } = 20m;
     public uint ProcurementMinimumProfitPerUnit { get; set; } = 100;
     public string ProcurementDataCenter { get; set; } = "North-America,Oceania";
     public string MarketBoardTravelCommand { get; set; } = "/li mb";
+    // Empty means "use the market-board command", which is the original behaviour.
+    public string SummoningBellTravelCommand { get; set; } = string.Empty;
     public bool LiveWorldStockHuntEnabled { get; set; } = true;
     public int LiveWorldStockThresholdPerItem { get; set; } = 199;
     public int LiveWorldStockHuntCooldownMinutes { get; set; } = 360;
@@ -240,6 +247,28 @@ public sealed class Configuration : IPluginConfiguration
             AutomaticallyCollectRetainerGil = true;
             Version = 17;
         }
+        if (Version < 18)
+        {
+            ReinvestAvailableGil = true;
+            Version = 18;
+        }
+        if (Version < 19)
+        {
+            // Dyes were briefly seeded as buyable stock. The user keeps no dye or
+            // materia inventory, so re-seed both as sell-only on the next start.
+            DyeRulesSeeded = false;
+            MateriaRulesSeeded = false;
+            foreach (var rule in ProcurementRules.Where(x =>
+                         x.ItemName.EndsWith(" Dye", StringComparison.OrdinalIgnoreCase)))
+            {
+                rule.LiquidateOnly = true;
+                rule.ListFromBags = true;
+                rule.BagReserveQuantity = 0;
+            }
+            Version = 19;
+        }
+        ProcurementTravelReserve = Math.Min(ProcurementTravelReserve, 100_000_000u);
+        ProcurementWeeklySalesSharePercent = Math.Clamp(ProcurementWeeklySalesSharePercent, 1m, 100m);
         MinimumDelayMs = Math.Clamp(MinimumDelayMs, 100, 60_000);
         MaximumDelayMs = Math.Clamp(MaximumDelayMs, MinimumDelayMs, 60_000);
         MarketRequestTimeoutSeconds = Math.Clamp(MarketRequestTimeoutSeconds, 2, 60);
@@ -262,6 +291,7 @@ public sealed class Configuration : IPluginConfiguration
         ProcurementDataCenter = string.IsNullOrWhiteSpace(ProcurementDataCenter)
             ? "North-America,Oceania"
             : ProcurementDataCenter.Trim();
+        SummoningBellTravelCommand = SummoningBellTravelCommand?.Trim() ?? string.Empty;
         MarketBoardTravelCommand = string.IsNullOrWhiteSpace(MarketBoardTravelCommand)
             ? "/li mb"
             : MarketBoardTravelCommand.Trim();

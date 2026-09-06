@@ -11,7 +11,14 @@ public sealed class ProcurementRule
     public int MaximumSaleSlots { get; set; } = 8;
     public int MinimumWeeklyUnitsSold { get; set; } = 20;
     public bool RequireHighQuality { get; set; }
+    public bool? ListFromBags { get; set; }
+    public uint? BagReserveQuantity { get; set; }
+    // Sell what is already held, never buy more. Used for stock the player wants
+    // cleared out rather than traded.
+    public bool LiquidateOnly { get; set; }
 }
+
+public sealed record StockExposure(uint ItemId, bool IsHighQuality, uint Quantity, int SaleSlots);
 
 public sealed record ProcurementMarketListing(
     uint ItemId,
@@ -43,7 +50,9 @@ public sealed record ProcurementPlanRequest(
     decimal MarketTaxPercent = 5m,
     decimal BuyerFeePercent = 5m,
     string HomeWorld = "",
-    IReadOnlySet<ulong>? OwnedRetainerIds = null);
+    IReadOnlySet<ulong>? OwnedRetainerIds = null,
+    IReadOnlyList<StockExposure>? OwnedStock = null,
+    decimal MaximumWeeklySalesSharePercent = 100m);
 
 public sealed record LiveMarketPlanRequest(
     IReadOnlyList<ProcurementMarketItem> Markets,
@@ -56,7 +65,8 @@ public sealed record LiveMarketPlanRequest(
     decimal MinimumRoiPercent,
     uint MinimumProfitPerUnit,
     decimal MarketTaxPercent = 5m,
-    decimal BuyerFeePercent = 5m);
+    decimal BuyerFeePercent = 5m,
+    IReadOnlyList<StockExposure>? OwnedStock = null);
 
 public sealed record ProcurementOrder(
     uint ItemId,

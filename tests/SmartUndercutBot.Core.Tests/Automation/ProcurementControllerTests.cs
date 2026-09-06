@@ -360,6 +360,9 @@ public sealed class ProcurementControllerTests
         Assert.Equal(1, run.Repricing.Starts);
 
         run.Ledger.MarkListed(1, true, 99);
+        // Listing moves the stack out of the bags and the sale clears the retainer,
+        // so the item is no longer owned exposure and may be restocked.
+        run.Game.Inventory = 0;
         run.Repricing.IsActive = false;
         run.Repricing.LastKnownFreeSaleSlots = 0;
         run.Tick(601);

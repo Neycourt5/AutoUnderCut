@@ -27,7 +27,10 @@ public sealed record CuratedBagStock(
     uint ListableQuantity,
     int StackCount,
     uint EffectiveFloor,
-    uint? SuggestedPrice);
+    uint? SuggestedPrice,
+    bool IsHighQuality,
+    int TargetStackSize,
+    bool Eligible);
 
 public sealed class BagListingController : IDisposable
 {
@@ -52,7 +55,7 @@ public sealed class BagListingController : IDisposable
     private readonly ProcurementController procurement;
     private readonly AutomationLog log;
     private readonly TimeProvider timeProvider;
-    private readonly Dictionary<uint, uint> plannedPrices = [];
+    private readonly Dictionary<(uint, bool), uint> plannedPrices = [];
     private IReadOnlyList<BagListingCandidate> candidates = [];
     private CancellationTokenSource? scanCancellation;
     private Task<IReadOnlyList<ProcurementMarketItem>>? scanTask;
@@ -102,6 +105,7 @@ public sealed class BagListingController : IDisposable
     public bool IsBusy => State is BagListingState.ConsolidatingBags or BagListingState.ScanningPrices or BagListingState.WaitingForVerification;
     public bool IsRetainerSellListOpen => retainerListings.IsSellListOpen;
     public bool IsRetainerListOpen => retainerListings.IsRetainerListOpen;
+    public DateTimeOffset? LastBagScanAt { get; private set; }
     public bool IsAutomaticRunDue => !automaticStartSuspended &&
         configuration.Current.AutomaticCuratedBagListingEnabled && configuration.Current.AllowAutomaticListing &&
         !automation.RequiresManualRestart &&
@@ -125,14 +129,12 @@ public sealed class BagListingController : IDisposable
     {
         if (IsBusy)
             return;
-        candidates = retainerListings.ReadBagListingCandidates()
-            .Where(x => x.IsHighQuality && CuratedItems.Contains(x.ItemName))
-            .ToArray();
+        RefreshCandidatesOnly();
         var distinctItems = candidates.Select(x => x.ItemId).Distinct().Count();
         Status = new(BagListingState.Idle,
             distinctItems == 0
-                ? "No eligible HQ Grade 4 gemdraughts or HQ Caramel Popcorn were found in the bags."
-                : $"Found {distinctItems} curated HQ item type(s). Ready to auto-price 99-stacks.");
+                ? "No marketable bag items were found."
+                : $"Scanned {distinctItems} marketable item type(s). Only enabled resale stock will be listed.");
     }
 
     public void PrepareAutomaticRun()
@@ -162,7 +164,7 @@ public sealed class BagListingController : IDisposable
         {
             bagSortReadyAt = this.timeProvider.GetUtcNow().AddMilliseconds(900);
             Status = new(BagListingState.ConsolidatingBags,
-                "Consolidating inventory stacks before calculating the protected reserve and 99-stacks.");
+                "Sorting bags before calculating reserves and resale stacks.");
             log.Add(AutomationLogLevel.Information, Status.Detail);
             return;
         }
@@ -178,7 +180,7 @@ public sealed class BagListingController : IDisposable
         if (rules.Count == 0)
         {
             Status = new(BagListingState.Completed,
-                $"Nothing is listable: each item needs {configuration.Current.BagListingReservePerItem:N0} reserved plus one complete 99-stack.");
+                "Nothing is ready to list after item rules, reserves, and existing retainer stock are counted.");
             ScheduleNextAttempt();
             return;
         }
@@ -316,64 +318,66 @@ public sealed class BagListingController : IDisposable
             .Where(x => !x.IsBagStock && x.PendingQuantity > 0)
             .Select(x => (x.ItemId, x.IsHighQuality))
             .ToHashSet();
-        var reserve = (uint)configuration.Current.BagListingReservePerItem;
         var queuedStacks = 0;
         foreach (var stock in BuildStockSummary())
         {
-            if (stock.StackCount == 0 || existingProcurement.Contains((stock.ItemId, true)))
+            if (stock.StackCount == 0 || existingProcurement.Contains((stock.ItemId, stock.IsHighQuality)))
                 continue;
             var market = markets.FirstOrDefault(x => x.ItemId == stock.ItemId);
             var listings = market?.Listings
                 .Select(x => new MarketListing(x.PricePerUnit, x.Quantity, x.IsHighQuality, RetainerId: x.RetainerId))
                 .ToArray() ?? [];
-            var historicalMedian = Median(market?.RecentSales.Where(x => x.IsHighQuality).Select(x => x.PricePerUnit) ?? []);
+            var historicalMedian = Median(market?.RecentSales.Where(x => x.IsHighQuality == stock.IsHighQuality).Select(x => x.PricePerUnit) ?? []);
             var rule = configuration.Current.GetEffectiveRule(stock.ItemId);
-            rule.QualityFilter = QualityFilterMode.HighQualityOnly;
+            rule.QualityFilter = stock.IsHighQuality ? QualityFilterMode.HighQualityOnly : QualityFilterMode.NormalQualityOnly;
             var placeholder = new RetainerListing(
-                0, "New bag listing", -1, stock.ItemId, stock.ItemName, 99,
-                PricingStrategyService.MaximumListingPrice, true, rule.CostBasis);
+                0, "New bag listing", -1, stock.ItemId, stock.ItemName, (uint)stock.TargetStackSize,
+                PricingStrategyService.MaximumListingPrice, stock.IsHighQuality, rule.CostBasis);
             var decision = pricing.Evaluate(new PricingContext(
                 placeholder,
                 new MarketSnapshot(stock.ItemId, this.timeProvider.GetUtcNow(), listings, historicalMedian, true),
                 rule,
                 retainerListings.OwnedRetainerIds));
             uint? target = decision.ShouldUpdate && decision.TargetPrice is { } marketTarget &&
-                           MarketPriceSafety.IsSafeCuratedUnitPrice(marketTarget)
+                           MarketPriceSafety.IsSafeAutomaticUnitPrice(stock.ItemName, marketTarget, (uint)stock.TargetStackSize)
                 ? marketTarget
                 : null;
 
-            if (!target.HasValue && automation.TryGetKnownSafePrice(stock.ItemId, out var knownPrice))
+            if (!target.HasValue && ResaleStockPolicy.IsCuratedConsumable(stock.ItemName) &&
+                automation.TryGetKnownSafePrice(stock.ItemId, out var knownPrice))
                 target = Math.Max(stock.EffectiveFloor, knownPrice);
             if (!target.HasValue && historicalMedian is { } median &&
-                MarketPriceSafety.IsSafeCuratedUnitPrice(median))
+                MarketPriceSafety.IsSafeAutomaticUnitPrice(stock.ItemName, median, (uint)stock.TargetStackSize))
                 target = Math.Max(stock.EffectiveFloor, median);
 
-            if (!target.HasValue || !MarketPriceSafety.IsSafeCuratedUnitPrice(target.Value))
+            if (!target.HasValue || !MarketPriceSafety.IsSafeAutomaticUnitPrice(stock.ItemName, target.Value, (uint)stock.TargetStackSize))
             {
                 log.Add(AutomationLogLevel.Warning,
                     $"BAG STOCK SKIPPED {stock.ItemName}: {decision.Reason} No validated live, historical, or existing same-item price was available; stock remains safely in the bags.");
                 continue;
             }
 
-            plannedPrices[stock.ItemId] = target.Value;
-            ledger.QueueExistingStock(stock.ItemId, stock.ItemName, stock.ListableQuantity, target.Value, 99, true, reserve);
+            plannedPrices[(stock.ItemId, stock.IsHighQuality)] = target.Value;
+            ledger.QueueExistingStock(stock.ItemId, stock.ItemName, stock.ListableQuantity, target.Value,
+                stock.TargetStackSize, stock.IsHighQuality, stock.ReservedQuantity,
+                ResaleStockPolicy.IsCuratedConsumable(stock.ItemName), stock.StackCount);
             queuedStacks += stock.StackCount;
             log.Add(AutomationLogLevel.Information,
-                $"BAG STOCK QUEUED {stock.ItemName}: {stock.StackCount} x99 at validated {target.Value:N0} gil; keeping {reserve:N0} in bags.");
+                $"BAG STOCK QUEUED {stock.ItemName}: up to {stock.StackCount} stack(s) of {stock.TargetStackSize} at {target.Value:N0} gil; keeping {stock.ReservedQuantity:N0} in bags.");
         }
 
         ScheduleNextAttempt();
         if (queuedStacks == 0)
         {
             Status = new(BagListingState.Completed,
-                "No complete 99-stacks passed the reserve, market-data, and pricing-floor checks.");
+                "No resale stacks passed the reserve, market-data, and pricing-floor checks.");
             return;
         }
 
         configuration.Current.ProcessAllRetainers = true;
         configuration.Save();
         Status = new(BagListingState.QueuePrepared,
-            $"Queued {queuedStacks} curated 99-stack(s). Starting the all-retainer listing and live repricing pass.");
+            $"Queued up to {queuedStacks} resale stack(s). Starting the all-retainer listing pass.");
         log.Add(AutomationLogLevel.Information, Status.Detail);
         automation.StartBagListingNow();
         // The fill pass changes capacity. Record its result when it completes,
@@ -399,25 +403,35 @@ public sealed class BagListingController : IDisposable
         {
             ItemId = x.ItemId,
             ItemName = x.ItemName,
-            TargetStackSize = 99,
+            TargetStackSize = x.TargetStackSize,
             MaximumSaleSlots = x.StackCount,
-            AllowHighQuality = true,
-            RequireHighQuality = true,
+            AllowHighQuality = x.IsHighQuality,
+            RequireHighQuality = x.IsHighQuality,
         })
         .ToArray();
 
     private IReadOnlyList<CuratedBagStock> BuildStockSummary()
     {
-        var reserve = (uint)configuration.Current.BagListingReservePerItem;
         return candidates
-            .GroupBy(x => new { x.ItemId, x.ItemName })
+            .GroupBy(x => new { x.ItemId, x.ItemName, x.IsHighQuality })
             .Select(group =>
             {
                 var total = (uint)Math.Min(uint.MaxValue, group.Sum(x => (long)x.Quantity));
-                var stacksAllowedByReserve = total > reserve ? (total - reserve) / 99 : 0;
-                var completeSourceStacks = (uint)group.Sum(x => x.Quantity / 99);
-                var stackCount = Math.Min(stacksAllowedByReserve, completeSourceStacks);
-                var listable = stackCount * 99;
+                var buyRule = configuration.Current.ProcurementRules.FirstOrDefault(x => x.ItemId == group.Key.ItemId);
+                var eligible = ResaleStockPolicy.CanListFromBags(buyRule, group.Key.ItemName, group.Key.IsHighQuality);
+                var reserve = ResaleStockPolicy.BagReserve(buyRule, group.Key.ItemName,
+                    (uint)configuration.Current.BagListingReservePerItem);
+                var fullStacks = ResaleStockPolicy.IsCuratedConsumable(group.Key.ItemName);
+                var stackSize = fullStacks ? 99 : Math.Max(1, buyRule?.TargetStackSize ?? 1);
+                var ownedSlots = automation.ListedStock.Where(x => x.ItemId == group.Key.ItemId).Sum(x => x.SaleSlots);
+                var slotLimit = Math.Max(0, (buyRule?.MaximumSaleSlots ?? 8) - ownedSlots);
+                var surplus = total > reserve ? total - reserve : 0;
+                var listable = eligible ? Math.Min(surplus, (uint)(slotLimit * stackSize)) : 0;
+                if (fullStacks)
+                    listable = Math.Min(listable / 99, (uint)group.Sum(x => x.Quantity / 99)) * 99;
+                var sourceSlots = fullStacks ? (int)(listable / 99)
+                    : (int)group.Sum(x => ((long)x.Quantity + stackSize - 1) / stackSize);
+                var stackCount = listable == 0 ? 0 : Math.Min(slotLimit, sourceSlots);
                 var pricingRule = configuration.Current.GetEffectiveRule(group.Key.ItemId);
                 return new CuratedBagStock(
                     group.Key.ItemId,
@@ -425,9 +439,10 @@ public sealed class BagListingController : IDisposable
                     total,
                     Math.Min(total, reserve),
                     listable,
-                    (int)stackCount,
+                    stackCount,
                     CalculateFloor(pricingRule),
-                    plannedPrices.GetValueOrDefault(group.Key.ItemId) is var price && price > 0 ? price : null);
+                    plannedPrices.GetValueOrDefault((group.Key.ItemId, group.Key.IsHighQuality)) is var price && price > 0 ? price : null,
+                    group.Key.IsHighQuality, stackSize, eligible);
             })
             .OrderBy(x => x.ItemName, StringComparer.OrdinalIgnoreCase)
             .ToArray();
@@ -467,9 +482,11 @@ public sealed class BagListingController : IDisposable
         RefreshCandidatesOnly();
     }
 
-    private void RefreshCandidatesOnly() => candidates = retainerListings.ReadBagListingCandidates()
-        .Where(x => x.IsHighQuality && CuratedItems.Contains(x.ItemName))
-        .ToArray();
+    private void RefreshCandidatesOnly()
+    {
+        candidates = retainerListings.ReadBagListingCandidates();
+        LastBagScanAt = timeProvider.GetUtcNow();
+    }
 
     private void ScheduleNextAttempt()
     {

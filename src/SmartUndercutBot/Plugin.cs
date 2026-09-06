@@ -60,6 +60,24 @@ public sealed class Plugin : IDalamudPlugin
             configuration.Current.ProcurementRules.AddRange(universalis.CreateFavoriteRules());
             configuration.Save();
         }
+        if (!configuration.Current.DyeRulesSeeded || !configuration.Current.MateriaRulesSeeded)
+        {
+            var liquidate = universalis.CreateDyeRules().Concat(universalis.CreateMateriaRules());
+            foreach (var rule in liquidate)
+            {
+                var existing = configuration.Current.ProcurementRules.FirstOrDefault(x => x.ItemId == rule.ItemId);
+                if (existing is null)
+                    configuration.Current.ProcurementRules.Add(rule);
+                else if (existing.LiquidateOnly)
+                {
+                    existing.ListFromBags = true;
+                    existing.BagReserveQuantity = 0;
+                }
+            }
+            configuration.Current.DyeRulesSeeded = true;
+            configuration.Current.MateriaRulesSeeded = true;
+            configuration.Save();
+        }
         taskbarAttention = new TaskbarAttentionService();
         procurement = new ProcurementController(
             Framework,

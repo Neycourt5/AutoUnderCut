@@ -85,6 +85,7 @@ public sealed class AutomationController : IDisposable
     private readonly Dictionary<ulong, PortfolioRetainerBalance> portfolioRetainers = [];
     private readonly Dictionary<ulong, int> fillListingCounts = [];
     private readonly Dictionary<(ulong RetainerId, short Slot), (uint ItemId, uint Price)> knownSafeListingPrices = [];
+    private readonly Dictionary<ulong, IReadOnlyList<RetainerListing>> scannedStock = [];
 
     private CancellationTokenSource? sessionCancellation;
     private Task<MarketSnapshot>? marketTask;
@@ -148,6 +149,7 @@ public sealed class AutomationController : IDisposable
     public AutomationState State { get; private set; } = AutomationState.Idle;
     public int? LastKnownFreeSaleSlots { get; private set; }
     public bool RequiresManualRestart { get; private set; }
+    public IReadOnlyList<StockExposure> ListedStock { get; private set; } = [];
     public bool IsActive => State is not (AutomationState.Idle or AutomationState.Completed or AutomationState.Halted or AutomationState.Faulted or AutomationState.WaitingForScheduledRun);
 
     public AutomationStatus Status => new(
@@ -481,6 +483,7 @@ public sealed class AutomationController : IDisposable
 
     private void ResetSession()
     {
+        scannedStock.Clear();
         sessionCancellation?.Cancel();
         sessionCancellation?.Dispose();
         sessionCancellation = new CancellationTokenSource();
@@ -669,7 +672,7 @@ public sealed class AutomationController : IDisposable
         }
 
         var verified = pendingAutoListing;
-        if (!MarketPriceSafety.IsSafeCuratedUnitPrice(verified.UnitPrice, verified.Quantity))
+        if (!MarketPriceSafety.IsSafeAutomaticUnitPrice(verified.ItemName, verified.UnitPrice, verified.Quantity))
         {
             pendingAutoListing = null;
             AbortFreshAutoListing(
@@ -1242,6 +1245,7 @@ public sealed class AutomationController : IDisposable
 
     private void FinishCurrentRetainer()
     {
+        scannedStock[retainerListings.ActiveRetainerId] = retainerListings.ReadCurrentListings();
         log.Add(AutomationLogLevel.Information,
             $"Finished {retainerListings.ActiveRetainerName}: processed {queue.Count} listing(s).");
         if (!bellSession)
@@ -1380,6 +1384,11 @@ public sealed class AutomationController : IDisposable
             portfolioCompletedAt = DateTimeOffset.UtcNow;
             var finalListingCount = fillOnlyRun ? fillListingCounts.Values.Sum() : listingsSeenAcrossRetainers;
             LastKnownFreeSaleSlots = Math.Max(0, retainerCount * 20 - finalListingCount);
+            if (configuration.Current.ProcessAllRetainers)
+                ListedStock = scannedStock.Values.SelectMany(x => x)
+                    .GroupBy(x => (x.ItemId, x.IsHighQuality))
+                    .Select(x => new StockExposure(x.Key.ItemId, x.Key.IsHighQuality,
+                        (uint)Math.Min(uint.MaxValue, x.Sum(y => (long)y.Quantity)), x.Count())).ToArray();
             procurementLedger.ClearCompleted();
             var message = $"Finished {retainerCount} retainer(s); submitted {updatesSubmitted} update(s).";
             if (fillOnlyRun)

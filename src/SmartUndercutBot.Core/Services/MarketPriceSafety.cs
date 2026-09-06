@@ -2,6 +2,11 @@ namespace SmartUndercutBot.Core.Services;
 
 public static class MarketPriceSafety
 {
+    public static bool IsSafeAutomaticUnitPrice(string itemName, uint unitPrice, uint quantity) =>
+        ResaleStockPolicy.IsCuratedConsumable(itemName)
+            ? IsSafeCuratedUnitPrice(unitPrice, quantity)
+            : quantity > 0 && unitPrice is > 0 and < PricingStrategyService.MaximumListingPrice &&
+              !IsSafetySeedRepresentation(unitPrice, quantity);
     // The curated consumables handled by automatic bag listing normally trade
     // for thousands, not millions. This ceiling also catches old placeholder
     // artifacts without affecting the plugin's general-purpose repricer.

@@ -18,14 +18,27 @@ The normal deal search uses Universalis to choose destinations and rechecks each
 purchase against the live in-game listing. Home-world sale history and competing
 listings set the resale estimate; the player's own retainers are excluded.
 
-The gil budget applies **per trip** and resets on the next trip. Repeated trips
-can spend more than that amount in total. Bag-space reserves, per-item limits,
-minimum profit, and sale capacity still apply. If no deal qualifies, slots stay
-empty and another search runs later; filling every slot is a goal, not a guarantee.
+By default **Spend whatever gil is in the wallet** is on, so each trip may spend
+the whole balance apart from the travel reserve (5,000 gil, configurable to 0) and
+sales compound into the next trip. Turn it off to fall back to the per-trip
+maximum, which applies per trip and resets on the next one. At zero spendable gil
+the loop waits and re-checks after the procurement interval rather than stopping.
+
+How much of one item may be held is capped by **maximum stock to hold**, a share of
+that item's observed weekly sales (25% by default). The cap counts stacks already
+listed on the retainers plus everything held in the bags, so a cheap item is not
+re-bought every trip until it crowds out everything else. One full target stack is
+always allowed, so an item with no stock can always be restocked. Bag-space
+reserves, per-item slot limits, minimum profit, and sale capacity still apply. If
+no deal qualifies, slots stay empty and another search runs later; filling every
+slot is a goal, not a guarantee.
+
 The default buying list contains HQ Grade 4 gemdraughts and HQ Caramel Popcorn.
-Configure additional buying rules in **Shopping**. Existing bag refills use only
-the curated items in complete 99-stacks and keep 100 of each by default. Purchased
-resale stock is queued separately and can use smaller stacks.
+Configure additional buying rules in **Shopping**. Dyes and materia are seeded as
+**sell-only**: everything held is listed from the bags with nothing kept back, and
+they are never bought as stock. The **Stock** tab lists every bag item and marks
+each row Sell or Ignored, so it is visible what automatic listing will and will not
+touch - gear and anything without a rule is never listed.
 
 Leave the game running and the retainer list open between trips. **Home** shows
 the current action, last checked capacity, and next check. **Stock** shows bag

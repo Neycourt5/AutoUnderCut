@@ -570,8 +570,9 @@ public sealed class DashboardWindow : Window
         ImGui.TextWrapped(status.Detail);
 
         ImGui.TextWrapped(
-            "Eligible stock is intentionally limited to HQ Grade 4 gemdraughts and HQ Caramel Popcorn. " +
-            "Every sale uses a 99-stack; other bag items are ignored.");
+            "Every bag item is listed here. \"Sell\" rows are listed automatically: HQ Grade 4 gemdraughts and " +
+            "HQ Caramel Popcorn in 99-stacks, plus dyes and materia, which are sold off rather than kept in stock. " +
+            "\"Ignored\" rows are left alone - gear and anything without a rule is never listed.");
 
         var automatic = configuration.Current.AutomaticCuratedBagListingEnabled;
         if (ImGui.Checkbox("Automatically refill empty retainer slots during idle bell runs", ref automatic))
@@ -606,11 +607,12 @@ public sealed class DashboardWindow : Window
                 "The current retainer/procurement operation must finish first.");
 
         var stock = bagListing.Stock;
-        if (ImGui.BeginTable("CuratedBagStock", 7,
+        if (ImGui.BeginTable("CuratedBagStock", 8,
                 ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.ScrollY | ImGuiTableFlags.Resizable,
                 new Vector2(0, 220 * ImGuiHelpers.GlobalScale)))
         {
             ImGui.TableSetupColumn("Item");
+            ImGui.TableSetupColumn("Auto", ImGuiTableColumnFlags.WidthFixed, 65);
             ImGui.TableSetupColumn("Quality", ImGuiTableColumnFlags.WidthFixed, 60);
             ImGui.TableSetupColumn("Bag total", ImGuiTableColumnFlags.WidthFixed, 80);
             ImGui.TableSetupColumn("Keep", ImGuiTableColumnFlags.WidthFixed, 70);
@@ -622,10 +624,18 @@ public sealed class DashboardWindow : Window
             {
                 ImGui.TableNextRow();
                 ImGui.TableNextColumn(); ImGui.TextUnformatted(item.ItemName);
-                ImGui.TableNextColumn(); ImGui.TextUnformatted("HQ");
+                ImGui.TableNextColumn();
+                if (item.Eligible)
+                    ImGui.TextColored(new Vector4(0.35f, 0.9f, 0.45f, 1f), "Sell");
+                else
+                    ImGui.TextDisabled("Ignored");
+                ImGui.TableNextColumn(); ImGui.TextUnformatted(item.IsHighQuality ? "HQ" : "NQ");
                 ImGui.TableNextColumn(); ImGui.TextUnformatted(item.TotalQuantity.ToString("N0"));
                 ImGui.TableNextColumn(); ImGui.TextUnformatted(item.ReservedQuantity.ToString("N0"));
-                ImGui.TableNextColumn(); ImGui.TextUnformatted($"{item.StackCount} x99");
+                ImGui.TableNextColumn();
+                ImGui.TextUnformatted(item.StackCount == 0
+                    ? "-"
+                    : $"{item.StackCount} x{Math.Max(1, item.TargetStackSize)}");
                 ImGui.TableNextColumn(); ImGui.TextUnformatted(item.EffectiveFloor.ToString("N0"));
                 ImGui.TableNextColumn();
                 ImGui.TextUnformatted(item.SuggestedPrice is not { } price
@@ -722,7 +732,30 @@ public sealed class DashboardWindow : Window
                 config.GuidedTourMaximumWorlds = guidedWorlds;
                 configurationDirty = true;
             }
-            ImGui.TextWrapped("Guided routes wait for manual buying. Keep retainers stocked uses automatic purchases. The budget is a per-trip maximum, not a spending target.");
+            var reinvest = config.ReinvestAvailableGil;
+            if (ImGui.Checkbox("Spend whatever gil is in the wallet (reinvest sales)", ref reinvest))
+            {
+                config.ReinvestAvailableGil = reinvest;
+                configurationDirty = true;
+            }
+            ImGui.TextDisabled(reinvest
+                ? "On: every trip may spend the whole wallet minus the travel reserve, so sales compound into the next trip. The per-trip maximum above is ignored."
+                : "Off: each trip is limited to the per-trip maximum above.");
+            var travelReserve = config.ProcurementTravelReserve;
+            if (InputUInt("Gil to keep for travel", ref travelReserve, 0, 100_000_000))
+            {
+                config.ProcurementTravelReserve = travelReserve;
+                configurationDirty = true;
+            }
+            ImGui.TextDisabled("Never spent, so a purchase cannot leave the character without teleport fare. Set 0 to spend everything.");
+            var salesShare = (float)config.ProcurementWeeklySalesSharePercent;
+            if (ImGui.DragFloat("Maximum stock to hold, as % of weekly sales", ref salesShare, 1f, 1, 100, "%.0f%%"))
+            {
+                config.ProcurementWeeklySalesSharePercent = (decimal)Math.Clamp(salesShare, 1f, 100f);
+                configurationDirty = true;
+            }
+            ImGui.TextDisabled("Counts stock already listed on retainers and held in bags, so a cheap item is not re-bought every trip. One full stack of an item is always allowed.");
+            ImGui.TextWrapped("Guided routes wait for manual buying. Keep retainers stocked uses automatic purchases.");
             var interval = config.ProcurementIntervalMinutes;
             if (InputInt("Minutes between procurement scans", ref interval, 5, 1_440))
             {
@@ -785,6 +818,16 @@ public sealed class DashboardWindow : Window
                 config.MarketBoardTravelCommand = travelCommand;
                 configurationDirty = true;
             }
+            var bellCommand = config.SummoningBellTravelCommand;
+            if (ImGui.InputText("Lifestream summoning-bell command (optional)", ref bellCommand, 128))
+            {
+                config.SummoningBellTravelCommand = bellCommand;
+                configurationDirty = true;
+            }
+            ImGui.TextDisabled(
+                "Leave empty to reuse the market-board command. Set a quieter destination for the return trip - " +
+                "a private or free company estate, or an older-expansion city - if you would rather not park at a " +
+                "busy hub. Whatever you enter is sent to chat as-is, so test it manually first.");
         }
 
         ImGui.Separator();

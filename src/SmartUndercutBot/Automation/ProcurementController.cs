@@ -495,13 +495,15 @@ public sealed class ProcurementController : IDisposable
         Plan = planner.BuildPlan(new(
             scanTask.Result,
             config.ProcurementRules,
-            Math.Min(config.ProcurementBudget, market.Gil),
+            SpendableGil(),
             plannedSaleSlots,
             freeInventorySlots,
             config.ProcurementMinimumRoiPercent,
             config.ProcurementMinimumProfitPerUnit,
             HomeWorld: planningHomeWorld,
-            OwnedRetainerIds: retainerListings.OwnedRetainerIds));
+            OwnedRetainerIds: retainerListings.OwnedRetainerIds,
+            OwnedStock: CollectOwnedStock(),
+            MaximumWeeklySalesSharePercent: config.ProcurementWeeklySalesSharePercent));
         lastScannedFreeSaleSlots = plannedSaleSlots;
         scanTask = null;
         nextAutomaticScan = timeProvider.GetUtcNow().AddMinutes(config.ProcurementIntervalMinutes);
@@ -542,7 +544,7 @@ public sealed class ProcurementController : IDisposable
             HaltForRetry("The live all-world stock hunt needs at least one confirmed empty retainer sale slot. Run the all-retainer bell pass first.");
             return;
         }
-        if (AvailablePurchaseSlots() == 0 || market.FreeInventorySlots <= configuration.Current.ProcurementInventoryReserve || market.Gil == 0)
+        if (AvailablePurchaseSlots() == 0 || market.FreeInventorySlots <= configuration.Current.ProcurementInventoryReserve || SpendableGil() == 0)
         {
             HaltForRetry("No shopping capacity: list pending stock first and keep bag space and gil available.");
             return;
@@ -554,7 +556,7 @@ public sealed class ProcurementController : IDisposable
             return;
         }
         stockHuntRules = configuration.Current.ProcurementRules
-            .Where(x => x.Enabled && x.ItemId != 0 && x.RequireHighQuality)
+            .Where(x => x.Enabled && x.ItemId != 0 && x.RequireHighQuality && !x.LiquidateOnly)
             .Where(x => market.GetInventoryCount(x.ItemId, true) < configuration.Current.LiveWorldStockThresholdPerItem)
             .DistinctBy(x => x.ItemId)
             .ToList();
@@ -890,11 +892,12 @@ public sealed class ProcurementController : IDisposable
             stockHuntRules,
             homeWorld,
             retainerListings.OwnedRetainerIds,
-            Math.Min(config.ProcurementBudget, market.Gil),
+            SpendableGil(),
             PlannedSaleSlots(freeSaleSlots),
             Math.Max(0, (int)market.FreeInventorySlots - config.ProcurementInventoryReserve),
             config.ProcurementMinimumRoiPercent,
-            config.ProcurementMinimumProfitPerUnit));
+            config.ProcurementMinimumProfitPerUnit,
+            OwnedStock: CollectOwnedStock()));
         detail = Plan.Orders.Count == 0
             ? $"Live tour checked {stockHuntWorlds.Count} worlds; no listing beat the live {homeWorld} resale floor and safety guards."
             : $"Live tour found {Plan.Orders.Count} guarded buy(s), costing {Plan.TotalCost:N0} gil with about {Plan.ExpectedProfit:N0} gil expected profit.";
@@ -1028,10 +1031,7 @@ public sealed class ProcurementController : IDisposable
             FinishShopping("The inventory reserve was reached; no further purchases will be submitted.");
             return;
         }
-        var remainingBudget = configuration.Current.ProcurementBudget > gilSpent
-            ? configuration.Current.ProcurementBudget - gilSpent
-            : 0;
-        if (totalCost > remainingBudget || totalCost > market.Gil)
+        if (totalCost > SpendableGil() || totalCost > market.Gil)
         {
             SkipCurrentOrder($"SKIPPED BUY {currentOrder.ItemName}: budget or gil balance changed.");
             return;
@@ -1173,7 +1173,7 @@ public sealed class ProcurementController : IDisposable
         // reason the route sometimes stopped in Limsa and fell through to vnav.
         if (localTravelAttempts == 0 && timeProvider.GetUtcNow() >= nextActionAt)
         {
-            SubmitMarketTravelAttempt(objectName);
+            SubmitMarketTravelAttempt(objectName, returningHome);
             return;
         }
 
@@ -1212,14 +1212,14 @@ public sealed class ProcurementController : IDisposable
             return;
         }
 
-        SubmitMarketTravelAttempt(objectName);
+        SubmitMarketTravelAttempt(objectName, returningHome);
     }
 
-    private void SubmitMarketTravelAttempt(string objectName)
+    private void SubmitMarketTravelAttempt(string objectName, bool returningHome)
     {
         localTravelObservedBusy = false;
         localTravelAttempts++;
-        if (!TryExecuteMarketTravel())
+        if (!TryExecuteMarketTravel(returningHome))
         {
             nextActionAt = timeProvider.GetUtcNow().AddSeconds(4);
             detail = $"Lifestream did not accept '{configuration.Current.MarketBoardTravelCommand}' " +
@@ -1234,9 +1234,14 @@ public sealed class ProcurementController : IDisposable
         log.Add(AutomationLogLevel.Information, detail);
     }
 
-    private bool TryExecuteMarketTravel()
+    private bool TryExecuteMarketTravel(bool returningHome)
     {
-        var command = configuration.Current.MarketBoardTravelCommand.Trim();
+        // The summoning-bell leg can be pointed somewhere quieter than the market
+        // hub. Empty keeps the original behaviour of reusing the market command.
+        var bell = configuration.Current.SummoningBellTravelCommand.Trim();
+        var command = returningHome && !string.IsNullOrWhiteSpace(bell)
+            ? bell
+            : configuration.Current.MarketBoardTravelCommand.Trim();
         if (string.IsNullOrWhiteSpace(command))
             return false;
 
@@ -1432,6 +1437,40 @@ public sealed class ProcurementController : IDisposable
     }
 
     private int AvailablePurchaseSlots() => PlannedSaleSlots(repricing.LastKnownFreeSaleSlots ?? 0);
+
+    // With reinvestment on, the wallet itself is the budget - the point is to
+    // compound sales into the next trip - and the per-trip cap only applies when
+    // the user turns reinvestment off. The travel reserve is always withheld so a
+    // purchase cannot strand the character without teleport fare.
+    private uint SpendableGil() => ResaleStockPolicy.SpendableGil(
+        market.Gil,
+        configuration.Current.ProcurementTravelReserve,
+        configuration.Current.ReinvestAvailableGil,
+        configuration.Current.ProcurementBudget,
+        gilSpent);
+
+    // Stock the planner must count against its per-item limits: stacks already
+    // listed on the retainers plus everything held in the bags. Without this a
+    // cheap item is re-bought every trip until it crowds out everything else.
+    private IReadOnlyList<StockExposure> CollectOwnedStock()
+    {
+        var stock = new List<StockExposure>(repricing.ListedStock);
+        foreach (var rule in configuration.Current.ProcurementRules
+                     .Where(x => x.Enabled && x.ItemId != 0 && !x.LiquidateOnly)
+                     .DistinctBy(x => x.ItemId))
+        {
+            var stackSize = Math.Max(1, rule.TargetStackSize);
+            foreach (var quality in new[] { false, true })
+            {
+                if (!ResaleStockPolicy.QualityAllowed(rule, quality))
+                    continue;
+                var held = market.GetInventoryCount(rule.ItemId, quality);
+                if (held > 0)
+                    stock.Add(new(rule.ItemId, quality, (uint)held, (held + stackSize - 1) / stackSize));
+            }
+        }
+        return stock;
+    }
 
     // Every capacity decision - planning, the pre-purchase guard, and the
     // scheduler's "capacity changed" trigger - must agree on this number.

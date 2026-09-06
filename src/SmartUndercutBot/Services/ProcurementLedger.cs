@@ -12,9 +12,12 @@ public sealed record ProcurementLedgerEntry(
     bool IsHighQuality,
     bool RequireFullStacks = false,
     uint ReserveQuantity = 0,
-    bool IsBagStock = false)
+    bool IsBagStock = false,
+    int MaximumListingSlots = int.MaxValue,
+    int ListingsCreated = 0)
 {
-    public uint PendingQuantity => PurchasedQuantity > ListedQuantity ? PurchasedQuantity - ListedQuantity : 0;
+    public uint PendingQuantity => ListingsCreated < MaximumListingSlots && PurchasedQuantity > ListedQuantity
+        ? PurchasedQuantity - ListedQuantity : 0;
 }
 
 public sealed class ProcurementLedger
@@ -28,7 +31,8 @@ public sealed class ProcurementLedger
         {
             lock (sync)
                 return (int)Math.Min(int.MaxValue, entries.Values.Sum(x =>
-                    ((long)x.PendingQuantity + Math.Max(1, x.TargetStackSize) - 1) / Math.Max(1, x.TargetStackSize)));
+                    x.PendingQuantity == 0 ? 0L : Math.Min(x.PendingQuantity,
+                        (long)x.MaximumListingSlots - x.ListingsCreated)));
         }
     }
 
@@ -43,6 +47,8 @@ public sealed class ProcurementLedger
         lock (sync)
         {
             var key = (order.ItemId, order.IsHighQuality);
+            var requiredSlots = (int)Math.Max(order.SaleSlots,
+                ((long)order.Quantity + Math.Max(1, targetStackSize) - 1) / Math.Max(1, targetStackSize));
             if (entries.TryGetValue(key, out var existing))
             {
                 entries[key] = existing with
@@ -50,13 +56,14 @@ public sealed class ProcurementLedger
                     PurchasedQuantity = (uint)Math.Min(uint.MaxValue, (ulong)existing.PurchasedQuantity + order.Quantity),
                     TargetSalePrice = order.TargetSalePrice,
                     TargetStackSize = targetStackSize,
+                    MaximumListingSlots = (int)Math.Min(int.MaxValue, (long)existing.MaximumListingSlots + requiredSlots),
                 };
             }
             else
             {
                 entries[key] = new(
                     order.ItemId, order.ItemName, order.Quantity, 0, order.TargetSalePrice, targetStackSize,
-                    order.IsHighQuality);
+                    order.IsHighQuality, MaximumListingSlots: requiredSlots);
             }
         }
     }
@@ -68,7 +75,9 @@ public sealed class ProcurementLedger
         uint targetSalePrice,
         int targetStackSize,
         bool isHighQuality,
-        uint reserveQuantity)
+        uint reserveQuantity,
+        bool requireFullStacks = true,
+        int? maximumListingSlots = null)
     {
         lock (sync)
         {
@@ -83,9 +92,10 @@ public sealed class ProcurementLedger
                 targetSalePrice,
                 targetStackSize,
                 isHighQuality,
-                true,
+                requireFullStacks,
                 reserveQuantity,
-                true);
+                true,
+                maximumListingSlots ?? (int)(((long)quantity + Math.Max(1, targetStackSize) - 1) / Math.Max(1, targetStackSize)));
         }
     }
 
@@ -116,7 +126,8 @@ public sealed class ProcurementLedger
                 return;
             entries[key] = entry with
             {
-                ListedQuantity = (uint)Math.Min(entry.PurchasedQuantity, (ulong)entry.ListedQuantity + quantity),
+                    ListedQuantity = (uint)Math.Min(entry.PurchasedQuantity, (ulong)entry.ListedQuantity + quantity),
+                    ListingsCreated = entry.ListingsCreated + 1,
             };
         }
     }
