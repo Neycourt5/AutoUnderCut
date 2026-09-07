@@ -22,11 +22,10 @@ public sealed class MarketSearchSessionTests
         clock.Advance(500);
         Assert.False(session.Poll(42));
         Assert.Equal((1, 42u), Assert.Single(ui.Activations));
-        ui.Result = new(true, 42, true);
+        ui.Result = new(true, 42, true, false);
         Assert.False(session.Poll(42));
         Assert.Contains("Waiting for live prices", session.Status);
         ui.Result = new(true, 42, false);
-        clock.Advance(3_000);
         Assert.True(session.Poll(42));
         Assert.Contains("Live prices loaded", session.Status);
         Assert.Equal(1, ui.Submissions);
@@ -34,7 +33,7 @@ public sealed class MarketSearchSessionTests
     }
 
     [Fact]
-    public void VisibleWindowDoesNotBypassTheServerResponseOrSettleDelay()
+    public void VisibleWindowWaitsForTheResponseThenAdvancesImmediately()
     {
         var ui = new SearchUi { Rows = [new(0, 42, true)] };
         var clock = new Clock();
@@ -117,7 +116,6 @@ public sealed class MarketSearchSessionTests
         // The server declared its rows and every one arrived, but the client's
         // waiting flag is still set. Gating on it stalled the item until timeout.
         ui.Result = new(true, 42, true, true);
-        clock.Advance(3_500);
         Assert.True(session.Poll(42));
         Assert.Contains("Live prices loaded", session.Status);
     }

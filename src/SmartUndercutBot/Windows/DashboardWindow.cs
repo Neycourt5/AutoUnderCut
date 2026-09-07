@@ -118,8 +118,9 @@ public sealed class DashboardWindow : Window
         var config = configuration.Current;
         ImGui.TextWrapped("Check retainers > fill from bags > buy good deals > return home and list > repeat.");
         if (config.PriorityShoppingEnabled)
-            ImGui.TextWrapped("Shopping: home prices first, then Aether > Primal > Crystal > Dynamis. Buy qualifying live deals during each visit. " +
-                              "Return after 4 away worlds or 20 minutes away to list and collect, then resume the route. Nearby boards and bells are used before teleporting.");
+            ImGui.TextWrapped("Shopping: compare regional prices, then scout two worlds each on Aether > Primal > Crystal > Dynamis. " +
+                              $"Check up to {config.PriorityItemsPerWorld} items per stop. Compare ordinary deals before buying; 100%+ expected return after fees can buy immediately. " +
+                              "Return home to list and collect, then resume the remaining worlds. Use nearby boards and bells before teleporting.");
         ImGui.TextWrapped("Start enables price changes, automatic purchases, listing, gil collection, and repeat checks. " +
                           "It uses your limits below. Keep the game running and leave the retainer list open between trips.");
         ImGui.Spacing();
@@ -875,8 +876,9 @@ public sealed class DashboardWindow : Window
         ImGui.EndDisabled();
         ImGui.TextWrapped("The live all-world hunt scans prices on every world first, then makes a separate buying pass. The guided route waits for you to buy manually.");
         if (configuration.Current.PriorityShoppingEnabled)
-            ImGui.TextWrapped("Automatic shopping checks every configured flip with recent home sales, in item priority and sales-volume order. " +
-                "Each live deal must fit your profit, demand and stock limits. One purchase per item per world keeps the first pass diverse. " +
+            ImGui.TextWrapped($"Scout first: compare regional prices, then check up to {configuration.Current.PriorityItemsPerWorld} promising or rotating flips per world. " +
+                "Two stops per data center: Aether > Primal > Crystal > Dynamis. Ordinary deals are compared before a buying pass; " +
+                "only deals with at least 100% expected return after fees are bought immediately. All purchases still need live price, demand, stock and budget checks. " +
                 $"Next route stop: {((string.IsNullOrEmpty(configuration.Current.PriorityNextWorld)) ? "Aether" : configuration.Current.PriorityNextWorld)}.");
         if (ImGui.CollapsingHeader("Home reference prices"))
         {
@@ -948,7 +950,7 @@ public sealed class DashboardWindow : Window
         {
             ImGui.TextWrapped("Start on the Home tab sets these for continuous restocking. Use these switches for custom workflows.");
             var priority = config.PriorityShoppingEnabled;
-            if (ImGui.Checkbox("Home prices first; buy while visiting worlds in region order", ref priority))
+            if (ImGui.Checkbox("Scout across data centers, compare, then buy", ref priority))
             {
                 config.PriorityShoppingEnabled = priority;
                 SaveConfiguration();
@@ -1003,24 +1005,30 @@ public sealed class DashboardWindow : Window
             }
             ImGui.TextDisabled("Shopping keeps going while the bag buffer is worth less than this, even once the stack count is met - a bag of cheap dye is not a trading position. Set 0 to judge on stack count alone.");
             var worldsPerTrip = config.PriorityWorldsPerTrip;
-            if (InputInt("Worlds per shopping trip", ref worldsPerTrip, 1, 40))
+            if (InputInt("Worlds to scout before comparing", ref worldsPerTrip, 1, 40))
             {
                 config.PriorityWorldsPerTrip = worldsPerTrip;
                 configurationDirty = true;
             }
             var minutesPerTrip = config.PriorityMinutesPerTrip;
-            if (InputInt("Minutes away per trip", ref minutesPerTrip, 5, 480))
+            if (InputInt("Maximum scouting minutes", ref minutesPerTrip, 5, 480))
             {
                 config.PriorityMinutesPerTrip = minutesPerTrip;
                 configurationDirty = true;
             }
-            var homeAge = config.HomePriceMaxAgeHours;
-            if (InputInt("Reuse home prices for (hours)", ref homeAge, 1, 168))
+            var scoutItems = config.PriorityItemsPerWorld;
+            if (InputInt("Items to skim per away world", ref scoutItems, 1, 40))
             {
-                config.HomePriceMaxAgeHours = homeAge;
+                config.PriorityItemsPerWorld = scoutItems;
                 configurationDirty = true;
             }
-            ImGui.TextDisabled("Home prices are also picked up free whenever a retainer pass reprices an item, so a full home sweep is rarely needed.");
+            var homeAge = config.HomePriceMaxAgeMinutes;
+            if (InputInt("Reuse home prices for (minutes)", ref homeAge, 5, 30))
+            {
+                config.HomePriceMaxAgeMinutes = homeAge;
+                configurationDirty = true;
+            }
+            ImGui.TextWrapped("Reuse recent retainer price checks. The compared buying pass lasts up to 20 minutes and rechecks every purchase live. Empty or unanswered searches retry automatically.");
             var salesShare = (float)config.ProcurementWeeklySalesSharePercent;
             if (ImGui.DragFloat("Maximum stock to hold, as % of weekly sales", ref salesShare, 1f, 1, 100, "%.0f%%"))
             {

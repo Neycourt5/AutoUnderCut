@@ -186,28 +186,14 @@ public sealed unsafe class RetainerListingService : IRetainerListingService
             addon->Quantity == null || addon->AskingPrice == null)
             return false;
 
-        var visibleName = addon->ItemName->NodeText.ToString();
+        var visibleName = MemoryHelper.ReadSeStringNullTerminated((nint)(byte*)addon->ItemName->NodeText.StringPtr).TextValue;
         var visibleQuantity = (uint)Math.Max(0, addon->Quantity->Value);
         var visiblePrice = (uint)Math.Max(0, addon->AskingPrice->Value);
         var visibleHq = visibleName.Contains('\uE03C');
 
-        var candidates = ReadCurrentListings()
-            .Where(x => !excludedSlots.Contains(x.Slot))
-            .Where(x => visibleName.Contains(x.ItemName, StringComparison.OrdinalIgnoreCase))
-            .Where(x => itemId == 0 || x.ItemId == itemId)
-            .ToArray();
-        if (candidates.Length == 0)
-            return false;
-
-        // Prefer every field we can observe. Identical stacks are interchangeable here;
-        // excluding prior slots gives each visible row a unique backing market slot.
-        listing = candidates.FirstOrDefault(x => x.Quantity == visibleQuantity && x.CurrentPrice == visiblePrice && x.IsHighQuality == visibleHq)
-            ?? candidates.FirstOrDefault(x => x.Quantity == visibleQuantity && x.CurrentPrice == visiblePrice)
-            ?? candidates.FirstOrDefault(x => x.Quantity == visibleQuantity && x.IsHighQuality == visibleHq)
-            ?? candidates.FirstOrDefault(x => x.CurrentPrice == visiblePrice)
-            ?? candidates.FirstOrDefault(x => x.IsHighQuality == visibleHq)
-            ?? candidates[0];
-        return true;
+        listing = RetainerEditorMatcher.Resolve(ReadCurrentListings(), excludedSlots, itemId,
+            visibleName, visibleQuantity, visiblePrice, visibleHq);
+        return listing is not null;
     }
 
     public bool IsOpenPriceEditorFor(RetainerListing expected, bool requirePriceMatch)
@@ -217,14 +203,14 @@ public sealed unsafe class RetainerListingService : IRetainerListingService
             addon->Quantity == null || addon->AskingPrice == null)
             return false;
 
-        var visibleName = addon->ItemName->NodeText.ToString();
+        var visibleName = MemoryHelper.ReadSeStringNullTerminated((nint)(byte*)addon->ItemName->NodeText.StringPtr).TextValue;
         var visibleQuantity = (uint)Math.Max(0, addon->Quantity->Value);
         var visiblePrice = (uint)Math.Max(0, addon->AskingPrice->Value);
         var visibleHq = visibleName.Contains('\uE03C');
         var priceMatches = visiblePrice == expected.CurrentPrice ||
                            (MarketPriceSafety.IsSafetySeedRepresentation(visiblePrice, visibleQuantity) &&
                             MarketPriceSafety.IsSafetySeedRepresentation(expected.CurrentPrice, expected.Quantity));
-        return visibleName.Contains(expected.ItemName, StringComparison.OrdinalIgnoreCase) &&
+        return RetainerEditorMatcher.NameMatches(visibleName, expected.ItemName) &&
                visibleQuantity == expected.Quantity && visibleHq == expected.IsHighQuality &&
                (!requirePriceMatch || priceMatches);
     }
@@ -328,6 +314,8 @@ public sealed unsafe class RetainerListingService : IRetainerListingService
         var addon = gameGui.GetAddonByName<AddonRetainerSell>("RetainerSell");
         if (addon == null || !addon->AtkUnitBase.IsVisible || addon->AskingPrice == null)
             return new(false, "The Adjust Price window is no longer available.");
+        if (!IsOpenPriceEditorFor(expected, requirePriceMatch: false))
+            return new(false, "The open Adjust Price item or quantity changed after evaluation.");
         if (!TryReadListing(expected.Slot, out var current) || current is null ||
             current.RetainerId != expected.RetainerId || current.ItemId != expected.ItemId ||
             current.Quantity != expected.Quantity || current.CurrentPrice != expected.CurrentPrice ||

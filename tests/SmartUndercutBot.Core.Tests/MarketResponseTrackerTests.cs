@@ -20,7 +20,7 @@ public sealed class MarketResponseTrackerTests
     }
 
     [Fact]
-    public void EveryPacketAndTheNativeRowsMustArriveAndSettle()
+    public void CompletePacketsAndNativeRowsAreAcceptedWithoutAFixedDelay()
     {
         var time = new Clock();
         var tracker = new MarketResponseTracker(time);
@@ -30,8 +30,6 @@ public sealed class MarketResponseTrackerTests
         time.Advance(5000);
         Assert.False(tracker.IsReady(42, 3));
         tracker.ReceiveRows(10, 42, [2, 3]);
-        Assert.False(tracker.IsReady(42, 3));
-        time.Advance(750);
         Assert.False(tracker.IsReady(42, 2));
         Assert.True(tracker.IsReady(42, 3));
         Assert.False(tracker.IsReady(43, 3));

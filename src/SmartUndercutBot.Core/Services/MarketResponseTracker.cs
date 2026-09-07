@@ -57,7 +57,9 @@ public sealed class MarketResponseTracker(TimeProvider? clock = null)
         lock (sync)
             return item != 0 && item == itemId && error == 0 && expected is { } count &&
                 listings.Count >= count && visibleCount >= count &&
-                time.GetUtcNow() - changed >= TimeSpan.FromMilliseconds(750);
+                // Counted rows prove a non-empty response is complete. Only an
+                // empty acknowledgement needs a quiet period to avoid racing rows.
+                (count > 0 || time.GetUtcNow() - changed >= TimeSpan.FromMilliseconds(750));
     }
 
     public bool Contains(ulong listingId) { lock (sync) return listings.Contains(listingId); }

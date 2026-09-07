@@ -889,7 +889,9 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
         }
         ReplaceCurrent(entry with { Status = "Reading live market" });
         marketRequestAttempts++;
-        marketTask = marketData.GetSnapshotAsync(entry.Listing.ItemId, sessionCancellation!.Token);
+        // Visible order can differ from RetainerMarket inventory order. Until the
+        // editor is mapped, let the actual Compare Prices reply identify the item.
+        marketTask = marketData.GetSnapshotAsync(currentRowMapped ? entry.Listing.ItemId : 0, sessionCancellation!.Token);
         if (!retainerListings.RequestComparePrices())
         {
             if (returnToAutoListingAfterCurrent)
@@ -970,7 +972,7 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
         if (currentMarket.ItemId != 0 && currentMarket.Listings.Count > 0)
             observedHomePrices[currentMarket.ItemId] = (timeProvider.GetUtcNow(), currentMarket.Listings);
         var entry = queue[currentIndex];
-        if (currentMarket.ItemId != 0 && currentMarket.ItemId != entry.Listing.ItemId)
+        if (currentRowMapped && currentMarket.ItemId != 0 && currentMarket.ItemId != entry.Listing.ItemId)
         {
             ReplaceCurrent(entry with { Status = "Ignored stale market packet" });
             log.Add(AutomationLogLevel.Error,

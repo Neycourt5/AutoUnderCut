@@ -7,7 +7,7 @@ namespace SmartUndercutBot;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 32;
+    public int Version { get; set; } = 33;
     public bool AutomationEnabled { get; set; }
     public bool ProcessAllRetainers { get; set; } = true;
     public bool RepeatBellRuns { get; set; }
@@ -38,9 +38,8 @@ public sealed class Configuration : IPluginConfiguration
     public uint ProcurementBufferValueTarget { get; set; } = 1_000_000;
     public int PriorityWorldsPerTrip { get; set; } = 8;
     public int PriorityMinutesPerTrip { get; set; } = 45;
-    // Home prices barely move day to day, and repricing re-reads them for free every
-    // retainer pass, so a full home sweep is not needed more than once a day.
-    public int HomePriceMaxAgeHours { get; set; } = 24;
+    // The same freshness limit applies to reusing a quote and approving a buy.
+    public int HomePriceMaxAgeMinutes { get; set; } = 30;
     public bool ContinueShoppingWhenStocked { get; set; } = true;
     public decimal ProcurementBufferGilPercent { get; set; } = 20m;
     public uint ProcurementTravelReserve { get; set; } = 5_000;
@@ -58,6 +57,8 @@ public sealed class Configuration : IPluginConfiguration
     public bool PriorityShoppingEnabled { get; set; } = true;
     public string PriorityNextWorld { get; set; } = string.Empty;
     public uint PriorityNextItem { get; set; }
+    public List<string> PriorityScoutRoute { get; set; } = [];
+    public int PriorityItemsPerWorld { get; set; } = 8;
     // Empty means "use the market-board command", which is the original behaviour.
     public string SummoningBellTravelCommand { get; set; } = string.Empty;
     public bool LiveWorldStockHuntEnabled { get; set; } = true;
@@ -391,14 +392,15 @@ public sealed class Configuration : IPluginConfiguration
             ProcurementBufferValueTarget = 1_000_000;
             PriorityWorldsPerTrip = 8;
             PriorityMinutesPerTrip = 45;
-            HomePriceMaxAgeHours = 24;
             Version = 32;
         }
-        Version = Math.Max(Version, 32);
+        Version = Math.Max(Version, 33);
+        PriorityScoutRoute ??= [];
+        PriorityItemsPerWorld = Math.Clamp(PriorityItemsPerWorld, 1, 40);
         ProcurementBufferValueTarget = Math.Min(ProcurementBufferValueTarget, 999_999_999u);
         PriorityWorldsPerTrip = Math.Clamp(PriorityWorldsPerTrip, 1, 40);
         PriorityMinutesPerTrip = Math.Clamp(PriorityMinutesPerTrip, 5, 480);
-        HomePriceMaxAgeHours = Math.Clamp(HomePriceMaxAgeHours, 1, 168);
+        HomePriceMaxAgeMinutes = Math.Clamp(HomePriceMaxAgeMinutes, 5, 30);
         LiveWorldStockHuntMaximumItems = Math.Clamp(LiveWorldStockHuntMaximumItems, 1, 40);
         ProcurementBufferGilPercent = Math.Clamp(ProcurementBufferGilPercent, 0m, 100m);
         ProcurementBagBufferStacks = Math.Clamp(ProcurementBagBufferStacks, 0, 50);

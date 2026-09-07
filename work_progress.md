@@ -11,6 +11,50 @@ Build: use `C:/Users/Acour/.dotnet/dotnet.exe` (SDK 10.0.301), **not** the PATH
 
 ---
 
+## v1.0.0.54 - faster regional scouting and compare before buying (publication pending)
+
+Latest request: reach other data centers sooner, skim quickly, compare normal
+deals and only buy immediately when the margin is exceptional. Preserve the
+now-working .50-.53 native search/purchase fixes and Limsa travel.
+
+- Fetch North America price hints alongside home demand. Rank useful stops, then
+  scout two worlds per DC in Aether -> Primal -> Crystal -> Dynamis waves. Save
+  the complete route and cursor across retainer checkpoints; all 31 away worlds
+  still get a turn. If regional hints fail, use rotating live scouts.
+- Home checks still cover configured high-volume flips, reusing fresh repricing
+  observations. Away stops check at most 8 items (adjustable), half from promising
+  hints and the remainder from rotating priorities so missing hints cannot hide
+  everything. A 51-item fixture checks 64 away items across 8 worlds, previously
+  408, without waiting for all Aether worlds before reaching the other DCs.
+- Record live offers while scouting. After the configured world/time checkpoint,
+  allocate normal purchases against all observed prices and home sales, then
+  revisit the selected offers with fresh reads. Prices may improve, but cannot
+  exceed the winning observed price. The buying pass is bounded at 20 minutes.
+  Net ROI of at least 100% permits an immediate guarded purchase during scouting.
+  Retain budget, tax, exposure, bag-space and inventory-receipt checks. Preserve
+  already-spent gil and confirmed purchases between scouting and normal buying.
+- Complete non-empty packet/native row counts advance immediately, removing the
+  extra 3-second result delay, 750ms quiet delay and 3-second between-item pause.
+  Keep separate typing/Enter ticks, exact-row matching and empty-response settling.
+  Unanswered scouting reads retry after 6/12/18 seconds with 1/2-second backoff.
+  A submitted purchase is never blindly retried.
+- Home quote reuse and buying now share one 5-30 minute setting. .53 reused quotes
+  for 24 hours then rejected them after 30 minutes, causing a return/reuse loop.
+- Retainer editor names are decoded as SeStrings and whitespace/control formatting
+  is normalized. Unmapped visible rows request the actual reply item, rather than
+  filtering it against a guessed inventory order. Require item/name/quantity/HQ
+  agreement and recheck the editor before writing. This fixes the reproduced
+  wrapped Sky Blue name + reversed inventory order case; the exact native text
+  behind the user's original skip was not captured, so confirm in the next run.
+
+Validation: 209 tests pass. Release build passed with zero warnings/errors before
+the final version bump. Tests cover all four DCs, ordinary/exceptional purchases,
+changed offers, quick bounded retries, expired references, budgets across both
+phases, repeated trips and wrapped dye repricing. These are simulated game
+services; .54 has not been exercised in FFXIV by this session.
+Publication pending; see PLAN.md. Never claim installer-ready until the workflow
+and the public installer/ZIP/DLL versions have been checked.
+
 ## v1.0.0.49 - priority shopping, fresh responses and Limsa (published)
 
 User asked for a paced, repeatable home-first shopping loop, buying profitable

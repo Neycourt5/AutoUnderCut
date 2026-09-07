@@ -77,7 +77,7 @@ public sealed class MarketSearchSession(IMarketSearchUi ui, TimeProvider? clock 
                 // WaitingForListings is not - it stays set on this client after a
                 // complete response, which stalled every item until the route timed
                 // out even with all rows in hand.
-                var ready = result.ResponseReceived && time.GetUtcNow() >= nextActionAt;
+                var ready = result.ResponseReceived;
                 Status = ready ? $"Live prices loaded for {itemName}." : $"Waiting for live prices for {itemName}.";
                 return ready;
             }
@@ -109,7 +109,7 @@ public sealed class MarketSearchSession(IMarketSearchUi ui, TimeProvider? clock 
             return false;
         }
         selected = true;
-        nextActionAt = time.GetUtcNow().AddSeconds(3);
+        nextActionAt = time.GetUtcNow();
         Status = $"Opened the {itemName} row; waiting for live listings.";
         return false;
     }

@@ -307,7 +307,7 @@ public sealed partial class ProcurementController : IDisposable
         cancellation = new CancellationTokenSource();
         runAfterScan = mode;
         scanTask = priorityShopping
-            ? universalis.ScanAsync(buyRules, planningHomeWorld, cancellation.Token)
+            ? ScanPriorityRegionAsync(buyRules, planningHomeWorld, cancellation.Token)
             : ScanWithHomeResaleAsync(buyRules, dataCenter, planningHomeWorld, cancellation.Token);
         // Room for three attempts per batch with backoff before giving up.
         deadline = timeProvider.GetUtcNow().AddSeconds(150);
@@ -318,7 +318,7 @@ public sealed partial class ProcurementController : IDisposable
         gilSpent = 0;
         State = ProcurementState.ScanningUniversalis;
         detail = priorityShopping
-            ? $"Checking recent home sales for {buyRules.Length} flips before visiting the local board."
+            ? $"Comparing {buyRules.Length} flips across North America against home sales to shortlist quick visits."
             : $"Scanning {buyRules.Length} item(s) on {dataCenter} via Universalis.";
         log.Add(AutomationLogLevel.Information, detail);
     }
@@ -657,7 +657,7 @@ public sealed partial class ProcurementController : IDisposable
         TravelToCurrentWorld();
     }
 
-    private void BeginExecution(ProcurementRunMode mode)
+    private void BeginExecution(ProcurementRunMode mode, bool preserveTrip = false)
     {
         // The live tour reaches this after its scan, so returning silently would
         // leave the route dangling mid-state. Stop explicitly and retry later.
@@ -711,12 +711,15 @@ public sealed partial class ProcurementController : IDisposable
             .ToList();
         worldIndex = 0;
         orderIndex = 0;
-        gilSpent = 0;
-        confirmedPurchases = 0;
-        purchaseConfirmations = 0;
-        skippedPurchases = 0;
+        if (!preserveTrip)
+        {
+            gilSpent = 0;
+            confirmedPurchases = 0;
+            purchaseConfirmations = 0;
+            skippedPurchases = 0;
+            purchasedSlotsByItem.Clear();
+        }
         routeOutcome = string.Empty;
-        purchasedSlotsByItem.Clear();
         TravelToCurrentWorld();
     }
 
@@ -830,6 +833,8 @@ public sealed partial class ProcurementController : IDisposable
     {
         if (!stockHuntScanning)
             return;
+        while (priorityShopping && stockHuntWorldIndex > 0 && stockHuntRuleIndex < stockHuntRules.Count &&
+            !ShouldScoutItem(stockHuntRules[stockHuntRuleIndex].ItemId)) stockHuntRuleIndex++;
         if (stockHuntRuleIndex >= stockHuntRules.Count)
         {
             FinishStockHuntWorld();
@@ -856,12 +861,12 @@ public sealed partial class ProcurementController : IDisposable
         {
             nextActionAt = timeProvider.GetUtcNow().AddMilliseconds(1_200);
             Wait(ProcurementState.WaitingForStockHuntListings,
-                $"Waiting to scan {currentStockHuntRule.ItemName} on {WorldName}.", 30);
+                $"Waiting to scan {currentStockHuntRule.ItemName} on {WorldName}.", 6);
             return;
         }
         nextActionAt = timeProvider.GetUtcNow().AddMilliseconds(1_200);
         Wait(ProcurementState.WaitingForStockHuntListings,
-            $"Reading live {currentStockHuntRule.ItemName} listings on {WorldName}.", 30);
+            $"Reading live {currentStockHuntRule.ItemName} listings on {WorldName}.", 6);
     }
 
     private void PollStockHuntListings()
@@ -933,7 +938,7 @@ public sealed partial class ProcurementController : IDisposable
         market.ResetListingRequest();
         stockHuntRuleIndex++;
         currentStockHuntRule = null;
-        nextActionAt = timeProvider.GetUtcNow().AddSeconds(3);
+        nextActionAt = timeProvider.GetUtcNow();
         State = ProcurementState.WaitingForStockHuntListings;
         detail = $"Waiting before the next live scan on {WorldName}.";
     }
@@ -963,6 +968,11 @@ public sealed partial class ProcurementController : IDisposable
                 if (resumeItem >= 0) stockHuntRuleIndex = resumeItem;
             }
             else priorityWorldsCompleted++;
+            if (stockHuntWorldIndex >= stockHuntWorlds.Count)
+            {
+                CompleteStockHuntScan();
+                return;
+            }
             SavePriorityCursor();
             if (PriorityTripShouldReturn()) return;
         }
@@ -995,8 +1005,9 @@ public sealed partial class ProcurementController : IDisposable
         {
             configuration.Current.PriorityNextWorld = string.Empty;
             configuration.Current.PriorityNextItem = 0;
+            configuration.Current.PriorityScoutRoute.Clear();
             configuration.Save();
-            FinishShopping("Priority circuit finished. Returning to list stock and collect sales; the next circuit starts at Aether.");
+            FinishPriorityScouting("Priority circuit compared. The next circuit starts at Aether.");
             return;
         }
         stockHuntScanning = false;
@@ -1072,15 +1083,26 @@ public sealed partial class ProcurementController : IDisposable
         if (!market.RequestListings(currentOrder.ItemId))
         {
             nextActionAt = timeProvider.GetUtcNow().AddMilliseconds(1_200);
-            Wait(ProcurementState.WaitingForListings, $"Waiting to request {currentOrder.ItemName}.", 30);
+            Wait(ProcurementState.WaitingForListings, $"Waiting to request {currentOrder.ItemName}.", 6);
             return;
         }
-        Wait(ProcurementState.WaitingForListings, $"Revalidating live prices for {currentOrder.ItemName}.", 30);
+        Wait(ProcurementState.WaitingForListings, $"Revalidating live prices for {currentOrder.ItemName}.", 6);
     }
 
     private void PollListings()
     {
         if (priorityShopping && !DelayElapsed()) return;
+        if (priorityShopping && !stockHuntScanning && comparisonBuyingStarted is { } started &&
+            timeProvider.GetUtcNow() - started >= TimeSpan.FromMinutes(20))
+        {
+            FinishShopping("Compared buying pass reached its time limit; returning to list stock and collect sales.");
+            return;
+        }
+        if (priorityShopping && currentOrder is { } checkedOrder && !HomePriceIsFresh(checkedOrder.ItemId))
+        {
+            SkipCurrentOrder($"SKIPPED BUY {checkedOrder.ItemName}: home reference expired; refresh it next retainer pass.");
+            return;
+        }
         if (!configuration.Current.AllowAutomaticPurchases)
         {
             FinishShopping("Automatic purchases were disarmed; the route stopped before submitting another purchase.");
@@ -1257,8 +1279,9 @@ public sealed partial class ProcurementController : IDisposable
         configuration.Save();
         gilSpent += (uint)Math.Min(purchaseCost, uint.MaxValue - gilSpent);
         confirmedPurchases++;
-        if (priorityShopping && stockHuntWorldIndex == 0 && homePrices.TryGetValue(actual.ItemId, out var home))
+        if (priorityShopping && stockHuntScanning && stockHuntWorldIndex == 0 && homePrices.TryGetValue(actual.ItemId, out var home))
             homePrices[actual.ItemId] = home.Where(x => x.ListingId != actual.ListingId).ToArray();
+        scoutListings.RemoveAll(x => x.WorldName == actual.WorldName && x.ListingId == actual.ListingId);
         purchasedSlotsByItem[actual.ItemId] = purchasedSlotsByItem.GetValueOrDefault(actual.ItemId) + 1;
         log.Add(AutomationLogLevel.Information,
             $"PURCHASED {actual.ItemName} x{actual.Quantity} on {actual.WorldName} at {actual.PricePerUnit:N0} gil each; " +
@@ -1279,8 +1302,8 @@ public sealed partial class ProcurementController : IDisposable
             return false;
         listingRequestAttempts++;
         market.ResetListingRequest();
-        nextActionAt = timeProvider.GetUtcNow().AddSeconds(2);
-        deadline = nextActionAt.AddSeconds(30);
+        nextActionAt = timeProvider.GetUtcNow().AddSeconds(listingRequestAttempts - 1);
+        deadline = nextActionAt.AddSeconds(6 * listingRequestAttempts);
         detail = $"Retrying the live search for {itemName} on {WorldName} (attempt {listingRequestAttempts}/3). No purchase has been submitted for this order.";
         log.Add(AutomationLogLevel.Warning, detail);
         return true;
@@ -1288,7 +1311,7 @@ public sealed partial class ProcurementController : IDisposable
 
     private void AdvanceOrder()
     {
-        if (priorityShopping)
+        if (priorityShopping && stockHuntScanning)
         {
             currentOrder = null;
             currentLiveListing = null;

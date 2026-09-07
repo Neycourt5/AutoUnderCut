@@ -128,6 +128,24 @@ public sealed class RetainerAutomationTests
         Assert.Equal(1, run.Game.ContextMenuOpens);
     }
 
+    [Fact]
+    public void UnmappedWrappedDyeUsesTheReplyItemAndWritesOnlyTheMatchingSlot()
+    {
+        using var run = new Session();
+        run.Game.LiveRepricing = true;
+        run.Game.Listings.AddRange([
+            new(1, "Test Retainer", 2, 41760, "Savage Might Materia XI", 1, 9000, false),
+            new(1, "Test Retainer", 7, 13721, "General-purpose Metallic Sky Blue Dye", 5, 6598, false),
+        ]);
+        // Visible order is the reverse of inventory order; the name becomes
+        // available only after Compare Prices, with the wrap in the screenshot.
+        run.Bot.StartNow();
+        run.CompletePass();
+        Assert.Equal(new[] { 0u, 0u }, run.Game.RequestedItems);
+        Assert.Equal(new[] { (13721u, (short)7, 6596u), (41760u, (short)2, 8998u) }, run.Game.Commits);
+        Assert.Equal(6596u, run.Game.Listings.Single(x => x.ItemId == 13721).CurrentPrice);
+    }
+
     private sealed class Session : IDisposable
     {
         public Game Game { get; } = new();
@@ -192,21 +210,70 @@ public sealed class RetainerAutomationTests
         public bool AdjustPriceWorks = true;
         public int ContextMenuOpens;
         private bool contextOpen;
+        public bool LiveRepricing;
+        private bool editorOpen;
+        private int visibleIndex;
+        private bool pricesReturned;
+        private uint requestedItem;
+        private TaskCompletionSource<MarketSnapshot>? request;
+        public List<uint> RequestedItems = [];
+        public List<(uint Item, short Slot, uint Price)> Commits = [];
+        private RetainerListing Editor => Listings.AsEnumerable().Reverse().ElementAt(visibleIndex);
+        public override bool IsPriceEditorOpen => editorOpen;
         public override bool IsContextMenuOpen => contextOpen;
         public override IReadOnlyList<RetainerListing> ReadCurrentListings() => Listings;
         public override bool OpenListingContextMenu(int index)
         {
             ContextMenuOpens++;
+            visibleIndex = index;
             contextOpen = true;
             return true;
         }
         public override bool SelectAdjustPrice()
         {
             contextOpen = false;
+            editorOpen = LiveRepricing && AdjustPriceWorks;
+            pricesReturned = false;
             return AdjustPriceWorks;
         }
         public override void CloseContextMenu() => contextOpen = false;
-        public Task<MarketSnapshot> GetSnapshotAsync(uint id, CancellationToken token) => throw new NotSupportedException();
+        public override void CancelPriceEditor() => editorOpen = false;
+        public override bool TryResolveOpenPriceEditor(uint id, IReadOnlySet<short> slots, out RetainerListing? listing)
+        {
+            listing = pricesReturned ? RetainerEditorMatcher.Resolve(Listings, slots, id,
+                Editor.ItemName.Replace("Blue Dye", "Blue\nDye"), Editor.Quantity, Editor.CurrentPrice, Editor.IsHighQuality) : null;
+            return listing is not null;
+        }
+        public override bool IsOpenPriceEditorFor(RetainerListing listing, bool requirePriceMatch) =>
+            editorOpen && listing.ItemId == Editor.ItemId && listing.Slot == Editor.Slot &&
+            (!requirePriceMatch || listing.CurrentPrice == Editor.CurrentPrice);
+        public override bool RequestComparePrices()
+        {
+            pricesReturned = true;
+            if (requestedItem != 0 && requestedItem != Editor.ItemId)
+                request!.SetException(new TimeoutException("Wrong provisional inventory item filtered out the actual reply."));
+            else request!.SetResult(new(Editor.ItemId, DateTimeOffset.UtcNow,
+                [new(Editor.CurrentPrice - 1, 2, false, "Competitor", 99)], Editor.CurrentPrice));
+            return true;
+        }
+        public override PriceUpdateResult CommitPrice(RetainerListing expected, uint price)
+        {
+            Assert.True(IsOpenPriceEditorFor(expected, true));
+            Commits.Add((expected.ItemId, expected.Slot, price));
+            var index = Listings.FindIndex(x => x.Slot == expected.Slot);
+            Listings[index] = expected with { CurrentPrice = price };
+            editorOpen = false;
+            return new(true, "Simulated server accepted price.");
+        }
+        public override bool TryReadListing(short slot, out RetainerListing? listing)
+        { listing = Listings.FirstOrDefault(x => x.Slot == slot); return listing is not null; }
+        public Task<MarketSnapshot> GetSnapshotAsync(uint id, CancellationToken token)
+        {
+            RequestedItems.Add(id);
+            requestedItem = id;
+            request = new();
+            return request.Task;
+        }
         public void ClearCache() { }
     }
 }

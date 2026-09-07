@@ -1,3 +1,39 @@
+# Active: v1.0.0.54 release verification
+
+Latest user steering: proceed as soon as real prices arrive; retry an unanswered
+empty screen with backoff. Scout across data centers and compare normal deals;
+buy immediately only for exceptional margins. Publish the finished update.
+
+- [x] Inspect current game/session logs and saved rule priorities.
+- [x] Normalize formatted/wrapped editor names; resolve unmapped rows from the
+      actual returned item ID instead of requesting a guessed inventory-row ID.
+- [x] Preserve .50-.53's now-working native response hooks; completed packet/row
+      evidence is authoritative. Remove extra three-second waits and the quiet
+      delay on complete non-empty responses; retain empty-response settling.
+- [x] Short bounded retries on missing prices, with diagnostics and visible
+      comparison/skip reasons; never treat a timeout as an empty market.
+- [x] Preserve .50's migrated default priorities; North America cached shortlist,
+      two worlds per DC per wave, 8 items per away world, persisted full circuit.
+      Compare live offers after scouting, revisit normal winners at the observed
+      price or better, buy exceptional 100%+ net ROI immediately. Keep all guards.
+- [x] Fix inconsistent home quote lifetimes (24h reuse vs 30min buy rejection).
+      Use one configurable 5-30 minute lifetime for reuse and purchase approval.
+- [x] 209 tests pass: wrapped dye mapped and repriced, counted response speed,
+      empty retries, 31-world circuit, short 51-item scouting, Crystal beating
+      Aether, immediate exceptional deals, stale/changed prices, spending across
+      both phases, automatic repeat trips and home quote expiry.
+- [x] Release build passed with zero warnings/errors before final version bump.
+- [ ] Final 1.0.0.54 build, commit/main/tag push, Actions and public ZIP verification.
+
+Evidence: .49 log at 01:19 skips Sky Blue #13721 because it cannot map the editor.
+Other long dye rows produce requests for the wrong provisional inventory item.
+Shopping from 01:21 to 01:38 never completes one comparison, spending about 90s
+per item. Saved buyable rules all have legacy TourPriority=5 / HuntOnTour=false.
+Do not describe .49's native shopping run as successful.
+The repository advanced through .53 while this task was active; those changes
+were preserved. User now reports shopping working and asks for faster broader
+scouting. This session has not exercised .54 in FFXIV. Installer URL unchanged.
+
 # Completed: v1.0.0.49 reliable priority shopping
 
 Standing authorization: implement, test, commit, push and publish (AGENTS.md).

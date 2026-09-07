@@ -43,13 +43,13 @@ namespace SmartUndercutBot.Core.Tests.Automation
         { pending = null; return false; }
         public virtual bool VerifyAutoListing(PendingAutoListing pending) => throw new NotSupportedException();
         public virtual bool TryReadListing(short slot, out RetainerListing? listing) => throw new NotSupportedException();
-        public bool TryResolveOpenPriceEditor(uint id, IReadOnlySet<short> slots, out RetainerListing? listing) => throw new NotSupportedException();
-        public bool IsOpenPriceEditorFor(RetainerListing listing, bool requirePriceMatch) => throw new NotSupportedException();
+        public virtual bool TryResolveOpenPriceEditor(uint id, IReadOnlySet<short> slots, out RetainerListing? listing) => throw new NotSupportedException();
+        public virtual bool IsOpenPriceEditorFor(RetainerListing listing, bool requirePriceMatch) => throw new NotSupportedException();
         public virtual bool OpenListingContextMenu(int index) => throw new NotSupportedException();
         public virtual bool SelectAdjustPrice() => throw new NotSupportedException();
-        public bool RequestComparePrices() => throw new NotSupportedException();
+        public virtual bool RequestComparePrices() => throw new NotSupportedException();
         public bool TryReadSellerFeePercent(out decimal feePercent) { feePercent = 5m; return true; }
-        public PriceUpdateResult CommitPrice(RetainerListing expected, uint price) => throw new NotSupportedException();
+        public virtual PriceUpdateResult CommitPrice(RetainerListing expected, uint price) => throw new NotSupportedException();
         public bool SelectEntrustGil(out string message) => throw new NotSupportedException();
         public bool SetWithdrawAllRetainerGil(out uint amount, out string message) => throw new NotSupportedException();
         public bool ConfirmGilWithdrawal() => throw new NotSupportedException();

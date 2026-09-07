@@ -16,6 +16,9 @@ public sealed partial class ProcurementController
     private readonly List<ShoppingObservation> observations = [];
     private DateTimeOffset priorityDepartedAt;
     private int priorityWorldsCompleted;
+    private readonly List<ProcurementMarketListing> scoutListings = [];
+    private readonly Dictionary<string, HashSet<uint>> scoutItems = new(StringComparer.OrdinalIgnoreCase);
+    private DateTimeOffset? comparisonBuyingStarted;
     public IReadOnlyList<ShoppingObservation> RecentPrices => observations;
 
     /// <summary>The home-world prices every away deal is measured against.</summary>
@@ -32,6 +35,99 @@ public sealed partial class ProcurementController
 
     public DateTimeOffset? HomePricesUpdatedAt =>
         homePriceTimes.Count == 0 ? null : homePriceTimes.Values.Max();
+
+    private async Task<IReadOnlyList<ProcurementMarketItem>> ScanPriorityRegionAsync(
+        IReadOnlyList<ProcurementRule> rules, string home, CancellationToken token)
+    {
+        var regional = universalis.ScanAsync(rules, "North-America", token);
+        var local = universalis.ScanAsync(rules, home, token);
+        IReadOnlyList<ProcurementMarketItem> region;
+        try { region = await regional.ConfigureAwait(false); }
+        catch (Exception) when (!token.IsCancellationRequested)
+        {
+            // Cached scouting is a hint, never a prerequisite for live prices.
+            region = [];
+            log.Add(AutomationLogLevel.Warning, "Regional price hints unavailable; using rotating live scouts across all four data centers.");
+        }
+        var homeMarkets = await local.ConfigureAwait(false);
+        return homeMarkets.Select(m => m with
+        {
+            Listings = m.Listings.Concat(region.Where(r => r.ItemId == m.ItemId).SelectMany(r => r.Listings)
+                .Where(l => !l.WorldName.Equals(home, StringComparison.OrdinalIgnoreCase))).Distinct().ToArray(),
+        }).ToArray();
+    }
+
+    private void PrepareScoutRoute()
+    {
+        var config = configuration.Current;
+        var hints = priorityDemand.SelectMany(m => m.Listings.Select(l =>
+        {
+            var reference = HomePriceReference.Summarize(m.ItemId, m.ItemName, l.IsHighQuality,
+                m.Listings.Where(h => h.WorldName.Equals(homeWorld, StringComparison.OrdinalIgnoreCase)).ToArray()).Reference;
+            return (Listing: l, Score: Math.Max(0m, reference * 0.95m - l.PricePerUnit * 1.05m) * l.Quantity);
+        })).Where(x => stockHuntRules.Any(r => r.ItemId == x.Listing.ItemId &&
+            ResaleStockPolicy.BuyableQuality(r, x.Listing.IsHighQuality, config.BuyHighQualityOnly)) &&
+            !retainerListings.OwnedRetainerIds.Contains(x.Listing.RetainerId)).ToArray();
+        var scores = hints.GroupBy(x => x.Listing.WorldName, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.Sum(x => x.Score), StringComparer.OrdinalIgnoreCase);
+        var expectedWorlds = NorthAmericaWorlds.Where(w => !w.Equals(homeWorld, StringComparison.OrdinalIgnoreCase)).ToArray();
+        // Keep the route stable across retainer checkpoints; repricing the hints
+        // on each trip must not reorder worlds behind the saved cursor forever.
+        if (config.PriorityScoutRoute.Count != expectedWorlds.Length ||
+            !config.PriorityScoutRoute.ToHashSet(StringComparer.OrdinalIgnoreCase).SetEquals(expectedWorlds))
+            config.PriorityScoutRoute = ShoppingScoutPolicy.BuildRoute(NorthAmericaWorlds, homeWorld, scores).ToList();
+        var resume = config.PriorityScoutRoute.FindIndex(w => w.Equals(config.PriorityNextWorld, StringComparison.OrdinalIgnoreCase));
+        stockHuntWorlds = new[] { homeWorld }.Concat(config.PriorityScoutRoute.Skip(Math.Max(0, resume))).ToList();
+        scoutItems.Clear();
+        var limit = Math.Max(1, config.PriorityItemsPerWorld);
+        for (var i = 0; i < config.PriorityScoutRoute.Count; i++)
+        {
+            var world = config.PriorityScoutRoute[i];
+            // Reserve half the quick scan for rotating high-volume flips, so
+            // stale or missing regional hints cannot hide new bargains forever.
+            var hinted = hints.Where(x => x.Listing.WorldName.Equals(world, StringComparison.OrdinalIgnoreCase) && x.Score > 0)
+                .OrderByDescending(x => x.Score).Select(x => x.Listing.ItemId).Distinct().Take(Math.Max(1, limit / 2));
+            var offset = i * Math.Max(1, limit / 2) % stockHuntRules.Count;
+            var rotated = stockHuntRules.Skip(offset).Concat(stockHuntRules.Take(offset)).Select(r => r.ItemId);
+            var resumed = world.Equals(config.PriorityNextWorld, StringComparison.OrdinalIgnoreCase) && config.PriorityNextItem != 0
+                ? new[] { config.PriorityNextItem } : [];
+            scoutItems[world] = resumed.Concat(hinted).Concat(rotated).Distinct().Take(limit).ToHashSet();
+        }
+        log.Add(AutomationLogLevel.Information,
+            $"REGIONAL SCOUT: compared {hints.Length} cached offers; first stops " +
+            $"{string.Join(" > ", stockHuntWorlds.Skip(1).Take(config.PriorityWorldsPerTrip))}. " +
+            "Cached offers only choose where to look; purchasing requires live observations.");
+        configuration.Save();
+    }
+
+    private bool ShouldScoutItem(uint item) => scoutItems.GetValueOrDefault(WorldName)?.Contains(item) == true;
+
+    private void FinishPriorityScouting(string reason)
+    {
+        var config = configuration.Current;
+        var markets = priorityDemand.Select(m => m with
+        {
+            Listings = scoutListings.Where(l => l.ItemId == m.ItemId && HomePriceIsFresh(l.ItemId)).ToArray(),
+        }).ToArray();
+        var compared = planner.BuildPlan(new(markets, ShoppingRules(stockHuntRules), SpendableGil(), AvailablePurchaseSlots(),
+            Math.Max(0, (int)market.FreeInventorySlots - config.ProcurementInventoryReserve),
+            config.ProcurementMinimumRoiPercent, config.ProcurementMinimumProfitPerUnit,
+            HomeWorld: homeWorld, OwnedRetainerIds: retainerListings.OwnedRetainerIds,
+            OwnedStock: CollectOwnedStock(), MaximumWeeklySalesSharePercent: config.ProcurementWeeklySalesSharePercent,
+            HighQualityOnly: config.BuyHighQualityOnly, ResaleListings: homePrices.Values.SelectMany(x => x).ToArray()));
+        if (compared.Orders.Count == 0) { FinishShopping(reason + " No remaining compared deals fit the current limits; returning to retainers."); return; }
+        // A more expensive replacement may still pass ROI, but was not the deal
+        // that won this comparison. Allow the observed price or better only.
+        Plan = compared with { Orders = compared.Orders.Select(o => o with
+            { MaximumAcceptableUnitPrice = Math.Min(o.PricePerUnit, o.MaximumAcceptableUnitPrice) }).ToArray() };
+        stockHuntScanning = false;
+        currentStockHuntRule = null;
+        comparisonBuyingStarted = timeProvider.GetUtcNow();
+        log.Add(AutomationLogLevel.Information,
+            $"SCOUT COMPARISON: {priorityWorldsCompleted} away world(s), {scoutListings.Count} observed listing(s); " +
+            $"selected {Plan.Orders.Count} buy(s), expected profit {Plan.ExpectedProfit:N0}. Revisiting selected deals for fresh price and tax checks.");
+        BeginExecution(ProcurementRunMode.AutomaticPurchase, preserveTrip: true);
+    }
 
     private void BeginPriorityShopping(IReadOnlyList<ProcurementMarketItem> markets)
     {
@@ -66,11 +162,10 @@ public sealed partial class ProcurementController
         }
 
         SeedHomePricesFromRepricing();
-        var route = NorthAmericaWorlds.Where(w => !w.Equals(homeWorld, StringComparison.OrdinalIgnoreCase)).ToArray();
-        var resume = Array.FindIndex(route, w => w.Equals(config.PriorityNextWorld, StringComparison.OrdinalIgnoreCase));
-        // Finish the rest of this circuit before restarting at Aether; do not wrap
-        // inside a trip, which would jump backwards across data centers.
-        stockHuntWorlds = new[] { homeWorld }.Concat(route.Skip(Math.Max(0, resume))).ToList();
+        PrepareScoutRoute();
+        scoutListings.Clear();
+        comparisonBuyingStarted = null;
+        purchasedSlotsByItem.Clear();
         stockHuntWorldIndex = stockHuntRuleIndex = 0;
         successfulLiveScans = failedLiveScans = consecutiveFailedWorlds = worldSuccessfulScans = 0;
         priorityWorldsCompleted = 0;
@@ -87,7 +182,8 @@ public sealed partial class ProcurementController
         market.CloseRetainerList();
         log.Add(AutomationLogLevel.Information,
             $"PRIORITY SHOPPING: check {stockHuntRules.Count} flips on {homeWorld}, then Aether -> Primal -> Crystal -> Dynamis. " +
-            "Buy eligible live deals during each visit; return after 4 away worlds or 20 minutes away, then resume.");
+            $"Scout up to {config.PriorityItemsPerWorld} items per away world, two worlds per data center. " +
+            $"Compare after {config.PriorityWorldsPerTrip} worlds or {config.PriorityMinutesPerTrip} minutes; buy early only at 100%+ net ROI.");
         TravelToCurrentWorld();
     }
 
@@ -129,7 +225,7 @@ public sealed partial class ProcurementController
             timeProvider.GetUtcNow() - priorityDepartedAt < TimeSpan.FromMinutes(config.PriorityMinutesPerTrip))
             return false;
         SavePriorityCursor();
-        FinishShopping("Priority shopping checkpoint: returning to list stock, check sales and collect gil. The next trip resumes here.");
+        FinishPriorityScouting("Scout checkpoint reached. The next trip resumes here.");
         return true;
     }
 
@@ -158,7 +254,7 @@ public sealed partial class ProcurementController
     // instead of sweeping the same items again at the start of every trip.
     private void SeedHomePricesFromRepricing()
     {
-        var maxAge = TimeSpan.FromHours(Math.Max(1, configuration.Current.HomePriceMaxAgeHours));
+        var maxAge = HomeReferenceMaxAge;
         var now = timeProvider.GetUtcNow();
         foreach (var stale in homePriceTimes.Where(x => now - x.Value > maxAge).Select(x => x.Key).ToArray())
         {
@@ -183,9 +279,12 @@ public sealed partial class ProcurementController
                 $"Reused {reused} home price(s) already read during the retainer pass; those items are not re-checked.");
     }
 
+    // Use the same lifetime when skipping a home read and when permitting a buy.
+    // Previously a quote was reused for 24 hours, then rejected after 30 minutes.
+    private TimeSpan HomeReferenceMaxAge => TimeSpan.FromMinutes(Math.Clamp(configuration.Current.HomePriceMaxAgeMinutes, 5, 30));
     private bool HomePriceIsFresh(uint itemId) =>
         homePriceTimes.TryGetValue(itemId, out var at) &&
-        timeProvider.GetUtcNow() - at <= TimeSpan.FromHours(Math.Max(1, configuration.Current.HomePriceMaxAgeHours));
+        timeProvider.GetUtcNow() - at <= HomeReferenceMaxAge;
 
     private void SavePriorityCursor()
     {
@@ -206,11 +305,10 @@ public sealed partial class ProcurementController
             homePrices[rule.ItemId] = rows;
             homePriceTimes[rule.ItemId] = timeProvider.GetUtcNow();
         }
-        else if (homePriceTimes.TryGetValue(rule.ItemId, out var observedAt) &&
-            timeProvider.GetUtcNow() - observedAt > TimeSpan.FromMinutes(30))
+        else if (!HomePriceIsFresh(rule.ItemId))
         {
             SavePriorityCursor();
-            FinishShopping("Home resale prices are over 30 minutes old; returning to refresh them before buying.");
+            FinishPriorityScouting("Home resale prices need refreshing.");
             return;
         }
         var sales = priorityDemand.FirstOrDefault(x => x.ItemId == rule.ItemId)?.RecentSales ?? [];
@@ -241,12 +339,18 @@ public sealed partial class ProcurementController
             }
         }
         var order = candidates.OrderByDescending(x => x.ExpectedProfit).ThenBy(x => x.PricePerUnit).FirstOrDefault();
+        var exceptional = order is not null && ShoppingScoutPolicy.IsExceptional(order, config.ProcurementMinimumRoiPercent);
+        if (stockHuntWorldIndex > 0)
+        {
+            scoutListings.RemoveAll(x => x.WorldName == WorldName && x.ItemId == rule.ItemId);
+            scoutListings.AddRange(rows);
+        }
         foreach (var quality in new[] { false, true })
         {
             if (!ResaleStockPolicy.BuyableQuality(rule, quality, config.BuyHighQualityOnly)) continue;
             var qualified = rows.Where(x => x.IsHighQuality == quality && !retainerListings.OwnedRetainerIds.Contains(x.RetainerId)).ToArray();
             var decision = order is not null && order.IsHighQuality == quality
-                ? $"Buy x{order.Quantity} at {order.PricePerUnit:N0}; resale {order.TargetSalePrice:N0}, ceiling {order.MaximumAcceptableUnitPrice:N0}, expected profit {order.ExpectedProfit:N0}."
+                ? $"{(exceptional ? "Buy exceptional deal now" : "Save for comparison after scouting")}: x{order.Quantity} at {order.PricePerUnit:N0}; resale {order.TargetSalePrice:N0}, ceiling {order.MaximumAcceptableUnitPrice:N0}, expected profit {order.ExpectedProfit:N0}."
                 : homePrices.GetValueOrDefault(rule.ItemId)?.Length is not > 0 ? "No confirmed home resale listings; skip buying."
                 : "No deal passes home sales, ROI, demand, budget and stock limits.";
             observations.Add(new(timeProvider.GetUtcNow(), WorldName, rule.ItemName, quality,
@@ -257,14 +361,14 @@ public sealed partial class ProcurementController
                 $"PRICE CHECK {observed.At:O} {WorldName}: {rule.ItemName} {(quality ? "HQ" : "NQ")}: " +
                 $"{observed.Listings} listings / {observed.Units} units, lowest {observed.Lowest:N0}. {decision}");
         }
-        if (order is null) { AdvanceStockHuntRule(); return; }
+        if (!exceptional || order is null) { AdvanceStockHuntRule(); return; }
         Plan = new(timeProvider.GetUtcNow(), Plan.Orders.Append(order).ToArray(),
             (uint)Math.Min(uint.MaxValue, (ulong)Plan.TotalCost + (ulong)order.PricePerUnit * order.Quantity),
             (uint)Math.Min(uint.MaxValue, (ulong)Plan.ExpectedProfit + order.ExpectedProfit), Plan.SaleSlots + 1);
         currentOrder = order;
         // Listings are already loaded. A separate tick revalidates the exact live
         // candidate and tax through the normal purchase guards before submitting.
-        nextActionAt = timeProvider.GetUtcNow().AddSeconds(1);
+        nextActionAt = timeProvider.GetUtcNow();
         Wait(ProcurementState.WaitingForListings, $"Checking the live {order.ItemName} deal before buying.", 30);
     }
 }
