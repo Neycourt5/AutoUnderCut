@@ -33,6 +33,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly ProcurementController procurement;
     private readonly BagListingController bagListing;
     private readonly StockAutomationController stockAutomation;
+    private readonly WealthHistoryService wealthHistory;
     private readonly DashboardWindow dashboard;
     private readonly GuidedProcurementWindow guidedProcurement;
     private readonly TaskbarAttentionService taskbarAttention;
@@ -147,9 +148,11 @@ public sealed class Plugin : IDalamudPlugin
         automation.IsStartBlocked = () => procurement.IsActive || bagListing.IsBusy;
         procurement.IsStartBlocked = () => automation.IsActive || bagListing.IsBusy || bagListing.IsAutomaticRunDue;
         stockAutomation = new StockAutomationController(configuration, automation, procurement, bagListing);
+        wealthHistory = new WealthHistoryService(Framework, automation.PortfolioSnapshot, automationLog,
+            PluginInterface.ConfigDirectory.FullName);
         dashboard = new DashboardWindow(
             configuration, automation, procurement, bagListing, universalis, procurementLedger, marketData,
-            automationLog, stockAutomation);
+            automationLog, stockAutomation, wealthHistory);
         guidedProcurement = new GuidedProcurementWindow(procurement);
         automation.RetainerInterfaceOpened += OnRetainerInterfaceOpened;
         procurement.GuidedReviewRequested += OnGuidedReviewRequested;
@@ -201,6 +204,7 @@ public sealed class Plugin : IDalamudPlugin
     {
         automation.RetainerInterfaceOpened -= OnRetainerInterfaceOpened;
         procurement.GuidedReviewRequested -= OnGuidedReviewRequested;
+        wealthHistory.Dispose();
         procurement.Dispose();
         taskbarAttention.Dispose();
         bagListing.Dispose();

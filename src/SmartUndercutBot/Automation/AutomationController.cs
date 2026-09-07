@@ -91,10 +91,9 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
     private readonly HashSet<(ulong Retainer, short Slot)> skippedProblemListings = [];
     private int consecutiveRecoveries;
     private string? lastWriteFailure;
-    // The game silently drops market-board queries that come too fast, and a dropped
-    // query is indistinguishable from a slow one except that nothing ever arrives.
-    // Back off hard on those and recover once data flows again.
-    private int marketThrottleLevel;
+    // Items the game returned nothing for this session. Retrying them costs a full
+    // timeout each and never produces prices.
+    private readonly HashSet<uint> itemsWithNoLiveMarket = [];
     private readonly List<int> retainerRows = [];
     private readonly Dictionary<(ulong RetainerId, short Slot), PortfolioListingEstimate> portfolioListings = [];
     private readonly Dictionary<ulong, PortfolioRetainerBalance> portfolioRetainers = [];
@@ -853,14 +852,8 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
         RequestCurrentMarket();
     }
 
-    // Doubling per dropped request, capped, so a throttled session slows down until
-    // the game answers again instead of burning three attempts a row forever.
-    private TimeSpan CurrentMarketCooldown()
-    {
-        var baseMs = (double)configuration.Current.MarketRequestCooldownMs;
-        var scaled = baseMs * Math.Pow(2, Math.Min(marketThrottleLevel, 5));
-        return TimeSpan.FromMilliseconds(Math.Min(scaled, 45_000));
-    }
+    private TimeSpan CurrentMarketCooldown() =>
+        TimeSpan.FromMilliseconds(configuration.Current.MarketRequestCooldownMs);
 
     private void CaptureSellerFee()
     {
@@ -915,16 +908,20 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
         {
             var message = marketTask.Exception?.GetBaseException().Message ?? "Live market request timed out.";
             var failedEntry = queue[currentIndex];
-            if (!marketData.LastRequestSawAnyPacket && marketThrottleLevel < 5)
+            if (!marketData.LastRequestSawAnyPacket)
             {
-                marketThrottleLevel++;
+                // Nothing at all came back. On the evidence this means the item has no
+                // live market rather than that we are being throttled, so remember the
+                // item and stop paying its full timeout on every later row.
+                itemsWithNoLiveMarket.Add(failedEntry.Listing.ItemId);
                 log.Add(AutomationLogLevel.Warning,
-                    $"The game sent no market data at all for {failedEntry.Listing.ItemName}, which is what a " +
-                    $"throttled market-board query looks like. Slowing requests to " +
-                    $"{CurrentMarketCooldown().TotalSeconds:N0}s apart.");
+                    $"The game returned no market data at all for {failedEntry.Listing.ItemName}. " +
+                    "Treating it as having no live market and moving on.");
             }
 
-            if (marketRequestAttempts <= configuration.Current.MarketRequestRetryCount &&
+            var worthRetrying = marketData.LastRequestSawAnyPacket ||
+                                !itemsWithNoLiveMarket.Contains(failedEntry.Listing.ItemId);
+            if (worthRetrying && marketRequestAttempts <= configuration.Current.MarketRequestRetryCount &&
                 retainerListings.IsPriceEditorOpen)
             {
                 TryMapCurrentPriceEditor(0);
@@ -970,12 +967,6 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
         }
 
         currentMarket = marketTask.Result;
-        if (marketThrottleLevel > 0)
-        {
-            marketThrottleLevel = 0;
-            log.Add(AutomationLogLevel.Information,
-                "Live market data is flowing again; returning to the normal request cadence.");
-        }
         var entry = queue[currentIndex];
         if (currentMarket.ItemId != 0 && currentMarket.ItemId != entry.Listing.ItemId)
         {
@@ -1046,7 +1037,20 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
     private bool TryMapCurrentPriceEditor(uint itemId)
     {
         if (currentRowMapped)
-            return itemId == 0 || queue[currentIndex].Listing.ItemId == itemId;
+        {
+            if (itemId == 0 || queue[currentIndex].Listing.ItemId == itemId)
+                return true;
+            // The first mapping runs before the live item id is known and matches on
+            // name, quantity and price, so it can claim the wrong backing slot when a
+            // retainer holds similar listings. Give that slot back and map again now
+            // that the id is known, rather than refusing a perfectly valid row.
+            log.Add(AutomationLogLevel.Debug,
+                $"Visible row {currentIndex + 1} was provisionally mapped to " +
+                $"{queue[currentIndex].Listing.ItemName} (slot {queue[currentIndex].Listing.Slot}); " +
+                $"live item #{itemId} says otherwise, so remapping.");
+            processedSlots.Remove(queue[currentIndex].Listing.Slot);
+            currentRowMapped = false;
+        }
         if (!retainerListings.TryResolveOpenPriceEditor(itemId, processedSlots, out var resolved) || resolved is null)
             return false;
 
@@ -1620,6 +1624,7 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
     {
         listingFailureCounts.Clear();
         skippedProblemListings.Clear();
+        itemsWithNoLiveMarket.Clear();
         consecutiveRecoveries = 0;
         lastWriteFailure = null;
     }

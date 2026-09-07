@@ -11,6 +11,44 @@ Build: use `C:/Users/Acour/.dotnet/dotnet.exe` (SDK 10.0.301), **not** the PATH
 
 ---
 
+## v1.0.0.46 - the blue dye, the throttle theory retracted, wealth graph
+
+### v1.0.0.44's throttle theory was wrong - retracted
+The session log disproves it. Rows 1-8 all succeeded at ~1.5s apart with no
+backoff. Requests only start failing *after* this line:
+
+    00:03:10 [E] Visible row 9: live item #13721 could not be mapped to an
+                 unused retainer market slot; skipped.
+
+and after that only **materia** fail. Every dye and pelt returned data. So it is
+not a rate limit; those materia have no live market at all, and the escalating
+global cooldown from .44 was punishing healthy items for it. Removed.
+
+Replaced with per-item handling: an item that returns nothing is recorded in
+`itemsWithNoLiveMarket` and gets one attempt instead of three for the rest of the
+run. `MarketRequestCooldownMs` stays at the safer 3s from .44.
+
+### The blue dye (item #13721)
+`TryMapCurrentPriceEditor` runs once *before* the live item id is known, matching
+on name, quantity and price with a `?? candidates[0]` fallback - so it can claim
+the wrong backing slot when a retainer holds similar listings (this account has
+five Diatryma Pelt and two Metallic Silver rows). When the id arrived and
+disagreed, the old code returned false and **skipped the row**, permanently, every
+pass. That is why one specific item never repriced.
+
+It now releases the wrongly-claimed slot and remaps with the known id, logging the
+correction at Debug. The user's "it's the 4th item in line" was a good lead but the
+position was incidental - what matters is a same-name/similar-price neighbour
+earlier in the queue.
+
+### Wealth graph (user request)
+`WealthHistory` in Core: samples, 15-minute coalescing, out-of-order rejection,
+thinning at 720 points that halves the oldest half rather than dropping the start.
+Six tests. `WealthHistoryService` persists to `<config>/wealth-history.json` and
+records one point per completed all-retainer valuation. Earnings shows an
+`ImGui.PlotLines` graph with 24h/7d/30d/All ranges, low/high, change over the
+window, and a per-day rate.
+
 ## v1.0.0.45 - a deep stack counted as a whole trading buffer
 
 Panel showed shopping permanently parked on "comfortable trading stock is ready

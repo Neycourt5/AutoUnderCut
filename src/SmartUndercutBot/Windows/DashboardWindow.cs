@@ -20,6 +20,8 @@ public sealed class DashboardWindow : Window
     private readonly IMarketDataService marketData;
     private readonly AutomationLog log;
     private readonly StockAutomationController stockAutomation;
+    private readonly WealthHistoryService wealthHistory;
+    private int wealthRangeIndex = 1;
     private int newItemId;
     private uint? selectedItemId;
     private int newProcurementItemId;
@@ -34,7 +36,8 @@ public sealed class DashboardWindow : Window
         ProcurementLedger procurementLedger,
         IMarketDataService marketData,
         AutomationLog log,
-        StockAutomationController stockAutomation)
+        StockAutomationController stockAutomation,
+        WealthHistoryService wealthHistory)
         : base("Smart Undercutter##Dashboard")
     {
         this.configuration = configuration;
@@ -46,6 +49,7 @@ public sealed class DashboardWindow : Window
         this.marketData = marketData;
         this.log = log;
         this.stockAutomation = stockAutomation;
+        this.wealthHistory = wealthHistory;
         SizeConstraints = new WindowSizeConstraints
         {
             MinimumSize = new Vector2(760, 520),
@@ -474,6 +478,65 @@ public sealed class DashboardWindow : Window
         ImGui.EndTable();
     }
 
+    private static readonly (string Label, TimeSpan Window)[] WealthRanges =
+    [
+        ("24 hours", TimeSpan.FromHours(24)),
+        ("7 days", TimeSpan.FromDays(7)),
+        ("30 days", TimeSpan.FromDays(30)),
+        ("All", TimeSpan.Zero),
+    ];
+
+    private void DrawWealthGraph()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var samples = wealthHistory.History.Within(WealthRanges[wealthRangeIndex].Window, now);
+        ImGui.Separator();
+        ImGui.TextUnformatted("Total wealth over time");
+        ImGui.SetNextItemWidth(140 * ImGuiHelpers.GlobalScale);
+        if (ImGui.Combo("Range", ref wealthRangeIndex, WealthRanges.Select(x => x.Label).ToArray(), WealthRanges.Length))
+            wealthRangeIndex = Math.Clamp(wealthRangeIndex, 0, WealthRanges.Length - 1);
+
+        if (samples.Count < 2)
+        {
+            ImGui.TextDisabled(wealthHistory.History.Samples.Count == 0
+                ? "No points yet. One is recorded each time a complete all-retainer check finishes."
+                : "Only one point in this range so far; a line needs at least two.");
+            return;
+        }
+
+        // Gil totals run into the billions, so plot in millions to keep the axis readable.
+        var values = samples.Select(x => (float)(x.Total / 1_000_000.0)).ToArray();
+        var lowest = values.Min();
+        var highest = values.Max();
+        var padding = Math.Max((highest - lowest) * 0.1f, 0.01f);
+        var change = wealthHistory.History.ChangeOver(WealthRanges[wealthRangeIndex].Window, now);
+
+        ImGui.PlotLines("##WealthOverTime", values, 0,
+            $"{FormatGil(samples[^1].Total)} now",
+            lowest - padding, highest + padding,
+            new Vector2(-1, 90 * ImGuiHelpers.GlobalScale));
+
+        ImGui.TextDisabled($"{samples.Count} point(s) from {samples[0].At.LocalDateTime:g} " +
+                           $"| low {FormatGil((ulong)(lowest * 1_000_000))} " +
+                           $"| high {FormatGil((ulong)(highest * 1_000_000))}");
+        if (change is { } delta)
+        {
+            var perDay = delta.Span.TotalDays >= 0.05
+                ? $" (about {FormatGil((ulong)Math.Abs(delta.Change / delta.Span.TotalDays))} per day)"
+                : string.Empty;
+            ImGui.TextColored(
+                delta.Change >= 0 ? new Vector4(0.35f, 0.9f, 0.45f, 1f) : new Vector4(1f, 0.45f, 0.4f, 1f),
+                $"{(delta.Change >= 0 ? "Up" : "Down")} {FormatGil((ulong)Math.Abs(delta.Change))} " +
+                $"over {FormatSpan(delta.Span)}{perDay}");
+        }
+        ImGui.TextDisabled("Each point is one completed all-retainer check, using the conservative " +
+                           "market-aligned wealth estimate. Partial scans are not plotted.");
+    }
+
+    private static string FormatSpan(TimeSpan span) => span.TotalDays >= 1
+        ? $"{span.TotalDays:N1} day(s)"
+        : span.TotalHours >= 1 ? $"{span.TotalHours:N1} hour(s)" : $"{span.TotalMinutes:N0} minute(s)";
+
     private void DrawPortfolio()
     {
         var portfolio = automation.PortfolioSnapshot();
@@ -495,6 +558,8 @@ public sealed class DashboardWindow : Window
             statusText);
         if (portfolio.CompletedAt is { } completed)
             ImGui.TextDisabled($"Last completed {completed.LocalDateTime:g}");
+
+        DrawWealthGraph();
 
         ImGui.Separator();
         ImGui.TextUnformatted($"Current gil found: {FormatGil(portfolio.CurrentGil)}");
