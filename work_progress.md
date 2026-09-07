@@ -11,6 +11,37 @@ Build: use `C:/Users/Acour/.dotnet/dotnet.exe` (SDK 10.0.301), **not** the PATH
 
 ---
 
+## v1.0.0.41 - the actual reopen loop, reproduced in a test
+v1.0.0.40 did not fix it. That change addressed the fill-only safety-seed path;
+the real loop was `RecoverInterface`, and it is reached from ten call sites
+including "Could not select Adjust Price" and "Could not click Compare Prices" -
+which is precisely the "opening it and checking the price" the user described.
+
+`RecoverInterface` returns to the bell and replays the **entire pass**. There was
+no attempt counter anywhere in the controller, so a row that fails the same step
+every time is reopened, fails, recovers, and replays - once a minute, forever.
+
+- `NoteRecoveryFailure` counts failures per (retainer, slot). After the second the
+  row is skipped for the rest of the run and logged at Error level.
+- Both the reprice queue and the fill-run seed selector skip those rows.
+- `consecutiveRecoveries` halts the run after four recoveries without finishing a
+  retainer, rather than cycling indefinitely.
+- The skip list is cleared only by a deliberate Start. This mattered: the first
+  attempt cleared it in `ResetSession`, which recovery also calls, so the record
+  was wiped on exactly the retry it existed to protect. The test caught that.
+
+### Testing gap closed
+`FakeRetainerService.OpenListingContextMenu` and `SelectAdjustPrice` are now
+virtual, and the `Game` fake implements listings, the context menu and Adjust
+Price. `AListingThatAlwaysFailsIsDroppedInsteadOfBeingReopenedForever` drives a
+listing whose Adjust Price never opens and asserts the pass still completes with a
+bounded number of reopens; it fails (stuck in `RecoveringRetainerInterface`) when
+the guard is removed. `AHealthyListingIsStillOpenedNormally` pins the normal path.
+This is the first automated coverage of the repricing path.
+
+Still uncovered there: price editor mapping, compare-prices, market snapshots and
+commit/verification. Worth extending the same fake next.
+
 ## v1.0.0.40 - the reprice pass reopened one listing forever
 User: "it keeps opening the same auction over and over checking the price and
 never actually doing anything."

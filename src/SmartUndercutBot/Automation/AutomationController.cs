@@ -85,6 +85,11 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
     private readonly List<AutomationQueueEntry> queue = [];
     private readonly HashSet<short> processedSlots = [];
     private readonly HashSet<short> freshlyRepricedAutoListingSlots = [];
+    // A recovery restarts the whole pass from the bell, so a row that fails the same
+    // way every time is reopened forever. Track the failures and give up on the row.
+    private readonly Dictionary<(ulong Retainer, short Slot), int> listingFailureCounts = [];
+    private readonly HashSet<(ulong Retainer, short Slot)> skippedProblemListings = [];
+    private int consecutiveRecoveries;
     private readonly List<int> retainerRows = [];
     private readonly Dictionary<(ulong RetainerId, short Slot), PortfolioListingEstimate> portfolioListings = [];
     private readonly Dictionary<ulong, PortfolioRetainerBalance> portfolioRetainers = [];
@@ -207,6 +212,7 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
             return;
         RequiresManualRestart = false;
         requestedFillOnlyRun = false;
+        ForgetProblemListings();
         if (retainerListings.IsRetainerListOpen)
             BeginBellSession();
         else if (retainerListings.IsSellListOpen)
@@ -221,6 +227,7 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
             return;
         RequiresManualRestart = false;
         requestedFillOnlyRun = true;
+        ForgetProblemListings();
         if (retainerListings.IsRetainerListOpen)
             BeginBellSession();
         else
@@ -591,6 +598,7 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
             var unresolvedSeed = currentListings.FirstOrDefault(x =>
                 IsUnresolvedCuratedPrice(x) &&
                 !freshlyRepricedAutoListingSlots.Contains(x.Slot) &&
+                !skippedProblemListings.Contains((x.RetainerId, x.Slot)) &&
                 CuratedAutoListItems.Contains(x.ItemName));
             if (unresolvedSeed is not null)
             {
@@ -635,6 +643,7 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
         processedSlots.Clear();
         queue.AddRange(listings.Select((listing, index) => (listing, index))
             .Where(x => !freshlyRepricedAutoListingSlots.Contains(x.listing.Slot))
+            .Where(x => !skippedProblemListings.Contains((x.listing.RetainerId, x.listing.Slot)))
             .Select(x => new AutomationQueueEntry(x.index, x.listing, "Queued")));
         listingsSeenAcrossRetainers += listings.Count;
         currentIndex = 0;
@@ -1284,6 +1293,8 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
 
     private void FinishCurrentRetainer()
     {
+        // Real progress: the recovery budget only guards against never advancing.
+        consecutiveRecoveries = 0;
         scannedStock[retainerListings.ActiveRetainerId] = retainerListings.ReadCurrentListings();
         log.Add(AutomationLogLevel.Information,
             $"Finished {retainerListings.ActiveRetainerName}: processed {queue.Count} listing(s).");
@@ -1547,9 +1558,16 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
             AbortFreshAutoListing(reason);
             return;
         }
+        NoteRecoveryFailure(reason);
         if (!bellSession || !configuration.Current.AutomationEnabled || !configuration.Current.RepeatBellRuns)
         {
             Halt(reason);
+            return;
+        }
+        if (consecutiveRecoveries >= MaximumConsecutiveRecoveries)
+        {
+            Halt($"{reason} Recovery has restarted the retainer pass {consecutiveRecoveries} times without " +
+                 "finishing a retainer, so it has stopped instead of retrying the same step forever.");
             return;
         }
         sessionCancellation?.Cancel();
@@ -1560,6 +1578,37 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
         nextActionAt = timeProvider.GetUtcNow();
         WaitFor(AutomationState.RecoveringRetainerInterface, $"{reason} Returning to the bell to retry.", 60);
         log.Add(AutomationLogLevel.Warning, detail);
+    }
+
+    private const int MaximumConsecutiveRecoveries = 4;
+
+    // Only a deliberate Start forgets a bad row. Interface recovery replays the
+    // pass through the same session reset, so clearing this there would wipe the
+    // very record that stops the failing listing being reopened again.
+    private void ForgetProblemListings()
+    {
+        listingFailureCounts.Clear();
+        skippedProblemListings.Clear();
+        consecutiveRecoveries = 0;
+    }
+
+    // Recovery returns to the bell and replays the pass, so without this a listing
+    // that always fails the same step is reopened and re-read indefinitely. Drop the
+    // row after a second failure and let the rest of the run continue.
+    private void NoteRecoveryFailure(string reason)
+    {
+        consecutiveRecoveries++;
+        if (queue.Count == 0 || currentIndex >= queue.Count)
+            return;
+        var listing = queue[currentIndex].Listing;
+        var key = (listing.RetainerId, listing.Slot);
+        var failures = listingFailureCounts.GetValueOrDefault(key) + 1;
+        listingFailureCounts[key] = failures;
+        if (failures < 2 || !skippedProblemListings.Add(key))
+            return;
+        log.Add(AutomationLogLevel.Error,
+            $"SKIPPING {listing.ItemName} on {listing.RetainerName}: {reason} It failed {failures} times; " +
+            "the rest of the run continues without it.");
     }
 
     private void PollInterfaceRecovery()

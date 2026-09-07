@@ -97,6 +97,37 @@ public sealed class RetainerAutomationTests
         Assert.Equal(submissions, run.Game.ListingSubmissions);
     }
 
+    [Fact]
+    public void AListingThatAlwaysFailsIsDroppedInsteadOfBeingReopenedForever()
+    {
+        using var run = new Session();
+        // Adjust Price never opens for this row, which sends the controller through
+        // interface recovery. Recovery replays the whole pass from the bell, so
+        // without a limit it reopens this same listing every retry, indefinitely.
+        run.Game.AdjustPriceWorks = false;
+        run.Game.Listings.Add(new(1, "Test Retainer", 3, 100, "Popoto Potage", 99, 5_000, true));
+        run.Bot.StartNow();
+
+        for (var i = 0; i < 4_000 && run.Bot.State != AutomationState.WaitingForScheduledRun; i++)
+            run.Tick(2);
+
+        // It gives up on the row and finishes the pass rather than cycling forever.
+        Assert.Equal(AutomationState.WaitingForScheduledRun, run.Bot.State);
+        Assert.False(run.Bot.RequiresManualRestart);
+        Assert.InRange(run.Game.ContextMenuOpens, 1, 6);
+    }
+
+    [Fact]
+    public void AHealthyListingIsStillOpenedNormally()
+    {
+        using var run = new Session();
+        run.Game.Listings.Add(new(1, "Test Retainer", 3, 100, "Popoto Potage", 99, 5_000, true));
+        run.Bot.StartNow();
+        for (var i = 0; i < 200 && run.Game.ContextMenuOpens == 0; i++)
+            run.Tick(2);
+        Assert.Equal(1, run.Game.ContextMenuOpens);
+    }
+
     private sealed class Session : IDisposable
     {
         public Game Game { get; } = new();
@@ -157,6 +188,24 @@ public sealed class RetainerAutomationTests
             return pending is not null;
         }
         public override bool VerifyAutoListing(PendingAutoListing pending) => false;
+        public List<RetainerListing> Listings = [];
+        public bool AdjustPriceWorks = true;
+        public int ContextMenuOpens;
+        private bool contextOpen;
+        public override bool IsContextMenuOpen => contextOpen;
+        public override IReadOnlyList<RetainerListing> ReadCurrentListings() => Listings;
+        public override bool OpenListingContextMenu(int index)
+        {
+            ContextMenuOpens++;
+            contextOpen = true;
+            return true;
+        }
+        public override bool SelectAdjustPrice()
+        {
+            contextOpen = false;
+            return AdjustPriceWorks;
+        }
+        public override void CloseContextMenu() => contextOpen = false;
         public Task<MarketSnapshot> GetSnapshotAsync(uint id, CancellationToken token) => throw new NotSupportedException();
         public void ClearCache() { }
     }
