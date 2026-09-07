@@ -1,4 +1,4 @@
-# Active: v1.0.0.57 sales-per-day priority and cached-loop validation
+# Completed: v1.0.0.57 sales-per-day priority and cached-loop validation
 
 The .55 recovery changes and .56 cached-price/top-up changes were committed by
 another active workspace session while this task was running. Preserve them.
@@ -19,7 +19,11 @@ Latest user screenshots request actual sales/day as a higher shopping priority.
       winners, quality-specific demand, live fill buying and stock changes.
 - [x] Final 1.0.0.57 release build passes without warnings/errors; diff check clean.
 - [x] Remote main matches f1ffee7; v1.0.0.57 is unused; increment version.
-- [ ] Commit/push/tag and public installer verification.
+- [x] Commit 327027d pushed to main with annotated v1.0.0.57.
+- [x] Release Actions 34159676341 and Build 34159676210 succeeded.
+- [x] Downloaded public latest repo.json and update ZIP: installer, packaged
+      manifest and plugin assembly all 1.0.0.57, API 15; both DLLs present.
+      ZIP 480,303 bytes. Existing in-game installer URL is unchanged.
 
 # Completed: v1.0.0.55 retainer handoff and automatic menu recovery
 

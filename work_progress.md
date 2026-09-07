@@ -11,7 +11,7 @@ Build: use `C:/Users/Acour/.dotnet/dotnet.exe` (SDK 10.0.301), **not** the PATH
 
 ---
 
-## v1.0.0.57 - actual sales/day priority and cached shopping recovery
+## v1.0.0.57 - actual sales/day priority and cached shopping recovery (published)
 
 User screenshots ask to prioritize the sales/day information seen in other
 Universalis-backed plugins. Preserve .55 menu recovery and .56 price-memory and
@@ -51,7 +51,12 @@ demand ahead of categories, unchanged money/profit guards, 31-world cached circu
 with no repeat travel until expiry, repriced winner reconsideration, a real
 simulated 13% fill purchase, full retainers rejecting that buy, and bags becoming
 sufficient before submission. Final 1.0.0.57 plugin build passed with zero
-warnings/errors; diff check is clean. GitHub installer publication is pending.
+warnings/errors; diff check is clean. Published source commit 327027d and annotated
+v1.0.0.57; release workflow 34159676341 and Build 34159676210 both succeeded.
+Downloaded the public latest installer JSON and update ZIP: installer, packaged
+manifest and plugin DLL all report 1.0.0.57, API 15. Both DLLs are present; ZIP
+480,303 bytes. Existing in-game installer URL is unchanged.
+Release: https://github.com/Neycourt5/AutoUnderCut/releases/tag/v1.0.0.57
 Native .54 logs confirm four-DC travel, purchases, and Sky Blue Dye repricing.
 This update's new behavior has not yet been exercised overnight in the live game.
 
