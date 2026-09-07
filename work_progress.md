@@ -11,7 +11,60 @@ Build: use `C:/Users/Acour/.dotnet/dotnet.exe` (SDK 10.0.301), **not** the PATH
 
 ---
 
-## v1.0.0.48 - the purchase confirmation prompt was never answered
+## v1.0.0.49 - priority shopping, fresh responses and Limsa (publication pending)
+
+User asked for a paced, repeatable home-first shopping loop, buying profitable
+live stock during visits in Aether -> Primal -> Crystal -> Dynamis order.
+
+### Evidence and correction to .48
+The newest Dalamud log declares prices ready 10-60 ms after row selection, then
+often reports zero listings. `MarketSearchSession` bypassed its three-second
+delay as soon as the window appeared, and treated the proxy's false Waiting flag
+as a completed response. The same Metallic Red listing was submitted twice in
+different runs without inventory receipt. Dark Brown Dye did buy successfully.
+The latter run reports zero confirmation prompts; .48's claim that the missing
+prompt caused the failure was not established. The native path sends a purchase
+packet directly and does not open a prompt. Removed its unrelated SelectYesno
+acceptance. Do not claim the precise reason for the earlier server rejection is
+known; new response diagnostics capture that information.
+
+### Implementation
+- Type and Enter on separate ticks; select the matching row once. Wait for the
+  native server result count, matching Dalamud offering packets, all native rows,
+  a 750 ms quiet period and the three-second window settle. An unanswered window
+  cannot be mistaken for an empty market. Retired request IDs reject late packets.
+- Observe native ProcessPurchaseResponse; an explicit error skips, an unknown
+  outcome still stops. Wait up to 30 seconds for inventory; no blind write retry.
+- Nearby objects before local travel; migrate the default to `/li tp Limsa
+  Lominsa Lower Decks`. Lifestream TPAndChangeWorld requests gateway 8 (Limsa),
+  including the return gateway. If that IPC is absent, use the existing chat
+  route; its gateway is then controlled by Lifestream. Custom local commands stay.
+- Default priority shopping uses home sales to select qualifying flips, sorts by
+  rule priority then volume, checks live home prices, and compares every visited
+  world's actual listings. It buys immediately through the existing tax/ROI,
+  demand, stock, bag and wallet guards. Cached order quantities do not restrict
+  this path. Home bargains need another real competing listing and sales history.
+- One buy per item per world; four away worlds or 20 minutes between item checks
+  triggers return/list/collect. World and next item are saved to configuration.
+  Home checks are bounded at 20 minutes; home quotes expire at 30 minutes. Existing
+  stock and buffer capital budgets still bound purchases. Stocked/zero-gil loops
+  wait and retry rather than travelling without a purchasing reason.
+- Shopping shows recent price comparisons, also written to session logs.
+
+### Validation / resume
+185 tests pass, including fresh/delayed/empty/late responses, early-home buying,
+live quantities, all 31 away worlds across eight return trips, three automatically
+scheduled trips, mid-world resume, filled-buffer scouting, configuration migration
+and Limsa gateway arguments. Release build passes with no warnings/errors.
+Tests use simulated services; the new native hooks and travel have not been
+exercised in FFXIV by this session. Next: commit/tag/push .49 and verify public
+installer JSON, ZIP manifest and assembly version before declaring it ready.
+
+Primary source checks: [FFXIVClientStructs market proxy](https://github.com/aers/FFXIVClientStructs/blob/main/FFXIVClientStructs/FFXIV/Client/UI/Info/InfoProxyItemSearch.cs),
+[Lifestream market shortcut](https://github.com/NightmareXIV/Lifestream/blob/main/Lifestream/Tasks/Shortcuts/TaskMBShortcut.cs),
+[Lifestream public IPC](https://github.com/NightmareXIV/Lifestream/blob/main/Lifestream/IPC/IPCProvider.cs).
+
+## v1.0.0.48 - the purchase confirmation prompt was never answered (historical hypothesis)
 
 v1.0.0.47 fixed the search completely. The log now runs the whole chain:
 

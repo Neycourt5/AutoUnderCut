@@ -16,6 +16,7 @@ public sealed record LivePurchaseListing(
 public interface IMarketPurchaseService
 {
     string? SearchStatus => null;
+    uint PurchaseError => 0;
     bool IsMarketBoardOpen { get; }
     uint FreeInventorySlots { get; }
     uint Gil { get; }
@@ -32,8 +33,7 @@ public interface IMarketPurchaseService
         IReadOnlySet<ulong> excludedRetainerIds,
         out LivePurchaseListing? listing);
     bool SubmitPurchase(LivePurchaseListing listing);
-    // The market board asks for confirmation before it takes the gil. Returns true
-    // only when the prompt for this exact item was found and accepted.
+    // Optional UI purchase path only. Direct packet submissions do not require a prompt.
     bool TryConfirmPurchase(string itemName) => false;
     void CloseMarketBoard();
     void CloseRetainerList();

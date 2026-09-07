@@ -40,6 +40,12 @@ namespace Dalamud.Plugin.Ipc
         bool HasFunction { get; }
         T InvokeFunc(T1 a, T2 b, T3 c);
     }
+
+    public interface ICallGateSubscriber<T1, T2, T3, T4, T5, T6, T7, T>
+    {
+        bool HasAction { get; }
+        void InvokeAction(T1 a, T2 b, T3 c, T4 d, T5 e, T6 f, T7 g);
+    }
 }
 
 namespace Dalamud.Plugin
@@ -50,6 +56,7 @@ namespace Dalamud.Plugin
         ICallGateSubscriber<T> GetIpcSubscriber<T>(string name);
         ICallGateSubscriber<T1, T> GetIpcSubscriber<T1, T>(string name);
         ICallGateSubscriber<T1, T2, T3, T> GetIpcSubscriber<T1, T2, T3, T>(string name);
+        ICallGateSubscriber<T1, T2, T3, T4, T5, T6, T7, T> GetIpcSubscriber<T1, T2, T3, T4, T5, T6, T7, T>(string name);
     }
 }
 

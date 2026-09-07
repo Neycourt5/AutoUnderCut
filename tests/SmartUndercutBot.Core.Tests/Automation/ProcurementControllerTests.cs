@@ -302,7 +302,7 @@ public sealed class ProcurementControllerTests
         run.ReachPurchase();
         run.Controller.RunNow();
         Assert.Equal(ProcurementState.WaitingForPurchase, run.Controller.State);
-        run.Tick(11);
+        run.Tick(31);
         Assert.Equal(ProcurementState.Halted, run.Controller.State);
         Assert.Contains("OUTCOME UNKNOWN", run.Controller.Status.Detail);
         Assert.Equal(1, run.Game.Purchases);
@@ -353,7 +353,9 @@ public sealed class ProcurementControllerTests
     {
         using var run = new Route();
         run.Game.InteractionSucceeds = false;
-        run.ReachPurchase();
+        run.ReachApproach();
+        run.Game.BoardOpen = true;
+        run.Tick(); run.Tick(); run.Tick(4); run.Tick();
         Assert.Equal(1, run.Game.Purchases);
     }
 
@@ -795,6 +797,206 @@ public sealed class ProcurementControllerTests
         Assert.Equal(99u, Assert.Single(run.Ledger.Snapshot()).PendingQuantity);
     }
 
+    [Fact]
+    public void PriorityShoppingChecksHomeAndBuysBeforeLeavingTheDealWorld()
+    {
+        using var run = new Route(priority: true);
+        run.Game.AutomaticWorldArrival = run.Game.AutomaticPurchaseConfirmation = true;
+        run.Controller.RunNow();
+        for (var i = 0; i < 300 && run.Game.Purchases == 0; i++) run.Tick(2);
+        Assert.Equal(("Siren", 1u), run.Game.Searches.First());
+        Assert.Equal(new[] { "/li Adamantoise", "/li Cactuar" }, run.Game.Commands);
+        Assert.Equal(("Cactuar", 1u, 99u), Assert.Single(run.Game.Bought));
+        run.Tick(2);
+        Assert.Equal(99u, Assert.Single(run.Ledger.Snapshot()).PendingQuantity);
+        Assert.Contains(run.Controller.RecentPrices, x => x.World == "Cactuar" && x.Decision.StartsWith("Buy"));
+        Assert.DoesNotContain("/li mb", run.Game.Commands);
+    }
+
+    [Fact]
+    public void PriorityBuyingUsesTheLiveStackQuantityInsteadOfAnOldCachedOrder()
+    {
+        using var run = new Route(priority: true);
+        run.Game.AutomaticWorldArrival = run.Game.AutomaticPurchaseConfirmation = true;
+        run.Game.LiveProvider = (world, item) => world switch
+        {
+            "Siren" => [new(0, item, 11, 21, 2000, 99, true, 0)],
+            "Cactuar" => [new(0, item, 10, 20, 1000, 20, true, 1000)],
+            _ => [],
+        };
+        run.Controller.RunNow();
+        for (var i = 0; i < 300 && run.Game.Purchases == 0; i++) run.Tick(2);
+        Assert.Equal(("Cactuar", 1u, 20u), Assert.Single(run.Game.Bought));
+        run.Tick(2);
+        Assert.Equal(20u, Assert.Single(run.Ledger.Snapshot()).PendingQuantity);
+    }
+
+    [Fact]
+    public void ExceptionalHomeBargainCanBeBoughtBeforeAnyWorldTransfer()
+    {
+        using var run = new Route(priority: true);
+        run.Game.AutomaticPurchaseConfirmation = true;
+        run.Game.LiveProvider = (world, item) =>
+            [new(0, item, 10, 20, 100, 99, true, 495), new(1, item, 11, 21, 2000, 99, true, 0)];
+        run.Controller.RunNow();
+        for (var i = 0; i < 100 && run.Game.Purchases == 0; i++) run.Tick(2);
+        Assert.Equal(("Siren", 1u, 99u), Assert.Single(run.Game.Bought));
+        Assert.Empty(run.Game.Commands);
+    }
+
+    [Fact]
+    public void PriorityCircuitReturnsToListAndResumesAcrossAllFourDataCenters()
+    {
+        using var run = new Route(priority: true);
+        run.Game.AutomaticWorldArrival = true;
+        run.Game.LiveProvider = (world, item) => [new(0, item, 10, 20, 2000, 99, true, 0)];
+        for (var trip = 0; trip < 8; trip++)
+        {
+            run.Repricing.IsActive = false;
+            run.Controller.RunNow();
+            for (var i = 0; i < 500 && run.Controller.IsActive; i++) run.Tick(2);
+            Assert.Equal(ProcurementState.Completed, run.Controller.State);
+            Assert.Equal("Siren", run.Game.World);
+            Assert.Equal(trip + 1, run.Repricing.Starts);
+        }
+        var worlds = run.Game.Commands.Where(x => x != "/li Siren").Select(x => x[4..]).ToArray();
+        Assert.Equal(new[] {
+            "Adamantoise", "Cactuar", "Faerie", "Gilgamesh", "Jenova", "Midgardsormr", "Sargatanas",
+            "Behemoth", "Excalibur", "Exodus", "Famfrit", "Hyperion", "Lamia", "Leviathan", "Ultros",
+            "Balmung", "Brynhildr", "Coeurl", "Diabolos", "Goblin", "Malboro", "Mateus", "Zalera",
+            "Cuchulainn", "Golem", "Halicarnassus", "Kraken", "Maduin", "Marilith", "Rafflesia", "Seraph"
+        }, worlds);
+        Assert.Empty(run.Config.Current.PriorityNextWorld);
+        Assert.Equal(0, run.Game.Purchases);
+    }
+
+    [Fact]
+    public void PriorityChecksAllFlipsInConfiguredPriorityThenSalesVolumeOrder()
+    {
+        using var run = new Route(priority: true);
+        run.Config.Current.ProcurementRules.Clear();
+        run.Config.Current.ProcurementRules.AddRange(new[] {
+            new ProcurementRule { ItemId = 1, ItemName = "Dye", TourPriority = 1 },
+            new ProcurementRule { ItemId = 2, ItemName = "Food", TourPriority = 0 },
+            new ProcurementRule { ItemId = 3, ItemName = "Faster Dye", TourPriority = 1 },
+            new ProcurementRule { ItemId = 4, ItemName = "Old materia", LiquidateOnly = true },
+        });
+        run.Game.DemandMarkets = Enumerable.Range(1, 4).Select(i => new ProcurementMarketItem((uint)i, "Item", [],
+            [new(2000, (uint)(i * 100), false, DateTimeOffset.UtcNow)])).ToArray();
+        run.Game.LiveProvider = (world, item) => [new(0, item, 10, 20, 2000, 99, false, 0)];
+        run.Controller.RunNow();
+        for (var i = 0; i < 100 && run.Game.Commands.Count == 0; i++) run.Tick(2);
+        Assert.Equal(new[] { 2u, 3u, 1u }, run.Game.Searches.Select(x => x.Item));
+        Assert.DoesNotContain(4u, run.Game.ScannedItemIds);
+    }
+
+    [Fact]
+    public void MissingLiveHomePricesDoesNotSendThePriorityRouteShopping()
+    {
+        using var run = new Route(priority: true);
+        run.Game.LiveProvider = (_, _) => [];
+        run.Controller.RunNow();
+        for (var i = 0; i < 100 && run.Controller.IsActive; i++) run.Tick(2);
+        Assert.Empty(run.Game.Commands);
+        Assert.Equal(ProcurementState.Completed, run.Controller.State);
+        Assert.Equal(1, run.Repricing.Starts);
+    }
+
+    [Fact]
+    public void LimsaFallbackOnlyRunsWhenNoNearbyBoardCanBeUsed()
+    {
+        using var run = new Route();
+        run.Config.Current.MarketBoardTravelCommand = "/li tp Limsa Lominsa Lower Decks";
+        run.Game.ObjectDistance = 200;
+        run.Begin(); run.Game.World = "Cactuar"; run.Tick(); run.Tick(9); run.Tick();
+        Assert.Contains("/li tp Limsa Lominsa Lower Decks", run.Game.Commands);
+        Assert.DoesNotContain("/li mb", run.Game.Commands);
+    }
+
+    [Fact]
+    public void ExplicitServerPurchaseRejectionSkipsWithoutAnUnknownOutcomeStop()
+    {
+        using var run = new Route();
+        run.ReachPurchase();
+        run.Game.PurchaseError = 1234;
+        run.Tick();
+        Assert.False(run.Controller.RequiresManualRestart);
+        Assert.Contains(run.Log.Messages, x => x.Contains("server rejected") && x.Contains("1234"));
+        Assert.Empty(run.Ledger.Snapshot());
+        Assert.Equal(1, run.Game.Purchases);
+    }
+
+    [Fact]
+    public void PriorityLoopAutomaticallyStartsAnotherTripAfterReturningToRetainers()
+    {
+        using var run = new Route(priority: true);
+        run.Config.Current.EnableStockAutomation();
+        run.Game.AutomaticWorldArrival = true;
+        run.Game.LiveProvider = (world, item) => [new(0, item, 10, 20, 2000, 99, true, 0)];
+        for (var trip = 0; trip < 3; trip++)
+        {
+            run.Repricing.IsActive = false; // the simulated bell pass completed
+            run.Tick(601);
+            for (var i = 0; i < 500 && run.Controller.IsActive; i++) run.Tick(2);
+            Assert.Equal(ProcurementState.Completed, run.Controller.State);
+            Assert.Equal(trip + 1, run.Repricing.Starts);
+            Assert.Equal("Siren", run.Game.World);
+        }
+        Assert.Equal(12, run.Game.Commands.Count(x => x != "/li Siren"));
+        Assert.Contains("/li Behemoth", run.Game.Commands);
+    }
+
+    [Fact]
+    public void PriorityTimeCheckpointPreservesTheNextItemOnTheSameWorld()
+    {
+        using var run = new Route(priority: true);
+        run.Game.AutomaticWorldArrival = true;
+        run.Config.Current.ProcurementRules[0].TourPriority = 0;
+        run.Config.Current.ProcurementRules.Add(new() { ItemId = 2, ItemName = "Another flip" });
+        run.Game.DemandMarkets = [
+            new(1, "Popcorn", [], [new(2000, 100, true, DateTimeOffset.UtcNow)]),
+            new(2, "Another flip", [], [new(2000, 100, false, DateTimeOffset.UtcNow)])];
+        run.Game.LiveProvider = (world, item) => [new(0, item, 10, 20, 2000, 99, item == 1, 0)];
+        run.Controller.RunNow();
+        for (var i = 0; i < 100 && !run.Controller.RecentPrices.Any(x => x.World == "Adamantoise"); i++) run.Tick(2);
+        run.Tick(1201);
+        for (var i = 0; i < 100 && run.Controller.IsActive; i++) run.Tick(2);
+        Assert.Equal("Adamantoise", run.Config.Current.PriorityNextWorld);
+        Assert.Equal(2u, run.Config.Current.PriorityNextItem);
+        run.Game.Searches.Clear(); run.Repricing.IsActive = false;
+        run.Controller.RunNow();
+        for (var i = 0; i < 100 && !run.Game.Searches.Any(x => x.World == "Adamantoise"); i++) run.Tick(2);
+        Assert.Equal(2u, run.Game.Searches.First(x => x.World == "Adamantoise").Item);
+    }
+
+    [Fact]
+    public void PriorityModeSearchesWithoutTravellingWhenTheBagTargetIsAlreadyMet()
+    {
+        using var run = new Route(priority: true);
+        run.Config.Current.EnableStockAutomation();
+        run.Config.Current.ContinueShoppingWhenStocked = true;
+        run.Game.Inventory = 20 * 99;
+        run.Config.Current.ProcurementRules[0].MaximumSaleSlots = 20;
+        run.Tick(); run.Tick();
+        Assert.Equal(1, run.Game.Scans);
+        Assert.Empty(run.Game.Commands);
+        Assert.Equal(0, run.Game.Purchases);
+        run.Tick(601); run.Tick();
+        Assert.Equal(2, run.Game.Scans);
+    }
+
+    [Theory]
+    [InlineData("/li mb", "/li tp Limsa Lominsa Lower Decks")]
+    [InlineData("/li my-board", "/li my-board")]
+    public void ExistingDefaultTravelMigratesToLimsaAndCustomCommandsArePreserved(string before, string after)
+    {
+        var config = new Configuration { Version = 28, MarketBoardTravelCommand = before };
+        config.Normalize();
+        Assert.Equal(after, config.MarketBoardTravelCommand);
+        Assert.True(config.PriorityShoppingEnabled);
+        Assert.Equal(29, config.Version);
+    }
+
     private sealed class Clock : TimeProvider
     {
         private DateTimeOffset now = DateTimeOffset.UtcNow;
@@ -811,14 +1013,17 @@ public sealed class ProcurementControllerTests
         public AutomationLog Log { get; } = new();
         public ProcurementController Controller { get; }
         private readonly Clock clock = new();
-        public Route()
+        public Route(bool priority = false)
         {
+            Config.Current.PriorityShoppingEnabled = priority;
+            Game.UseLiveListings = priority;
+            Config.Current.MarketBoardTravelCommand = "/li mb";
             Config.Current.AllowAutomaticPurchases = true;
             // Older regression cases exercise the optional fixed-buffer mode.
             Config.Current.ContinueShoppingWhenStocked = false;
             Config.Current.ProcurementRules.Add(new()
             {
-                ItemId = 1, AllowHighQuality = true, RequireHighQuality = true, HuntOnTour = true,
+                ItemId = 1, ItemName = "Popcorn", AllowHighQuality = true, RequireHighQuality = true, HuntOnTour = true,
             });
             Controller = new(Game, Game, Game, Game, Game, new ProcurementPlannerService(),
                 Game, Game, Game, Game, Ledger, Repricing, Config, Log, clock);
@@ -838,8 +1043,6 @@ public sealed class ProcurementControllerTests
             Game.World = "Cactuar";
             Tick();
             Tick(9);
-            Tick();
-            Tick(13);
             Assert.Equal(ProcurementState.FindingMarketBoard, Controller.State);
         }
         public void ReachListings()
@@ -883,6 +1086,13 @@ public sealed class ProcurementControllerTests
         public uint Gil { get; set; } = 1_000_000;
         public int Inventory { get; set; }
         public int Purchases { get; private set; }
+        public uint PurchaseError { get; set; }
+        public bool UseLiveListings { get; set; }
+        public Func<string, uint, IReadOnlyList<LivePurchaseListing>>? LiveProvider { get; set; }
+        public IReadOnlyList<ProcurementMarketItem>? DemandMarkets { get; set; }
+        public List<(string World, uint Item)> Searches { get; } = [];
+        public List<(string World, uint Item, uint Quantity)> Bought { get; } = [];
+        public float ObjectDistance { get; set; } = 1;
         public uint BuyerTax { get; set; } = 4_950;
         public int Aborts { get; private set; }
         public List<string> Commands { get; } = [];
@@ -894,6 +1104,7 @@ public sealed class ProcurementControllerTests
         public bool ProcessCommand(string command)
         {
             Commands.Add(command);
+            if (command.StartsWith("/li tp ")) { ObjectDistance = 1; return true; }
             if (command == "/li mb" && OpenBoardOnLocalTravel) BoardOpen = true;
             else if (AutomaticWorldArrival && command.StartsWith("/li ")) World = command[4..];
             return true;
@@ -908,6 +1119,7 @@ public sealed class ProcurementControllerTests
         {
             Scans++;
             ScannedItemIds.AddRange(rules.Select(x => x.ItemId));
+            if (DemandMarkets is not null) return Task.FromResult(DemandMarkets);
             if (dataCenter == "Siren" && MissingHomeListings)
                 return Task.FromResult<IReadOnlyList<ProcurementMarketItem>>([]);
             return Task.FromResult<IReadOnlyList<ProcurementMarketItem>>(
@@ -921,7 +1133,7 @@ public sealed class ProcurementControllerTests
         public override IReadOnlyList<BagListingCandidate> ReadBagListingCandidates() => Inventory <= 0 ? OtherBagItems :
             [..OtherBagItems, new(FFXIVClientStructs.FFXIV.Client.Game.InventoryType.Inventory1, 10, 1, "Popcorn", (uint)Inventory, true, 999)];
         public Vector3? FindNearest(string objectName) => Vector3.Zero;
-        public float DistanceTo(Vector3 position) => 1;
+        public float DistanceTo(Vector3 position) => ObjectDistance;
         public bool InteractNearest(string objectName, float maximumDistance = 5)
         {
             if (!InteractionSucceeds) return false;
@@ -929,20 +1141,28 @@ public sealed class ProcurementControllerTests
             else BoardOpen = true;
             return true;
         }
-        public bool RequestListings(uint itemId) => true;
+        public bool RequestListings(uint itemId) { Searches.Add((World, itemId)); return true; }
         public bool AreListingsReady(uint itemId) => ListingsReady;
         public void ResetListingRequest() { }
-        public IReadOnlyList<LivePurchaseListing> ReadLiveListings(uint itemId) => World switch
+        public IReadOnlyList<LivePurchaseListing> ReadLiveListings(uint itemId) => LiveProvider?.Invoke(World, itemId) ?? (World switch
         {
             "Siren" when MissingHomeListings => [],
             "Siren" when CheapOversizedHomeStack => [new(0, 1, 11, 21, 900, 999, true, 0), new(1, 1, 12, 22, 2_000, 99, true, 0)],
             "Siren" => [new(0, 1, 11, 21, 2_000, 99, true, 0)],
             "Cactuar" => [new(0, 1, 10, 20, 1_000, 99, true, 4_950)],
             _ => [],
-        };
+        });
         public bool TrySelectLiveListing(ProcurementOrder expected, IReadOnlySet<ulong> excludedRetainerIds,
             out LivePurchaseListing? listing)
         {
+            if (UseLiveListings)
+            {
+                listing = ReadLiveListings(expected.ItemId).FirstOrDefault(x =>
+                    x.ItemId == expected.ItemId && x.ListingId == expected.ListingId &&
+                    x.PricePerUnit <= expected.MaximumAcceptableUnitPrice && x.Quantity <= expected.Quantity &&
+                    x.IsHighQuality == expected.IsHighQuality && !excludedRetainerIds.Contains(x.RetainerId));
+                return listing is not null;
+            }
             listing = new(0, 1, expected.ListingId, expected.RetainerId, 1_000, 99, true, BuyerTax);
             return true;
         }
@@ -952,6 +1172,7 @@ public sealed class ProcurementControllerTests
         public bool SubmitPurchase(LivePurchaseListing listing)
         {
             Purchases++;
+            Bought.Add((World, listing.ItemId, listing.Quantity));
             if (ThrowAfterPurchaseSubmission) throw new InvalidOperationException("Submission response lost.");
             // The real board takes nothing until the yes/no prompt is answered.
             if (NeedsPurchaseDialog) { awaitingConfirmation = listing; return true; }

@@ -7,7 +7,7 @@ namespace SmartUndercutBot;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 28;
+    public int Version { get; set; } = 29;
     public bool AutomationEnabled { get; set; }
     public bool ProcessAllRetainers { get; set; } = true;
     public bool RepeatBellRuns { get; set; }
@@ -46,7 +46,10 @@ public sealed class Configuration : IPluginConfiguration
     public decimal ProcurementMinimumRoiPercent { get; set; } = 20m;
     public uint ProcurementMinimumProfitPerUnit { get; set; } = 100;
     public string ProcurementDataCenter { get; set; } = "North-America";
-    public string MarketBoardTravelCommand { get; set; } = "/li mb";
+    public string MarketBoardTravelCommand { get; set; } = "/li tp Limsa Lominsa Lower Decks";
+    public bool PriorityShoppingEnabled { get; set; } = true;
+    public string PriorityNextWorld { get; set; } = string.Empty;
+    public uint PriorityNextItem { get; set; }
     // Empty means "use the market-board command", which is the original behaviour.
     public string SummoningBellTravelCommand { get; set; } = string.Empty;
     public bool LiveWorldStockHuntEnabled { get; set; } = true;
@@ -331,7 +334,13 @@ public sealed class Configuration : IPluginConfiguration
                 MarketRequestCooldownMs = 3000;
             Version = 28;
         }
-        Version = Math.Max(Version, 28);
+        if (Version < 29)
+        {
+            if (string.Equals(MarketBoardTravelCommand?.Trim(), "/li mb", StringComparison.OrdinalIgnoreCase))
+                MarketBoardTravelCommand = "/li tp Limsa Lominsa Lower Decks";
+            Version = 29;
+        }
+        Version = Math.Max(Version, 29);
         LiveWorldStockHuntMaximumItems = Math.Clamp(LiveWorldStockHuntMaximumItems, 1, 40);
         ProcurementBufferGilPercent = Math.Clamp(ProcurementBufferGilPercent, 0m, 100m);
         ProcurementBagBufferStacks = Math.Clamp(ProcurementBagBufferStacks, 0, 50);
@@ -359,7 +368,7 @@ public sealed class Configuration : IPluginConfiguration
         ProcurementDataCenter = ProcurementTravelPolicy.ShoppingScope(ProcurementDataCenter);
         SummoningBellTravelCommand = SummoningBellTravelCommand?.Trim() ?? string.Empty;
         MarketBoardTravelCommand = string.IsNullOrWhiteSpace(MarketBoardTravelCommand)
-            ? "/li mb"
+            ? "/li tp Limsa Lominsa Lower Decks"
             : MarketBoardTravelCommand.Trim();
         ProcurementRules ??= [];
         foreach (var rule in ProcurementRules)

@@ -14,12 +14,35 @@ The loop checks every retainer, fills empty slots from eligible bag stock, searc
 for profitable purchases when capacity remains, travels to buy them, then returns
 home to list them. Retainer checks repeat every 5–10 minutes by default, so sold
 slots are detected on the next check. Bag refills get priority before shopping.
-The normal deal search uses Universalis to choose destinations and rechecks each
-purchase against the live in-game listing. At the board, it prepares a normal
-item-name search, waits for the exact item row, opens it once, and waits for fresh
-live prices. Home and MARKET SEARCH log entries show each stage so a search
-that has not produced results is not presented as a completed price check. Home-world sale history and competing
-listings set the resale estimate; the player's own retainers are excluded.
+The default priority shopper checks recent home-world sales, then live home
+prices for every configured buyable flip with sufficient demand. Item priority
+comes first, then observed sales volume. It visits Aether, Primal, Crystal and
+Dynamis in that order, buying qualifying live deals during each visit. A home
+bargain may be bought immediately when recent sales and another competing listing
+support the resale price. One purchase per item per world favors variety.
+
+Shopping returns to the bell after four away worlds or a 20-minute checkpoint
+between item checks, or sooner when stock, spending or bag limits are reached.
+Travel already in progress and a pending purchase finish before returning. Home
+checks also have a 20-minute bound; home quotes older than 30 minutes trigger a
+refresh trip. The saved next world/item resumes after the retainer pass and next
+shopping interval. Retainer checks run while at home, and resume after each trip.
+
+Nearby boards and bells are used first. Local travel defaults to Limsa Lower
+Decks, replacing the old `/li mb` shortcut, which goes to Ul'dah. World travel
+requests Limsa as Lifestream's gateway through its public IPC; older Lifestream
+versions fall back to the world-name chat command and their configured gateway.
+Custom local travel commands remain configurable.
+
+At the board the shopper types the query, waits, submits Enter, waits for the exact
+item row and opens it once. A visible results window is insufficient: the server
+must declare its listing count, matching listing packets must arrive, and the
+rows must settle. Every selected row, quantity, tax, budget and profit is checked
+again before the purchase packet. Inventory must confirm receipt within 30 seconds;
+explicit server rejection skips the order, while an unknown outcome stops buying.
+**Shopping > Recent live price comparisons** and the session log record each
+world's prices, quantities and decisions. Own retainers are excluded from resale
+comparisons. The older cached-deal plan and full live tour remain optional tools.
 
 By default **Reinvest available gil and sale income** is on, so each trip may spend
 the whole balance apart from the travel reserve (5,000 gil, configurable to 0) and

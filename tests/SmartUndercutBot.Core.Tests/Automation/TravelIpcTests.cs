@@ -38,6 +38,14 @@ public sealed class TravelIpcTests
         public bool Pathfinding { get; set; }
         public List<string> Names { get; } = [];
         public List<string> Actions { get; } = [];
+        public object?[]? TravelArguments { get; set; }
+        public bool GatewayAvailable { get; set; } = true;
+        public ICallGateSubscriber<T1, T2, T3, T4, T5, T6, T7, T> GetIpcSubscriber<T1, T2, T3, T4, T5, T6, T7, T>(string name)
+        {
+            Names.Add(name);
+            Assert.Equal("Lifestream.TPAndChangeWorld", name);
+            return new Gateway<T1, T2, T3, T4, T5, T6, T7, T>(this);
+        }
         public ICallGateSubscriber<T> GetIpcSubscriber<T>(string name)
         {
             Names.Add(name);
@@ -59,6 +67,22 @@ public sealed class TravelIpcTests
             Assert.Equal("vnavmesh.SimpleMove.PathfindAndMoveCloseTo", name);
             return new Gate<T1, T2, T3, T>();
         }
+    }
+    private sealed class Gateway<T1, T2, T3, T4, T5, T6, T7, T>(Ipc ipc) : ICallGateSubscriber<T1, T2, T3, T4, T5, T6, T7, T>
+    {
+        public bool HasAction => ipc.GatewayAvailable;
+        public void InvokeAction(T1 a, T2 b, T3 c, T4 d, T5 e, T6 f, T7 g) => ipc.TravelArguments = [a, b, c, d, e, f, g];
+    }
+
+    [Fact]
+    public void WorldTravelExplicitlyUsesLimsaAndReturnsToItsGateway()
+    {
+        var ipc = new Ipc();
+        var travel = new LifestreamService(ipc);
+        Assert.True(travel.TryChangeWorldViaLimsa("Behemoth", true));
+        Assert.Equal(new object?[] { "Behemoth", true, "", true, 8, false, true }, ipc.TravelArguments);
+        ipc.GatewayAvailable = false;
+        Assert.False(travel.TryChangeWorldViaLimsa("Behemoth", true));
     }
     private sealed class Gate<T>(Func<T> function, Action action) : ICallGateSubscriber<T>
     {

@@ -56,7 +56,7 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
                 var targetSalePrice = Median(sales.Select(x => x.PricePerUnit));
                 if (!string.IsNullOrWhiteSpace(request.HomeWorld))
                 {
-                    var homeLowest = market.Listings
+                    var homeLowest = (request.ResaleListings ?? market.Listings)
                         .Where(x => x.ItemId == market.ItemId && x.IsHighQuality == quality &&
                                     x.Quantity > 0 && x.PricePerUnit > 0 &&
                                     string.Equals(x.WorldName, request.HomeWorld, StringComparison.OrdinalIgnoreCase) &&

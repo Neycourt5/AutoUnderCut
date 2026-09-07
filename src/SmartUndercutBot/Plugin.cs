@@ -23,11 +23,13 @@ public sealed class Plugin : IDalamudPlugin
     [PluginService] private static IGameGui GameGui { get; set; } = null!;
     [PluginService] private static IDataManager DataManager { get; set; } = null!;
     [PluginService] private static IMarketBoard MarketBoard { get; set; } = null!;
+    [PluginService] private static IGameInteropProvider Interop { get; set; } = null!;
     [PluginService] private static IPluginLog PluginLog { get; set; } = null!;
 
     private readonly WindowSystem windowSystem = new("SmartUndercutBot");
     private readonly ConfigurationService configuration;
     private readonly MarketDataService marketData;
+    private readonly MarketPurchaseService marketPurchase;
     private readonly AutomationController automation;
     private readonly UniversalisService universalis;
     private readonly ProcurementController procurement;
@@ -118,6 +120,7 @@ public sealed class Plugin : IDalamudPlugin
             configuration.Save();
         }
         taskbarAttention = new TaskbarAttentionService();
+        marketPurchase = new MarketPurchaseService(ObjectTable, GameGui, DataManager, automationLog, MarketBoard, Interop);
         procurement = new ProcurementController(
             Framework,
             PlayerState,
@@ -125,7 +128,7 @@ public sealed class Plugin : IDalamudPlugin
             retainerListings,
             universalis,
             new ProcurementPlannerService(),
-            new MarketPurchaseService(ObjectTable, GameGui, DataManager, automationLog),
+            marketPurchase,
             new VnavmeshService(PluginInterface),
             new LifestreamService(PluginInterface),
             taskbarAttention,
@@ -206,6 +209,7 @@ public sealed class Plugin : IDalamudPlugin
         procurement.GuidedReviewRequested -= OnGuidedReviewRequested;
         wealthHistory.Dispose();
         procurement.Dispose();
+        marketPurchase.Dispose();
         taskbarAttention.Dispose();
         bagListing.Dispose();
         automation.Dispose();

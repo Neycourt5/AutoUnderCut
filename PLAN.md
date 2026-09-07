@@ -1,4 +1,30 @@
-# Retainer automation and UI plan
+# Current task: reliable priority shopping after v1.0.0.48
+
+Standing authorization: implement, test, commit, push and publish (AGENTS.md).
+
+Evidence: latest log accepts results 10-60 ms after row selection, before listings
+arrive. Dark Brown Dye bought successfully; Metallic Red timed out twice with no
+confirmation prompt. Packet submission is not server acceptance. Lifestream's
+TaskMBShortcut hardcodes Ul'dah and our controller always invokes it.
+
+- [x] Require a matching fresh server response and settled rows before buying.
+- [x] Pace search, row selection and purchase; never retry unknown purchases.
+- [x] Nearby boards/bells first; migrate default `/li mb` to Limsa; gateway IPC uses Limsa.
+- [x] Home demand/prices first, then prioritized flips; buy live profitable deals
+      during each visit with tax, demand, exposure, stock and spending checks.
+- [x] Aether -> Primal -> Crystal -> Dynamis; periodic return/list/collect with
+      saved progress so the next trip continues the route. No Oceania.
+- [x] Price comparison log and clear Shopping/Home status.
+- [x] 185 tests pass: delayed/empty/stale responses, immediate buys, full circuit,
+      automatic repeat trips, checkpoints, stock budgets and Limsa gateway calls.
+- [x] Release build passed; version bumped to unused 1.0.0.49.
+- [ ] Commit and push main/v1.0.0.49; verify Actions and public installer artifacts.
+
+No native game actions have been exercised by this session. Use local .NET 10 SDK
+as documented below. Historical plans follow; the .36 unchecked release entry is
+obsolete: the repository has since published .48. See work_progress.md.
+
+# Historical retainer automation and UI plan
 
 ## Active release: v1.0.0.36 market-search handoff
 Screenshot shows an item typed while the wishlist remains visible. Local Dalamud

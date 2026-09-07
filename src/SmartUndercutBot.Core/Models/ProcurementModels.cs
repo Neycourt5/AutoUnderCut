@@ -58,7 +58,8 @@ public sealed record ProcurementPlanRequest(
     IReadOnlySet<ulong>? OwnedRetainerIds = null,
     IReadOnlyList<StockExposure>? OwnedStock = null,
     decimal MaximumWeeklySalesSharePercent = 100m,
-    bool HighQualityOnly = false);
+    bool HighQualityOnly = false,
+    IReadOnlyList<ProcurementMarketListing>? ResaleListings = null);
 
 public sealed record LiveMarketPlanRequest(
     IReadOnlyList<ProcurementMarketItem> Markets,

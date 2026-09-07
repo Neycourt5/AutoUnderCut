@@ -26,9 +26,38 @@ public sealed class MarketSearchSessionTests
         Assert.False(session.Poll(42));
         Assert.Contains("Waiting for live prices", session.Status);
         ui.Result = new(true, 42, false);
+        clock.Advance(3_000);
         Assert.True(session.Poll(42));
         Assert.Contains("Live prices loaded", session.Status);
         Assert.Equal(1, ui.Submissions);
+        Assert.Single(ui.Activations);
+    }
+
+    [Fact]
+    public void VisibleWindowDoesNotBypassTheServerResponseOrSettleDelay()
+    {
+        var ui = new SearchUi { Rows = [new(0, 42, true)] };
+        var clock = new Clock();
+        var session = Started(ui, clock);
+        clock.Advance(500);
+        session.Poll(42);
+        ui.Result = new(true, 42, false, false);
+        clock.Advance(60); // the race observed in the user's log
+        Assert.False(session.Poll(42));
+        clock.Advance(10000);
+        Assert.False(session.Poll(42));
+        ui.Result = new(true, 42, false, true);
+        Assert.True(session.Poll(42));
+        Assert.Single(ui.Activations);
+    }
+
+    [Fact]
+    public void SlowServerDoesNotCauseRepeatedRowClicks()
+    {
+        var ui = new SearchUi { Rows = [new(0, 42, true)] };
+        var clock = new Clock();
+        var session = Started(ui, clock);
+        for (var i = 0; i < 20; i++) { clock.Advance(1000); Assert.False(session.Poll(42)); }
         Assert.Single(ui.Activations);
     }
 

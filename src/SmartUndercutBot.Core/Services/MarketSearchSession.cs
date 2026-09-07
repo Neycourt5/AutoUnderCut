@@ -1,7 +1,7 @@
 namespace SmartUndercutBot.Core.Services;
 
 public sealed record MarketSearchRow(int Index, uint ItemId, bool Enabled);
-public sealed record MarketSearchResult(bool Visible, uint ItemId, bool Waiting);
+public sealed record MarketSearchResult(bool Visible, uint ItemId, bool Waiting, bool ResponseReceived = true);
 
 public interface IMarketSearchUi
 {
@@ -72,8 +72,9 @@ public sealed class MarketSearchSession(IMarketSearchUi ui, TimeProvider? clock 
         {
             if (selected && result.ItemId == itemId)
             {
-                Status = result.Waiting ? $"Waiting for live prices for {itemName}." : $"Live prices loaded for {itemName}.";
-                return !result.Waiting;
+                var ready = result.ResponseReceived && !result.Waiting && time.GetUtcNow() >= nextActionAt;
+                Status = ready ? $"Live prices loaded for {itemName}." : $"Waiting for live prices for {itemName}.";
+                return ready;
             }
             if (!result.Waiting) ui.CloseResult();
             Status = $"Closing old item results before opening {itemName}.";
@@ -85,7 +86,9 @@ public sealed class MarketSearchSession(IMarketSearchUi ui, TimeProvider? clock 
         // "waiting for the matching item row" until it timed out, every time.
         if (time.GetUtcNow() < nextActionAt) return false;
 
-        selected = false;
+        // A slow server may not open the results window for several seconds.
+        // Keep waiting after our one click; the route owns bounded read retries.
+        if (selected) return false;
         var rows = ui.ReadRows();
         var row = rows.FirstOrDefault(x => x.ItemId == itemId && x.Enabled);
         if (row is null)

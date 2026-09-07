@@ -117,6 +117,9 @@ public sealed class DashboardWindow : Window
     {
         var config = configuration.Current;
         ImGui.TextWrapped("Check retainers > fill from bags > buy good deals > return home and list > repeat.");
+        if (config.PriorityShoppingEnabled)
+            ImGui.TextWrapped("Shopping: home prices first, then Aether > Primal > Crystal > Dynamis. Buy qualifying live deals during each visit. " +
+                              "Return after 4 away worlds or 20 minutes away to list and collect, then resume the route. Nearby boards and bells are used before teleporting.");
         ImGui.TextWrapped("Start enables price changes, automatic purchases, listing, gil collection, and repeat checks. " +
                           "It uses your limits below. Keep the game running and leave the retainer list open between trips.");
         ImGui.Spacing();
@@ -185,7 +188,7 @@ public sealed class DashboardWindow : Window
         ImGui.TextWrapped($"Bag refills list HQ Grade 4 gemdraughts and HQ Caramel Popcorn in complete 99-stacks, keeping {reserve:N0} of each, " +
                           "plus high-volume dyes. Materia, ethers and the remaining dyes are sold off with nothing kept back. " +
                           "See Stock for exactly what each bag item will do, and Shopping for the item list and limits.");
-        ImGui.Text($"Check retainers every {config.RepeatMinimumMinutes}-{config.RepeatMaximumMinutes} minutes; retry deals every {config.ProcurementIntervalMinutes} minutes.");
+        ImGui.TextWrapped($"At home: check retainers every {config.RepeatMinimumMinutes}-{config.RepeatMaximumMinutes} minutes; retry deals every {config.ProcurementIntervalMinutes} minutes. Shopping pauses these checks until the return trip.");
         ImGui.TextWrapped("Travel requires Lifestream and vnavmesh. Live prices and inventory confirmation are checked before another purchase is attempted.");
     }
 
@@ -871,12 +874,46 @@ public sealed class DashboardWindow : Window
             procurement.RunLiveStockHuntNow();
         ImGui.EndDisabled();
         ImGui.TextWrapped("The live all-world hunt scans prices on every world first, then makes a separate buying pass. The guided route waits for you to buy manually.");
+        if (configuration.Current.PriorityShoppingEnabled)
+            ImGui.TextWrapped("Automatic shopping checks every configured flip with recent home sales, in item priority and sales-volume order. " +
+                "Each live deal must fit your profit, demand and stock limits. One purchase per item per world keeps the first pass diverse. " +
+                $"Next route stop: {((string.IsNullOrEmpty(configuration.Current.PriorityNextWorld)) ? "Aether" : configuration.Current.PriorityNextWorld)}.");
+        if (ImGui.CollapsingHeader("Recent live price comparisons"))
+        {
+            ImGui.TextWrapped("These checks are also saved to the session log on the Activity log tab. Zero listings means a completed empty server response.");
+            if (ImGui.BeginTable("live-comparisons", 5, ImGuiTableFlags.RowBg | ImGuiTableFlags.Borders | ImGuiTableFlags.ScrollY,
+                    new Vector2(0, 260 * ImGuiHelpers.GlobalScale)))
+            {
+                ImGui.TableSetupColumn("Time / world");
+                ImGui.TableSetupColumn("Item");
+                ImGui.TableSetupColumn("Listings / units");
+                ImGui.TableSetupColumn("Lowest gil");
+                ImGui.TableSetupColumn("Decision");
+                ImGui.TableHeadersRow();
+                foreach (var row in procurement.RecentPrices.Reverse().Take(100))
+                {
+                    ImGui.TableNextRow();
+                    ImGui.TableNextColumn(); ImGui.TextUnformatted($"{row.At.LocalDateTime:t} {row.World}");
+                    ImGui.TableNextColumn(); ImGui.TextUnformatted($"{row.Item}{(row.HighQuality ? " HQ" : "")}");
+                    ImGui.TableNextColumn(); ImGui.TextUnformatted($"{row.Listings} / {row.Units:N0}");
+                    ImGui.TableNextColumn(); ImGui.TextUnformatted(row.Lowest == 0 ? "-" : row.Lowest.ToString("N0"));
+                    ImGui.TableNextColumn(); ImGui.TextWrapped(row.Decision);
+                }
+                ImGui.EndTable();
+            }
+        }
 
         ImGui.Separator();
         var config = configuration.Current;
         if (ImGui.CollapsingHeader("Individual shopping switches"))
         {
             ImGui.TextWrapped("Start on the Home tab sets these for continuous restocking. Use these switches for custom workflows.");
+            var priority = config.PriorityShoppingEnabled;
+            if (ImGui.Checkbox("Home prices first; buy while visiting worlds in region order", ref priority))
+            {
+                config.PriorityShoppingEnabled = priority;
+                SaveConfiguration();
+            }
             var automatic = config.AutomaticProcurementEnabled;
             if (ImGui.Checkbox("Run procurement automatically while idle at the bell", ref automatic))
             {

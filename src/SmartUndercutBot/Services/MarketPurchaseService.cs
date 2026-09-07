@@ -1,4 +1,6 @@
 using System.Numerics;
+using Dalamud.Hooking;
+using Dalamud.Game.Network.Structures;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.Game.Control;
@@ -13,28 +15,64 @@ using SmartUndercutBot.Core.Services;
 
 namespace SmartUndercutBot.Services;
 
-public sealed unsafe class MarketPurchaseService : IMarketPurchaseService
+public sealed unsafe class MarketPurchaseService : IMarketPurchaseService, IDisposable
 {
     private readonly IObjectTable objectTable;
     private readonly IGameGui gameGui;
     private readonly IDataManager dataManager;
     private readonly AutomationLog log;
     private readonly MarketSearchSession search;
+    private readonly IMarketBoard marketBoard;
+    private readonly MarketResponseTracker response = new();
+    private readonly Hook<RequestResultDelegate> requestResultHook;
+    private readonly Hook<PurchaseResponseDelegate> purchaseResponseHook;
+    private delegate void RequestResultDelegate(InfoProxyItemSearch* proxy, byte count, int error);
+    private delegate void PurchaseResponseDelegate(InfoProxyItemSearch* proxy, uint itemId, uint error);
+    private uint pendingPurchaseItem;
+    private uint purchaseError;
+    public uint PurchaseError => purchaseError;
     private string lastSearchStatus = string.Empty;
-    private DateTimeOffset nextDialogDiagnosticAt;
-    public string? SearchStatus => search.Status;
+    public string? SearchStatus => $"{search.Status} ({response.Summary})";
 
     public MarketPurchaseService(
         IObjectTable objectTable,
         IGameGui gameGui,
         IDataManager dataManager,
-        AutomationLog log)
+        AutomationLog log, IMarketBoard marketBoard, IGameInteropProvider interop)
     {
         this.objectTable = objectTable;
         this.gameGui = gameGui;
         this.dataManager = dataManager;
         this.log = log;
+        this.marketBoard = marketBoard;
         search = new MarketSearchSession(new SearchUi(this));
+        requestResultHook = interop.HookFromAddress<RequestResultDelegate>(
+            (nint)InfoProxyItemSearch.MemberFunctionPointers.ProcessRequestResult, OnRequestResult);
+        purchaseResponseHook = interop.HookFromAddress<PurchaseResponseDelegate>(
+            (nint)InfoProxyItemSearch.MemberFunctionPointers.ProcessPurchaseResponse, OnPurchaseResponse);
+        requestResultHook.Enable();
+        purchaseResponseHook.Enable();
+        marketBoard.OfferingsReceived += OnOfferings;
+    }
+
+    private void OnRequestResult(InfoProxyItemSearch* proxy, byte count, int error)
+    {
+        var id = proxy == null ? 0 : proxy->SearchItemId;
+        requestResultHook.Original(proxy, count, error);
+        response.ReceiveCount(id, count, error);
+    }
+
+    private void OnOfferings(IMarketBoardCurrentOfferings offerings) => response.ReceiveRows(
+        offerings.RequestId, offerings.ItemListings.FirstOrDefault()?.ItemId ?? 0,
+        offerings.ItemListings.Select(x => x.ListingId));
+
+    private void OnPurchaseResponse(InfoProxyItemSearch* proxy, uint itemId, uint error)
+    {
+        purchaseResponseHook.Original(proxy, itemId, error);
+        if (pendingPurchaseItem == 0 || itemId != pendingPurchaseItem) return;
+        purchaseError = error;
+        log.Add(error == 0 ? AutomationLogLevel.Information : AutomationLogLevel.Warning,
+            $"MARKET BUY server response for item {itemId}: error {error}. Inventory verification still required.");
     }
 
     public bool IsMarketBoardOpen => IsAddonVisible("ItemSearch");
@@ -122,7 +160,12 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService
             var addon = owner.gameGui.GetAddonByName<AddonItemSearch>("ItemSearch");
             if (!CanUseInput(addon)) return false;
             addon->SetModeFilter(AddonItemSearch.SearchMode.Normal, 0);
-            if (FocusSearchInput(addon)) return true;
+            if (FocusSearchInput(addon))
+            {
+                SetSearchInput(addon, string.Empty);
+                SetSearchInput(addon, name);
+                return true;
+            }
             LastBlocker = "the search box has no focusable node";
             return false;
         }
@@ -152,8 +195,8 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService
             // Drive the input's own callbacks, which update the game's search state.
             // Mirroring text into the addon's cached strings can leave a typed query
             // with no submitted search.
-            SetSearchInput(addon, string.Empty);
-            SetSearchInput(addon, name);
+            // PrepareSearch typed the query on an earlier tick. Let TextChanged
+            // reach the game before pressing Enter, as with a manual search.
             var input = &addon->SearchTextInput->AtkComponentInputBase;
             var callback = "RunSearch fallback";
             if (input->Callback != null)
@@ -204,8 +247,9 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService
             widget->SetText(text);
             var input = &widget->AtkComponentInputBase;
             input->CursorPos = input->SelectionStart = input->SelectionEnd = text.Length;
-            input->Callback(&addon->AtkUnitBase, InputCallbackType.TextChanged,
-                input->RawString.StringPtr, input->EvaluatedString.StringPtr, input->CallbackEventKind);
+            if (input->Callback != null)
+                input->Callback(&addon->AtkUnitBase, InputCallbackType.TextChanged,
+                    input->RawString.StringPtr, input->EvaluatedString.StringPtr, input->CallbackEventKind);
         }
 
         public IReadOnlyList<MarketSearchRow> ReadRows()
@@ -232,6 +276,7 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService
             var addon = owner.gameGui.GetAddonByName<AddonItemSearch>("ItemSearch");
             if (addon == null || addon->ResultsList == null ||
                 (!addon->ResultsList->IsItemInteractionEnabled && !addon->ResultsList->IsItemClickEnabled)) return false;
+            owner.response.Begin(itemId);
             addon->ResultsList->SelectItem(index, true);
             addon->ResultsList->DispatchItemEvent(index, AtkEventType.ListItemClick);
             return true;
@@ -241,13 +286,15 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService
         {
             var proxy = InfoProxyItemSearch.Instance();
             return new(owner.IsAddonVisible("ItemSearchResult"), proxy == null ? 0 : proxy->SearchItemId,
-                proxy == null || proxy->WaitingForListings);
+                proxy == null || proxy->WaitingForListings,
+                proxy != null && owner.response.IsReady(proxy->SearchItemId, (int)proxy->ListingCount));
         }
 
         public void CloseResult() => owner.CloseAddon("ItemSearchResult");
 
         public void ClearSearch()
         {
+            owner.response.Begin(0);
             var proxy = InfoProxyItemSearch.Instance();
             if (proxy != null)
             {
@@ -270,7 +317,8 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService
         for (var index = 0; index < count; index++)
         {
             var row = source[index];
-            if (row.ItemId == itemId && row.UnitPrice > 0 && row.Quantity > 0)
+            if (row.ItemId == itemId && row.UnitPrice > 0 && row.Quantity > 0 && !row.IsMannequin &&
+                response.Contains(row.ListingId))
                 result.Add(new(index, row.ItemId, row.ListingId, row.RetainerId,
                     row.UnitPrice, row.Quantity, row.IsHqItem, row.TotalTax));
         }
@@ -295,7 +343,7 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService
             var row = source[index];
             if (row.ItemId != expected.ItemId || row.UnitPrice == 0 || row.UnitPrice > expected.MaximumAcceptableUnitPrice ||
                 row.Quantity == 0 || row.Quantity > expected.Quantity || row.IsHqItem != expected.IsHighQuality ||
-                excludedRetainerIds.Contains(row.RetainerId))
+                excludedRetainerIds.Contains(row.RetainerId) || row.IsMannequin || !response.Contains(row.ListingId))
                 continue;
             candidates.Add(new(index, row.ItemId, row.ListingId, row.RetainerId,
                 row.UnitPrice, row.Quantity, row.IsHqItem, row.TotalTax));
@@ -310,6 +358,7 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService
     {
         var proxy = InfoProxyItemSearch.Instance();
         if (proxy == null || proxy->WaitingForListings || proxy->SearchItemId != listing.ItemId ||
+            !response.Contains(listing.ListingId) || !response.IsReady(listing.ItemId, (int)proxy->ListingCount) ||
             !IsAddonVisible("ItemSearchResult") || listing.Index < 0 ||
             listing.Index >= proxy->ListingCount || listing.Index >= proxy->Listings.Length)
             return false;
@@ -317,7 +366,7 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService
         fixed (MarketBoardListing* rows = source)
         {
             var row = &rows[listing.Index];
-            if (row->ListingId != listing.ListingId || row->RetainerId != listing.RetainerId ||
+            if (row->IsMannequin || row->ListingId != listing.ListingId || row->RetainerId != listing.RetainerId ||
                 row->ItemId != listing.ItemId || row->UnitPrice != listing.PricePerUnit ||
                 row->Quantity != listing.Quantity || row->IsHqItem != listing.IsHighQuality ||
                 row->TotalTax != listing.TotalTax)
@@ -327,6 +376,8 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService
                 log.Add(AutomationLogLevel.Warning, $"MARKET BUY could not prepare listing {listing.ListingId} for purchase.");
                 return false;
             }
+            pendingPurchaseItem = listing.ItemId;
+            purchaseError = 0;
             var sent = proxy->SendPurchaseRequestPacket();
             log.Add(sent ? AutomationLogLevel.Information : AutomationLogLevel.Warning,
                 $"MARKET BUY request {(sent ? "sent" : "rejected locally")} for item {listing.ItemId}, " +
@@ -336,34 +387,8 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService
         }
     }
 
-    public bool TryConfirmPurchase(string itemName)
-    {
-        var addon = gameGui.GetAddonByName<AddonSelectYesno>("SelectYesno");
-        if (addon == null || !addon->AtkUnitBase.IsVisible)
-            return false;
-        var prompt = addon->PromptText == null ? string.Empty : addon->PromptText->NodeText.ToString();
-        // Only ever accept the prompt naming the item being bought. Any other yes/no
-        // dialog in front of the player is left completely alone.
-        if (string.IsNullOrWhiteSpace(itemName) ||
-            !prompt.Contains(itemName, StringComparison.OrdinalIgnoreCase))
-        {
-            if (DateTimeOffset.UtcNow >= nextDialogDiagnosticAt)
-            {
-                nextDialogDiagnosticAt = DateTimeOffset.UtcNow.AddSeconds(5);
-                log.Add(AutomationLogLevel.Warning,
-                    $"MARKET BUY a yes/no dialog is open but does not name {itemName}; leaving it alone. " +
-                    $"Prompt: '{prompt}'");
-            }
-            return false;
-        }
-
-        var values = stackalloc AtkValue[1];
-        values[0].Type = AtkValueType.Int;
-        values[0].Int = 0;
-        addon->AtkUnitBase.FireCallback(1, values, true);
-        log.Add(AutomationLogLevel.Information, $"MARKET BUY confirmed the purchase prompt for {itemName}.");
-        return true;
-    }
+    // This adapter sends the game's purchase packet directly. It never opens a
+    // confirmation dialog, so accepting an unrelated SelectYesno is unnecessary.
 
     public void CloseMarketBoard()
     {
@@ -385,6 +410,13 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService
         var addon = gameGui.GetAddonByName<AtkUnitBase>(name);
         if (addon != null && addon->IsVisible)
             addon->Close(true);
+    }
+
+    public void Dispose()
+    {
+        marketBoard.OfferingsReceived -= OnOfferings;
+        requestResultHook.Dispose();
+        purchaseResponseHook.Dispose();
     }
 
 }
