@@ -1,4 +1,4 @@
-# Current task: reliable priority shopping after v1.0.0.48
+# Completed: v1.0.0.49 reliable priority shopping
 
 Standing authorization: implement, test, commit, push and publish (AGENTS.md).
 
@@ -18,7 +18,11 @@ TaskMBShortcut hardcodes Ul'dah and our controller always invokes it.
 - [x] 185 tests pass: delayed/empty/stale responses, immediate buys, full circuit,
       automatic repeat trips, checkpoints, stock budgets and Limsa gateway calls.
 - [x] Release build passed; version bumped to unused 1.0.0.49.
-- [ ] Commit and push main/v1.0.0.49; verify Actions and public installer artifacts.
+- [x] Published main commit 44e0583 and annotated v1.0.0.49. Release workflow
+      34090050056 and Build 34090049939 succeeded. Public latest repo.json,
+      ZIP manifest and plugin assembly all verified at 1.0.0.49, API 15.
+      ZIP: 439,757 bytes; plugin and Core DLLs present.
+      https://github.com/Neycourt5/AutoUnderCut/releases/tag/v1.0.0.49
 
 No native game actions have been exercised by this session. Use local .NET 10 SDK
 as documented below. Historical plans follow; the .36 unchecked release entry is

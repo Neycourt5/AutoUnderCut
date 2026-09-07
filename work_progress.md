@@ -11,7 +11,7 @@ Build: use `C:/Users/Acour/.dotnet/dotnet.exe` (SDK 10.0.301), **not** the PATH
 
 ---
 
-## v1.0.0.49 - priority shopping, fresh responses and Limsa (publication pending)
+## v1.0.0.49 - priority shopping, fresh responses and Limsa (published)
 
 User asked for a paced, repeatable home-first shopping loop, buying profitable
 live stock during visits in Aether -> Primal -> Crystal -> Dynamis order.
@@ -57,8 +57,11 @@ live quantities, all 31 away worlds across eight return trips, three automatical
 scheduled trips, mid-world resume, filled-buffer scouting, configuration migration
 and Limsa gateway arguments. Release build passes with no warnings/errors.
 Tests use simulated services; the new native hooks and travel have not been
-exercised in FFXIV by this session. Next: commit/tag/push .49 and verify public
-installer JSON, ZIP manifest and assembly version before declaring it ready.
+exercised in FFXIV by this session. Published from 44e0583 on main, annotated
+v1.0.0.49. Release workflow 34090050056 and Build 34090049939 succeeded. Downloaded
+the public latest installer JSON and update ZIP: installer, packaged manifest and
+plugin DLL all report 1.0.0.49, API 15; both DLLs present, ZIP 439,757 bytes.
+Release: https://github.com/Neycourt5/AutoUnderCut/releases/tag/v1.0.0.49
 
 Primary source checks: [FFXIVClientStructs market proxy](https://github.com/aers/FFXIVClientStructs/blob/main/FFXIVClientStructs/FFXIV/Client/UI/Info/InfoProxyItemSearch.cs),
 [Lifestream market shortcut](https://github.com/NightmareXIV/Lifestream/blob/main/Lifestream/Tasks/Shortcuts/TaskMBShortcut.cs),
