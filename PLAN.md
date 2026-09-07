@@ -11,7 +11,10 @@ User wants a comfortable bag reserve and says the 932-stack count is wrong.
 - [x] Distinguish physical bag slots, units, personal reserves and planned sale lots.
 - [x] 136 tests pass, including the 932-sale-lot regression, automatic trip/return,
   reserve buying beside full listings, periodic scouting, and config migration.
-- [ ] Publish v1.0.0.35 and verify public installer JSON and ZIP.
+- [x] Published v1.0.0.35 from 3a5b473. Release 34070840381 and build
+  34070840362 succeeded. Public installer JSON, ZIP manifest and DLL all verified
+  at 1.0.0.35, API 15, both required DLLs present (ZIP 382,179 bytes).
+  https://github.com/Neycourt5/AutoUnderCut/releases/tag/v1.0.0.35
 
 No in-game bag contents or native actions were directly read/exercised here.
 The screenshot's count was theoretical sale lots and included sell-off stock;

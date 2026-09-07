@@ -39,7 +39,10 @@ Home display of 932 stacks looked wrong.
 - 136 tests pass. Includes a fixture with 4,660 sale-only units in 5 physical slots
   (932 future lots), unaffected automatic buying/return, one physical pile vs sale
   lots, three spare buys beside full retainer exposure, scout cadence and migration.
-- Publication and final artifact verification pending.
+- Published v1.0.0.35 from 3a5b473. Release run 34070840381 and build run
+  34070840362 succeeded. Downloaded latest installer JSON and its ZIP: manifest,
+  ZIP manifest and DLL assembly all report 1.0.0.35, API 15; both DLLs included.
+  ZIP 382,179 bytes. https://github.com/Neycourt5/AutoUnderCut/releases/tag/v1.0.0.35
 
 ## v1.0.0.34 - continuous loop and North America shopping
 User reported travel to Oceania and a false "No retainers were available" stop
