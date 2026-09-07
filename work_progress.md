@@ -11,7 +11,7 @@ Build: use `C:/Users/Acour/.dotnet/dotnet.exe` (SDK 10.0.301), **not** the PATH
 
 ---
 
-## v1.0.0.54 - faster regional scouting and compare before buying (publication pending)
+## v1.0.0.54 - faster regional scouting and compare before buying (published)
 
 Latest request: reach other data centers sooner, skim quickly, compare normal
 deals and only buy immediately when the margin is exceptional. Preserve the
@@ -47,13 +47,16 @@ now-working .50-.53 native search/purchase fixes and Limsa travel.
   wrapped Sky Blue name + reversed inventory order case; the exact native text
   behind the user's original skip was not captured, so confirm in the next run.
 
-Validation: 209 tests pass. Release build passed with zero warnings/errors before
-the final version bump. Tests cover all four DCs, ordinary/exceptional purchases,
+Validation: 209 tests pass. Final 1.0.0.54 release build passed with zero warnings
+or errors. Tests cover all four DCs, ordinary/exceptional purchases,
 changed offers, quick bounded retries, expired references, budgets across both
 phases, repeated trips and wrapped dye repricing. These are simulated game
 services; .54 has not been exercised in FFXIV by this session.
-Publication pending; see PLAN.md. Never claim installer-ready until the workflow
-and the public installer/ZIP/DLL versions have been checked.
+Published from source commit 750c62b with annotated v1.0.0.54. Release workflow
+34135916011 and Build 34135916091 succeeded. Downloaded the public latest
+installer JSON and update ZIP: installer, packaged manifest and plugin assembly
+all report 1.0.0.54, API 15. Both DLLs present; ZIP 465,743 bytes.
+Release: https://github.com/Neycourt5/AutoUnderCut/releases/tag/v1.0.0.54
 
 ## v1.0.0.49 - priority shopping, fresh responses and Limsa (published)
 

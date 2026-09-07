@@ -1,4 +1,4 @@
-# Active: v1.0.0.54 release verification
+# Completed: v1.0.0.54 faster scouting and compared purchases
 
 Latest user steering: proceed as soon as real prices arrive; retry an unanswered
 empty screen with backoff. Scout across data centers and compare normal deals;
@@ -22,8 +22,11 @@ buy immediately only for exceptional margins. Publish the finished update.
       empty retries, 31-world circuit, short 51-item scouting, Crystal beating
       Aether, immediate exceptional deals, stale/changed prices, spending across
       both phases, automatic repeat trips and home quote expiry.
-- [x] Release build passed with zero warnings/errors before final version bump.
-- [ ] Final 1.0.0.54 build, commit/main/tag push, Actions and public ZIP verification.
+- [x] Final 1.0.0.54 build passed with zero warnings/errors; 209 tests pass.
+- [x] Commit 750c62b pushed to main with annotated v1.0.0.54.
+- [x] Release Actions 34135916011 and Build 34135916091 succeeded. Downloaded
+      public latest installer and ZIP: installer/manifest/plugin DLL = 1.0.0.54,
+      API 15, both DLLs present, ZIP 465,743 bytes. Installer URL unchanged.
 
 Evidence: .49 log at 01:19 skips Sky Blue #13721 because it cannot map the editor.
 Other long dye rows produce requests for the wrong provisional inventory item.
