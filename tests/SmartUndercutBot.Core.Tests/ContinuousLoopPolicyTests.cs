@@ -25,7 +25,7 @@ public sealed class ContinuousLoopPolicyTests
         var config = System.Text.Json.JsonSerializer.Deserialize<Configuration>("{\"Version\":24,\"ProcurementBagBufferStacks\":5}")!;
         config.Normalize();
         Assert.True(config.ContinueShoppingWhenStocked);
-        Assert.Equal(25, config.Version);
+        Assert.Equal(26, config.Version);
     }
 
     [Theory]

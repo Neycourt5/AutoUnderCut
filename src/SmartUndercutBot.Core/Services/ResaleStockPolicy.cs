@@ -13,7 +13,26 @@ public static class ResaleStockPolicy
 
     public static bool IsCuratedConsumable(string name) => name is
         "Grade 4 Gemdraught of Strength" or "Grade 4 Gemdraught of Dexterity" or
-        "Grade 4 Gemdraught of Intelligence" or "Grade 4 Gemdraught of Mind" or "Caramel Popcorn";
+        "Grade 4 Gemdraught of Intelligence" or "Grade 4 Gemdraught of Mind" or
+        "Caramel Popcorn" or "Popoto Potage";
+
+    // Only grades XI and XII are current enough to be worth trading; every other
+    // grade stays on the sell-off list.
+    public static bool IsTradeableMateria(string name) =>
+        name.EndsWith(" Materia XI", StringComparison.OrdinalIgnoreCase) ||
+        name.EndsWith(" Materia XII", StringComparison.OrdinalIgnoreCase);
+
+    // Walk the tour in the order the stock is worth having: raid food and potions
+    // first, then the mass-market dyes, then current materia last.
+    public static IReadOnlyList<ProcurementRule> SelectTourRules(
+        IEnumerable<ProcurementRule> rules, Func<ProcurementRule, bool> isBelowTarget, int maximumItems) =>
+        rules.Where(x => x.Enabled && x.ItemId != 0 && !x.LiquidateOnly && x.HuntOnTour)
+            .Where(isBelowTarget)
+            .DistinctBy(x => x.ItemId)
+            .OrderBy(x => x.TourPriority)
+            .ThenBy(x => x.ItemName, StringComparer.OrdinalIgnoreCase)
+            .Take(Math.Max(1, maximumItems))
+            .ToArray();
 
     public static bool QualityAllowed(ProcurementRule rule, bool hq) =>
         hq ? rule.AllowHighQuality || rule.RequireHighQuality : !rule.RequireHighQuality;

@@ -306,6 +306,9 @@ public sealed class DashboardWindow : Window
             "Comfortable stock targets about 20% of retainer capacity, with 1-3 spare sale stacks per item to spread your stock. " +
             "Purchases still need profit, demand, gil and bag space.");
         ImGui.Text($"Available for the next trip: {procurement.ShoppingBudget:N0} gil   |   room for {procurement.PurchaseCapacity} stack(s)");
+        if (procurement.ShoppingWaitReason is { } shoppingWait)
+            ImGui.TextWrapped($"Not buying right now: {shoppingWait}. Once every sale slot is covered, the figure " +
+                              "above is the spare-stock allowance rather than the whole wallet.");
     }
 
     private void DrawAdvanced()
@@ -900,7 +903,17 @@ public sealed class DashboardWindow : Window
                 config.LiveWorldStockHuntEnabled = liveHunt;
                 SaveConfiguration();
             }
-            ImGui.TextWrapped("Full live tours check up to 8 low-stock items across North America and use your home-world price as the resale anchor. Start all automation selects targeted Universalis routes instead.");
+            var tourItems = config.LiveWorldStockHuntMaximumItems;
+            if (InputInt("Items per all-world tour", ref tourItems, 1, 40))
+            {
+                config.LiveWorldStockHuntMaximumItems = tourItems;
+                configurationDirty = true;
+            }
+            ImGui.TextWrapped("Full live tours walk every North America world and use your home-world price as the resale anchor. " +
+                              "Only stock marked for the tour is walked, in order: raid food and potions, then General-Purpose and " +
+                              "Wide-Spectrum dyes, then current materia (grades XI and XII). Each extra item is multiplied by every " +
+                              "world visited, so the limit above is what keeps a tour finishing. Start all automation uses targeted " +
+                              "Universalis routes instead.");
             var lowStockThreshold = config.LiveWorldStockThresholdPerItem;
             if (InputInt("Live-tour low-stock threshold per item", ref lowStockThreshold, 1, 9999))
             {

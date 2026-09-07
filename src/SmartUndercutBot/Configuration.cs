@@ -7,7 +7,7 @@ namespace SmartUndercutBot;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 25;
+    public int Version { get; set; } = 26;
     public bool AutomationEnabled { get; set; }
     public bool ProcessAllRetainers { get; set; } = true;
     public bool RepeatBellRuns { get; set; }
@@ -50,6 +50,7 @@ public sealed class Configuration : IPluginConfiguration
     public string SummoningBellTravelCommand { get; set; } = string.Empty;
     public bool LiveWorldStockHuntEnabled { get; set; } = true;
     public int LiveWorldStockThresholdPerItem { get; set; } = 199;
+    public int LiveWorldStockHuntMaximumItems { get; set; } = 8;
     public int LiveWorldStockHuntCooldownMinutes { get; set; } = 360;
     public int GuidedTourMaximumWorlds { get; set; } = 6;
     public List<ProcurementRule> ProcurementRules { get; set; } = [];
@@ -303,7 +304,20 @@ public sealed class Configuration : IPluginConfiguration
                  x.ItemName.StartsWith("Wide-Spectrum ", StringComparison.OrdinalIgnoreCase)));
             Version = 23;
         }
-        Version = Math.Max(Version, 25);
+        if (Version < 26)
+        {
+            // The all-world tour becomes an explicit allowlist: raid food and
+            // potions first, then the mass-market dye lines, then current materia.
+            // Re-seed so the tour flags and the grade XI/XII materia rules exist.
+            DyeRulesSeeded = false;
+            MateriaRulesSeeded = false;
+            BuyableDyeRulesSeeded = false;
+            ProcurementRules.RemoveAll(x => x.LiquidateOnly &&
+                ResaleStockPolicy.IsTradeableMateria(x.ItemName));
+            Version = 26;
+        }
+        Version = Math.Max(Version, 26);
+        LiveWorldStockHuntMaximumItems = Math.Clamp(LiveWorldStockHuntMaximumItems, 1, 40);
         ProcurementBufferGilPercent = Math.Clamp(ProcurementBufferGilPercent, 0m, 100m);
         ProcurementBagBufferStacks = Math.Clamp(ProcurementBagBufferStacks, 0, 50);
         ProcurementTravelReserve = Math.Min(ProcurementTravelReserve, 100_000_000u);

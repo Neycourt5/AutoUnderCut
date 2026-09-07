@@ -13,6 +13,7 @@ public interface IUniversalisService
     IReadOnlyList<ProcurementRule> CreateFavoriteRules();
     IReadOnlyList<ProcurementRule> CreateLiquidationRules();
     IReadOnlyList<ProcurementRule> CreateBuyableDyeRules();
+    IReadOnlyList<ProcurementRule> CreateTradeableMateriaRules();
     Task<IReadOnlyList<ProcurementMarketItem>> ScanAsync(
         IReadOnlyList<ProcurementRule> rules,
         string dataCenter,
@@ -28,6 +29,7 @@ public sealed class UniversalisService : IUniversalisService, IDisposable
         "Grade 4 Gemdraught of Intelligence",
         "Grade 4 Gemdraught of Mind",
         "Caramel Popcorn",
+        "Popoto Potage",
     ];
 
     private const int MaximumAttempts = 3;
@@ -67,6 +69,8 @@ public sealed class UniversalisService : IUniversalisService, IDisposable
                 AllowHighQuality = true,
                 RequireHighQuality = true,
                 ListFromBags = true,
+                HuntOnTour = true,
+                TourPriority = 0,
             })
             .OrderBy(x => x.ItemName)
             .ToArray();
@@ -77,7 +81,8 @@ public sealed class UniversalisService : IUniversalisService, IDisposable
     public IReadOnlyList<ProcurementRule> CreateLiquidationRules() => TradeableItems()
         .Where(x => // Never sweep up the consumables the player actually trades.
                     !ResaleStockPolicy.IsCuratedConsumable(x.Name) &&
-                    (IsDye(x.Name) || IsEther(x.Name) || IsMateria(x.Row)))
+                    (IsDye(x.Name) || IsEther(x.Name) ||
+                     IsMateria(x.Row) && !ResaleStockPolicy.IsTradeableMateria(x.Name)))
         .Select(x => new ProcurementRule
         {
             ItemId = x.Row.RowId, ItemName = x.Name, TargetStackSize = 5,
@@ -97,6 +102,20 @@ public sealed class UniversalisService : IUniversalisService, IDisposable
             // Dyes have no high-quality form; reading this from the sheet keeps the
             // "only buy high quality" preference from excluding them entirely.
             AllowHighQuality = x.Row.CanBeHq,
+            HuntOnTour = true, TourPriority = 1,
+        }).OrderBy(x => x.ItemName).ToArray();
+
+    // Grades XI and XII only. Everything older stays on the sell-off list, and this
+    // sits last on the tour because current demand for it is unproven.
+    public IReadOnlyList<ProcurementRule> CreateTradeableMateriaRules() => TradeableItems()
+        .Where(x => IsMateria(x.Row) && ResaleStockPolicy.IsTradeableMateria(x.Name))
+        .Select(x => new ProcurementRule
+        {
+            ItemId = x.Row.RowId, ItemName = x.Name, TargetStackSize = 20,
+            MaximumSaleSlots = 1, MinimumWeeklyUnitsSold = 50,
+            ListFromBags = true, BagReserveQuantity = 0,
+            AllowHighQuality = x.Row.CanBeHq,
+            HuntOnTour = true, TourPriority = 2,
         }).OrderBy(x => x.ItemName).ToArray();
 
     private IEnumerable<(Item Row, string Name)> TradeableItems() => dataManager.GetExcelSheet<Item>()

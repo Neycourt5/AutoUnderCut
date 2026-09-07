@@ -774,7 +774,10 @@ public sealed class ProcurementControllerTests
             Config.Current.AllowAutomaticPurchases = true;
             // Older regression cases exercise the optional fixed-buffer mode.
             Config.Current.ContinueShoppingWhenStocked = false;
-            Config.Current.ProcurementRules.Add(new() { ItemId = 1, AllowHighQuality = true, RequireHighQuality = true });
+            Config.Current.ProcurementRules.Add(new()
+            {
+                ItemId = 1, AllowHighQuality = true, RequireHighQuality = true, HuntOnTour = true,
+            });
             Controller = new(Game, Game, Game, Game, Game, new ProcurementPlannerService(),
                 Game, Game, Game, Game, Ledger, Repricing, Config, Log, clock);
         }

@@ -84,7 +84,8 @@ public sealed class Plugin : IDalamudPlugin
         }
         if (!configuration.Current.BuyableDyeRulesSeeded)
         {
-            foreach (var rule in universalis.CreateBuyableDyeRules())
+            foreach (var rule in universalis.CreateBuyableDyeRules()
+                         .Concat(universalis.CreateTradeableMateriaRules()))
                 if (configuration.Current.ProcurementRules.All(x => x.ItemId != rule.ItemId))
                     configuration.Current.ProcurementRules.Add(rule);
             configuration.Current.BuyableDyeRulesSeeded = true;

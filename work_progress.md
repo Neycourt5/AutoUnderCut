@@ -11,6 +11,32 @@ Build: use `C:/Users/Acour/.dotnet/dotnet.exe` (SDK 10.0.301), **not** the PATH
 
 ---
 
+## v1.0.0.38 - the all-world tour becomes an explicit allowlist
+User: limit the tour to current materia (XI and XII, low priority), Caramel
+Popcorn and other raid food such as Popoto Potage, Wide-Spectrum dyes,
+General-Purpose dyes that sell well, and potions.
+
+- `ProcurementRule.HuntOnTour` and `TourPriority`; `ResaleStockPolicy.SelectTourRules`
+  filters to marked, non-sell-only, below-target rules and orders by priority.
+  Previously the tour took any buyable rule, `.Take(8)` in declaration order.
+- Priorities: raid food and potions 0, General-Purpose/Wide-Spectrum dyes 1,
+  materia XI/XII 2. The user called materia low priority, so it is dropped first
+  when the item cap bites.
+- "Potions" is already covered: the seeded Grade 4 Gemdraughts are the current
+  tinctures. Popoto Potage added to the curated consumables, so it also gets the
+  99-stack listing and bag-reserve treatment.
+- Materia XI/XII move off the sell-off list into buyable rules
+  (`MinimumWeeklyUnitsSold = 50`, one sale slot). Every other grade stays sell-only.
+- `LiveWorldStockHuntMaximumItems` (default 8) replaces the hardcoded cap and is
+  editable. This closes the "tour has no cap on rule count" gap noted below.
+- Config version 26 re-seeds.
+
+Also, on "not sure if this is being calculated correctly": the trip figures were
+right but unexplained. With sale slots covered, "Available for the next trip" is
+the 20% spare-stock allowance rather than the wallet, and "room for 0 stack(s)"
+means the bag buffer is already at target. Home and Shopping now print the
+`ShoppingWaitReason` next to those numbers instead of leaving them bare.
+
 ## v1.0.0.37 - the search deadlock v1.0.0.36 introduced
 Screenshot after .36: the Item Search box is focused and **empty**, the board shows
 the category pane, and Home reads "Waiting to submit the item search for

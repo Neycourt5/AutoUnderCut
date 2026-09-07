@@ -17,6 +17,39 @@ public sealed class ReinvestmentAndStockPolicyTests
     };
 
     [Fact]
+    public void TheAllWorldTourOnlyWalksMarkedStockInPriorityOrder()
+    {
+        ProcurementRule Tour(string name, int priority) =>
+            new() { ItemId = (uint)name.Length + (uint)priority * 100, ItemName = name, HuntOnTour = true, TourPriority = priority };
+        var rules = new List<ProcurementRule>
+        {
+            Tour("Current Materia XII", 2),
+            Tour("General-Purpose Pink Dye", 1),
+            Tour("Popoto Potage", 0),
+            // Sell-off stock and unmarked rules must never cost the tour a world visit.
+            new() { ItemId = 900, ItemName = "Old Materia V", LiquidateOnly = true, HuntOnTour = true },
+            new() { ItemId = 901, ItemName = "Something Else" },
+        };
+
+        var picked = ResaleStockPolicy.SelectTourRules(rules, _ => true, 8);
+        Assert.Equal(["Popoto Potage", "General-Purpose Pink Dye", "Current Materia XII"],
+            picked.Select(x => x.ItemName));
+
+        // The cap keeps a tour finishing, and drops the lowest priority first.
+        Assert.Equal(["Popoto Potage"], ResaleStockPolicy.SelectTourRules(rules, _ => true, 1).Select(x => x.ItemName));
+        Assert.Empty(ResaleStockPolicy.SelectTourRules(rules, x => x.TourPriority > 9, 8));
+    }
+
+    [Theory]
+    [InlineData("Water Materia XI", true)]
+    [InlineData("Savage Aim Materia XII", true)]
+    [InlineData("Water Materia X", false)]
+    [InlineData("Water Materia V", false)]
+    [InlineData("Water Materia I", false)]
+    public void OnlyCurrentMateriaGradesAreTradeable(string name, bool tradeable) =>
+        Assert.Equal(tradeable, ResaleStockPolicy.IsTradeableMateria(name));
+
+    [Fact]
     public void ReinvestmentSpendsTheWalletAndIgnoresThePerTripCap()
     {
         Assert.Equal(995_000u, ResaleStockPolicy.SpendableGil(1_000_000, 5_000, true, 100));

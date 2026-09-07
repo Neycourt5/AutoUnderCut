@@ -16,6 +16,10 @@ public sealed class ProcurementRule
     // Sell what is already held, never buy more. Used for stock the player wants
     // cleared out rather than traded.
     public bool LiquidateOnly { get; set; }
+    // The all-world tour is slow - every extra item is multiplied by the number of
+    // worlds visited - so only stock explicitly marked for it is walked, in order.
+    public bool HuntOnTour { get; set; }
+    public int TourPriority { get; set; } = 5;
     public ProcurementRule Clone() => (ProcurementRule)MemberwiseClone();
 }
 

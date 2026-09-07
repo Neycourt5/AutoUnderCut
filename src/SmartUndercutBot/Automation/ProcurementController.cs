@@ -585,12 +585,9 @@ public sealed class ProcurementController : IDisposable
             HaltForRetry("Could not determine the character's home world.");
             return;
         }
-        stockHuntRules = configuration.Current.ProcurementRules
-            .Where(x => x.Enabled && x.ItemId != 0 && !x.LiquidateOnly)
-            .Where(IsBelowStockThreshold)
-            .DistinctBy(x => x.ItemId)
-            .Take(8)
-            .ToList();
+        stockHuntRules = ResaleStockPolicy.SelectTourRules(
+            configuration.Current.ProcurementRules, IsBelowStockThreshold,
+            configuration.Current.LiveWorldStockHuntMaximumItems).ToList();
         if (stockHuntRules.Count == 0)
         {
             State = ProcurementState.Completed;
@@ -1413,9 +1410,9 @@ public sealed class ProcurementController : IDisposable
         StartScan(ProcurementRunMode.AutomaticPurchase);
     }
 
-    private bool HasLowCuratedStock() => configuration.Current.ProcurementRules
-        .Where(x => x.Enabled && x.ItemId != 0 && !x.LiquidateOnly)
-        .Any(IsBelowStockThreshold);
+    private bool HasLowCuratedStock() => ResaleStockPolicy.SelectTourRules(
+        configuration.Current.ProcurementRules, IsBelowStockThreshold,
+        configuration.Current.LiveWorldStockHuntMaximumItems).Count > 0;
 
     // Count only the qualities a rule actually trades, so a normal-quality food or
     // potion is not judged by an HQ stock level it will never have.
