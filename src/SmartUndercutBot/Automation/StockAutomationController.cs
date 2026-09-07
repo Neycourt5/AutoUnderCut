@@ -5,7 +5,7 @@ namespace SmartUndercutBot.Automation;
 /// <summary>One entry point for starting and stopping the complete retainer workflow.</summary>
 public sealed class StockAutomationController(
     ConfigurationService configuration,
-    AutomationController automation,
+    IRetainerAutomation automation,
     ProcurementController procurement,
     BagListingController bagListing)
 {

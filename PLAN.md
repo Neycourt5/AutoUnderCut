@@ -1,5 +1,27 @@
 # Retainer automation and UI plan
 
+## Current release: v1.0.0.34 continuous-loop fixes
+- [x] Count existing resale bags plus pending purchases without counting them twice.
+- [x] Limit buffer acquisition cost to 20% of available capital when sale slots are
+  covered; preserve wallet reinvestment for vacancies and wake when income arrives.
+- [x] Preserve full check deadlines across bag refills; recover safe menu failures.
+- [x] Fix the reported empty-retainer false stop: read sorted RetainerManager records
+  and availability, wait up to 30 seconds for data, then use a timed retry.
+- [x] Show actual spending mode, bag stock, capacity and waiting reasons on Home.
+- [x] Exclude Oceania from saved scopes, plans, guided routes and live shopping travel.
+- [x] Run 125 regression tests, including actual retainer-controller tests with a
+  simulated three-day repeat run, and build Release with 0 warnings / errors.
+- [ ] Publish v1.0.0.34 and verify the public installer manifest and ZIP.
+
+Native game operations still require an in-game smoke test. Unknown purchase or
+listing outcomes and explicit Stop stay stopped. The screenshot proves the old
+UI reported zero available retainers despite visible active rows; it does not
+verify native behavior of the new adapter. RetainerManager fields were checked
+against upstream FFXIVClientStructs and the installed Dalamud 15 build.
+
+The sections below are historical implementation notes; current behavior is
+recorded above and in the newest entry in `work_progress.md`.
+
 ## Active update: reinvestment, diversification, and bag awareness
 User requests: use available gil for profitable purchases (starting from 0), avoid
 overbuying when retainers are saturated, diversify into fast-selling dyes, scan

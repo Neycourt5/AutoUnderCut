@@ -55,7 +55,7 @@ namespace Dalamud.Plugin
 
 namespace SmartUndercutBot.Automation
 {
-    public sealed class AutomationController
+    public sealed class TestRetainerAutomation : IRetainerAutomation
     {
         public int? LastKnownFreeSaleSlots { get; set; } = 5;
         public IReadOnlyList<StockExposure> ListedStock { get; set; } = [];
@@ -89,11 +89,6 @@ namespace SmartUndercutBot.Services
     {
         public List<string> Messages { get; } = [];
         public void Add(AutomationLogLevel level, string message) => Messages.Add(message);
-    }
-    public interface IRetainerListingService
-    {
-        bool IsRetainerListOpen { get; }
-        IReadOnlySet<ulong> OwnedRetainerIds { get; }
     }
     public interface IUniversalisService
     {

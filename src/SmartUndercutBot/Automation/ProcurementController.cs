@@ -51,13 +51,12 @@ public sealed record ProcurementStatus(
 
 public sealed class ProcurementController : IDisposable
 {
-    private static readonly string[] NorthAmericaAndOceaniaWorlds =
+    private static readonly string[] NorthAmericaWorlds =
     [
         "Adamantoise", "Cactuar", "Faerie", "Gilgamesh", "Jenova", "Midgardsormr", "Sargatanas", "Siren",
         "Behemoth", "Excalibur", "Exodus", "Famfrit", "Hyperion", "Lamia", "Leviathan", "Ultros",
         "Balmung", "Brynhildr", "Coeurl", "Diabolos", "Goblin", "Malboro", "Mateus", "Zalera",
         "Cuchulainn", "Golem", "Halicarnassus", "Kraken", "Maduin", "Marilith", "Rafflesia", "Seraph",
-        "Bismarck", "Ravana", "Sephirot", "Sophia", "Zurvan",
     ];
 
     private readonly IFramework framework;
@@ -71,7 +70,7 @@ public sealed class ProcurementController : IDisposable
     private readonly ILifestreamService lifestream;
     private readonly ITaskbarAttentionService taskbarAttention;
     private readonly ProcurementLedger ledger;
-    private readonly AutomationController repricing;
+    private readonly IRetainerAutomation repricing;
     private readonly ConfigurationService configuration;
     private readonly AutomationLog log;
     private readonly TimeProvider timeProvider;
@@ -94,11 +93,13 @@ public sealed class ProcurementController : IDisposable
     private int orderIndex;
     private int inventoryBefore;
     private int lastScannedFreeSaleSlots = -1;
+    private uint lastScannedBudget;
     private ProcurementRunMode runAfterScan;
     private ProcurementRunMode activeRunMode;
     private string homeWorld = string.Empty;
     private string planningHomeWorld = string.Empty;
     private bool retryReturnHome;
+    private bool ownsRetainerPause;
     private string detail = "Procurement is idle.";
     private uint gilSpent;
     private int localTravelAttempts;
@@ -128,7 +129,7 @@ public sealed class ProcurementController : IDisposable
         ILifestreamService lifestream,
         ITaskbarAttentionService taskbarAttention,
         ProcurementLedger ledger,
-        AutomationController repricing,
+        IRetainerAutomation repricing,
         ConfigurationService configuration,
         AutomationLog log,
         TimeProvider? timeProvider = null)
@@ -160,6 +161,14 @@ public sealed class ProcurementController : IDisposable
     public bool RequiresManualRestart => (State is ProcurementState.Halted or ProcurementState.Faulted) &&
         resumeStoppedRouteAt == DateTimeOffset.MaxValue;
     public bool IsWaitingToReturnHome => retryReturnHome && !RequiresManualRestart;
+    public int ResaleBagSlots => CollectBagStock().Sum(x => x.SaleSlots);
+    public int PurchaseCapacity => AvailablePurchaseSlots();
+    public uint ShoppingBudget => SpendableGil(newTrip: true);
+    public string? ShoppingWaitReason => repricing.LastKnownFreeSaleSlots is null
+        ? "waiting for the first complete retainer check"
+        : AvailablePurchaseSlots() == 0 ? "stock is ready for the available slots and bag buffer"
+        : market.FreeInventorySlots <= configuration.Current.ProcurementInventoryReserve ? "waiting for free bag space"
+        : ShoppingBudget == 0 ? "waiting for sale income or room in the buffer budget" : null;
     public string? TravelReadinessIssue => !lifestream.IsAvailable
         ? "Enable Lifestream to travel and return home."
         : lifestream.IsBusy ? "Wait for the current Lifestream journey to finish."
@@ -171,8 +180,10 @@ public sealed class ProcurementController : IDisposable
             return;
         resumeStoppedRouteAt = DateTimeOffset.MaxValue;
         retryReturnHome = false;
+        ownsRetainerPause = false;
         nextAutomaticScan = timeProvider.GetUtcNow();
         lastScannedFreeSaleSlots = -1;
+        lastScannedBudget = 0;
         Plan = ProcurementPlan.Empty;
         State = ProcurementState.Idle;
         detail = "Waiting for the retainer check and bag refill before shopping.";
@@ -231,6 +242,8 @@ public sealed class ProcurementController : IDisposable
 
     private void StopRoute(string reason, DateTimeOffset resumeAt)
     {
+        if (resumeAt == DateTimeOffset.MaxValue)
+            ownsRetainerPause = false;
         retryReturnHome = resumeAt != DateTimeOffset.MaxValue && activeRunMode != ProcurementRunMode.None &&
             !string.IsNullOrWhiteSpace(homeWorld) && !retainerListings.IsRetainerListOpen;
         cancellation?.Cancel();
@@ -252,7 +265,8 @@ public sealed class ProcurementController : IDisposable
         if (IsActive || IsStartBlocked?.Invoke() == true)
             return;
         stockHuntScanning = false;
-        var dataCenter = universalis.ResolveDataCenter(configuration.Current.ProcurementDataCenter);
+        var dataCenter = ProcurementTravelPolicy.ShoppingScope(
+            universalis.ResolveDataCenter(configuration.Current.ProcurementDataCenter));
         if (string.IsNullOrWhiteSpace(dataCenter))
         {
             HaltForRetry("Could not determine a Universalis data center. Set it in the Procurement tab.");
@@ -500,7 +514,7 @@ public sealed class ProcurementController : IDisposable
         var plannedSaleSlots = PlannedSaleSlots(freeSaleSlots);
         var freeInventorySlots = Math.Max(0, (int)market.FreeInventorySlots - config.ProcurementInventoryReserve);
         Plan = planner.BuildPlan(new(
-            scanTask.Result,
+            ShoppingMarkets(scanTask.Result),
             config.ProcurementRules,
             SpendableGil(),
             plannedSaleSlots,
@@ -513,6 +527,7 @@ public sealed class ProcurementController : IDisposable
             MaximumWeeklySalesSharePercent: config.ProcurementWeeklySalesSharePercent,
             HighQualityOnly: config.BuyHighQualityOnly));
         lastScannedFreeSaleSlots = plannedSaleSlots;
+        lastScannedBudget = ShoppingBudget;
         scanTask = null;
         nextAutomaticScan = timeProvider.GetUtcNow().AddMinutes(config.ProcurementIntervalMinutes);
         State = ProcurementState.PlanReady;
@@ -552,7 +567,7 @@ public sealed class ProcurementController : IDisposable
             HaltForRetry("The live all-world stock hunt needs a completed all-retainer bell pass first.");
             return;
         }
-        if (AvailablePurchaseSlots() == 0 || market.FreeInventorySlots <= configuration.Current.ProcurementInventoryReserve || SpendableGil() == 0)
+        if (AvailablePurchaseSlots() == 0 || market.FreeInventorySlots <= configuration.Current.ProcurementInventoryReserve || ShoppingBudget == 0)
         {
             HaltForRetry("No shopping capacity: list pending stock first and keep bag space and gil available.");
             return;
@@ -567,6 +582,7 @@ public sealed class ProcurementController : IDisposable
             .Where(x => x.Enabled && x.ItemId != 0 && !x.LiquidateOnly)
             .Where(IsBelowStockThreshold)
             .DistinctBy(x => x.ItemId)
+            .Take(8)
             .ToList();
         if (stockHuntRules.Count == 0)
         {
@@ -578,6 +594,7 @@ public sealed class ProcurementController : IDisposable
 
         ledger.ClearBagStockQueue();
         repricing.Halt("Paused while the live all-world stock hunt runs.");
+        ownsRetainerPause = true;
         market.CloseRetainerList();
         activeRunMode = ProcurementRunMode.AutomaticPurchase;
         runAfterScan = ProcurementRunMode.None;
@@ -595,9 +612,10 @@ public sealed class ProcurementController : IDisposable
         // Scan the home world last. Its prices are the resale anchor for every
         // prospective deal, so they should be the freshest data in the tour
         // when the guarded purchase plan is built.
-        stockHuntWorlds = NorthAmericaAndOceaniaWorlds
+        stockHuntWorlds = NorthAmericaWorlds
             .Where(x => !string.Equals(x, homeWorld, StringComparison.OrdinalIgnoreCase))
             .Append(homeWorld)
+            .Where(ProcurementTravelPolicy.CanShopOnWorld)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
         stockHuntWorldIndex = 0;
@@ -605,7 +623,7 @@ public sealed class ProcurementController : IDisposable
         currentStockHuntRule = null;
         stockHuntScanning = true;
         nextLiveStockHunt = timeProvider.GetUtcNow().AddMinutes(configuration.Current.LiveWorldStockHuntCooldownMinutes);
-        detail = $"Starting live stock hunt for {stockHuntRules.Count} low-stock item(s) across {stockHuntWorlds.Count} NA/Oceania worlds.";
+        detail = $"Starting live stock hunt for {stockHuntRules.Count} low-stock item(s) (maximum 8) across {stockHuntWorlds.Count} North American worlds.";
         log.Add(AutomationLogLevel.Information, detail);
         TravelToCurrentWorld();
     }
@@ -631,7 +649,7 @@ public sealed class ProcurementController : IDisposable
             HaltForRetry("The plan no longer has free retainer or inventory capacity. List pending stock before buying more.");
             return;
         }
-        if (Plan.Orders.Count == 0 || market.Gil < Plan.TotalCost)
+        if (Plan.Orders.Count == 0 || ShoppingBudget < Plan.TotalCost)
         {
             HaltForRetry("The procurement plan is empty or no longer fits the available gil balance.");
             return;
@@ -651,10 +669,12 @@ public sealed class ProcurementController : IDisposable
         // queue first so the two sources cannot merge under the same item key.
         ledger.ClearBagStockQueue();
         repricing.Halt("Paused while procurement runs.");
+        ownsRetainerPause = true;
         activeRunMode = mode;
         runAfterScan = ProcurementRunMode.None;
         market.CloseRetainerList();
-        var orderedWorlds = Plan.Orders.GroupBy(x => x.WorldName, StringComparer.OrdinalIgnoreCase)
+        var orderedWorlds = Plan.Orders.Where(x => ProcurementTravelPolicy.CanShopOnWorld(x.WorldName))
+            .GroupBy(x => x.WorldName, StringComparer.OrdinalIgnoreCase)
             .OrderByDescending(x => x.Sum(y => (long)y.ExpectedProfit));
         worldGroups = (mode == ProcurementRunMode.GuidedReview
                 ? orderedWorlds.Take(configuration.Current.GuidedTourMaximumWorlds)
@@ -726,6 +746,11 @@ public sealed class ProcurementController : IDisposable
             return;
         }
         var destination = returningHome ? homeWorld : WorldName;
+        if (!returningHome && !ProcurementTravelPolicy.CanShopOnWorld(destination))
+        {
+            FinishShopping($"Shopping on {destination} is excluded; returning home.");
+            return;
+        }
         // The public Lifestream IPC can acknowledge a world change without
         // beginning travel on some versions. The literal chat command is the
         // same path the user has confirmed works reliably.
@@ -897,7 +922,7 @@ public sealed class ProcurementController : IDisposable
         var config = configuration.Current;
         var freeSaleSlots = repricing.LastKnownFreeSaleSlots ?? 0;
         Plan = planner.BuildLiveMarketPlan(new(
-            markets,
+            ShoppingMarkets(markets),
             stockHuntRules,
             homeWorld,
             retainerListings.OwnedRetainerIds,
@@ -983,9 +1008,9 @@ public sealed class ProcurementController : IDisposable
             return;
         }
         var rule = configuration.Current.ProcurementRules.FirstOrDefault(x => x.ItemId == currentOrder.ItemId);
-        if (rule is null || !rule.Enabled || (rule.RequireHighQuality && !currentOrder.IsHighQuality) ||
-            (currentOrder.IsHighQuality && !rule.AllowHighQuality && !rule.RequireHighQuality) ||
-            purchasedSlotsByItem.GetValueOrDefault(currentOrder.ItemId) >= rule.MaximumSaleSlots)
+        if (rule is null || !rule.Enabled || rule.LiquidateOnly ||
+            !ResaleStockPolicy.BuyableQuality(rule, currentOrder.IsHighQuality, configuration.Current.BuyHighQualityOnly) ||
+            CollectOwnedStock().Where(x => x.ItemId == currentOrder.ItemId).Sum(x => x.SaleSlots) >= rule.MaximumSaleSlots)
         {
             SkipCurrentOrder($"SKIPPED BUY {currentOrder.ItemName}: its current rule no longer permits this order.");
             return;
@@ -1036,9 +1061,9 @@ public sealed class ProcurementController : IDisposable
             SkipCurrentOrder($"SKIPPED BUY {currentOrder.ItemName}: the live buyer tax no longer meets the profit guards.");
             return;
         }
-        if (market.FreeInventorySlots <= configuration.Current.ProcurementInventoryReserve)
+        if (AvailablePurchaseSlots() == 0 || market.FreeInventorySlots <= configuration.Current.ProcurementInventoryReserve)
         {
-            FinishShopping("The inventory reserve was reached; no further purchases will be submitted.");
+            FinishShopping("Resale capacity or the inventory reserve was reached; returning home to list stock.");
             return;
         }
         if (totalCost > SpendableGil() || totalCost > market.Gil)
@@ -1347,7 +1372,7 @@ public sealed class ProcurementController : IDisposable
         // still real. AvailablePurchaseSlots decides from there, and it allows a bag
         // buffer, so full retainers keep stocking up for the next sale.
         if (repricing.LastKnownFreeSaleSlots is null || AvailablePurchaseSlots() <= 0 ||
-            market.FreeInventorySlots <= configuration.Current.ProcurementInventoryReserve)
+            market.FreeInventorySlots <= configuration.Current.ProcurementInventoryReserve || ShoppingBudget == 0)
             return;
 
         if (configuration.Current.LiveWorldStockHuntEnabled)
@@ -1369,7 +1394,8 @@ public sealed class ProcurementController : IDisposable
         var freeSaleSlots = repricing.LastKnownFreeSaleSlots;
         var newlyAvailableCapacity = freeSaleSlots is not null &&
                                      PlannedSaleSlots(freeSaleSlots.Value) != lastScannedFreeSaleSlots;
-        if (!newlyAvailableCapacity && timeProvider.GetUtcNow() < nextAutomaticScan)
+        var incomeArrived = ShoppingBudget > lastScannedBudget;
+        if (!newlyAvailableCapacity && !incomeArrived && timeProvider.GetUtcNow() < nextAutomaticScan)
             return;
         nextAutomaticScan = timeProvider.GetUtcNow().AddMinutes(configuration.Current.ProcurementIntervalMinutes);
         StartScan(ProcurementRunMode.AutomaticPurchase);
@@ -1427,6 +1453,7 @@ public sealed class ProcurementController : IDisposable
 
     private void Complete(string message)
     {
+        ownsRetainerPause = false;
         activeRunMode = ProcurementRunMode.None;
         taskbarAttention.StopFlashing();
         State = ProcurementState.Completed;
@@ -1473,32 +1500,61 @@ public sealed class ProcurementController : IDisposable
     // compound sales into the next trip - and the per-trip cap only applies when
     // the user turns reinvestment off. The travel reserve is always withheld so a
     // purchase cannot strand the character without teleport fare.
-    private uint SpendableGil() => ResaleStockPolicy.SpendableGil(
-        market.Gil,
-        configuration.Current.ProcurementTravelReserve,
-        configuration.Current.ReinvestAvailableGil,
-        configuration.Current.ProcurementBudget,
-        gilSpent);
+    private uint SpendableGil(bool newTrip = false)
+    {
+        var config = configuration.Current;
+        var available = ResaleStockPolicy.SpendableGil(market.Gil, config.ProcurementTravelReserve,
+            config.ReinvestAvailableGil, config.ProcurementBudget, newTrip ? 0 : gilSpent);
+        var bags = CollectBagStock();
+        if (Math.Min(repricing.LastKnownFreeSaleSlots ?? 0, config.ProcurementTargetSaleSlots) > bags.Sum(x => x.SaleSlots))
+            return available;
+
+        var wallet = ResaleStockPolicy.SpendableGil(market.Gil, config.ProcurementTravelReserve, true, 0);
+        var bufferCost = bags.Aggregate(0UL, (cost, item) => cost +
+            (ulong)item.Quantity * config.GetEffectiveRule(item.ItemId).CostBasis);
+        return Math.Min(available, ResaleStockPolicy.BufferSpendableGil(wallet, bufferCost, config.ProcurementBufferGilPercent));
+    }
 
     // Stock the planner must count against its per-item limits: stacks already
     // listed on the retainers plus everything held in the bags. Without this a
     // cheap item is re-bought every trip until it crowds out everything else.
     private IReadOnlyList<StockExposure> CollectOwnedStock()
     {
-        var stock = new List<StockExposure>(repricing.ListedStock);
-        foreach (var rule in configuration.Current.ProcurementRules
-                     .Where(x => x.Enabled && x.ItemId != 0 && !x.LiquidateOnly)
-                     .DistinctBy(x => x.ItemId))
+        return repricing.ListedStock.Concat(CollectBagStock()).ToArray();
+    }
+
+    private IReadOnlyList<StockExposure> CollectBagStock()
+    {
+        var config = configuration.Current;
+        var pending = ledger.Snapshot().Where(x => x.PendingQuantity > 0)
+            .ToDictionary(x => (x.ItemId, x.IsHighQuality));
+        var rules = config.ProcurementRules.Where(x => x.Enabled && x.ItemId != 0)
+            .DistinctBy(x => x.ItemId).ToDictionary(x => x.ItemId);
+        // Scan the four bags once, instead of searching the whole inventory for
+        // every seeded dye/materia rule on every controller tick.
+        var holdings = retainerListings.ReadBagListingCandidates()
+            .Where(x => rules.TryGetValue(x.ItemId, out var rule) &&
+                (ResaleStockPolicy.CanListFromBags(rule, x.ItemName, x.IsHighQuality) ||
+                 (!rule.LiquidateOnly && ResaleStockPolicy.BuyableQuality(rule, x.IsHighQuality, config.BuyHighQualityOnly))))
+            .GroupBy(x => (x.ItemId, x.IsHighQuality))
+            .ToDictionary(x => x.Key, x => x.Sum(y => (long)y.Quantity));
+        var keys = holdings.Keys.Concat(pending.Keys).Distinct();
+        var stock = new List<StockExposure>();
+        foreach (var key in keys)
         {
-            var stackSize = Math.Max(1, rule.TargetStackSize);
-            foreach (var quality in new[] { false, true })
-            {
-                if (!ResaleStockPolicy.BuyableQuality(rule, quality, configuration.Current.BuyHighQualityOnly))
-                    continue;
-                var held = market.GetInventoryCount(rule.ItemId, quality);
-                if (held > 0)
-                    stock.Add(new(rule.ItemId, quality, (uint)held, (held + stackSize - 1) / stackSize));
-            }
+            rules.TryGetValue(key.ItemId, out var rule);
+            pending.TryGetValue(key, out var entry);
+            var reserve = ResaleStockPolicy.BagReserve(rule, rule?.ItemName ?? entry?.ItemName ?? string.Empty,
+                (uint)config.BagListingReservePerItem);
+            var held = (uint)Math.Clamp(holdings.GetValueOrDefault(key) - reserve, 0L, uint.MaxValue);
+            // The ledger describes the same inventory, not another pile of stock.
+            var quantity = Math.Max(held, entry?.PendingQuantity ?? 0);
+            var size = Math.Max(1, rule?.TargetStackSize ?? entry?.TargetStackSize ?? 99);
+            var slots = (int)(((long)quantity + size - 1) / size);
+            if (entry is not null)
+                slots = Math.Max(slots, (int)Math.Min(entry.PendingQuantity, (long)entry.MaximumListingSlots - entry.ListingsCreated));
+            if (quantity > 0)
+                stock.Add(new(key.ItemId, key.IsHighQuality, quantity, slots));
         }
         return stock;
     }
@@ -1510,9 +1566,17 @@ public sealed class ProcurementController : IDisposable
     // Beyond the free retainer slots, keep buying a small buffer of stacks that sit
     // in the bags ready to list the moment something sells. Without it, full
     // retainers stop shopping entirely and every sale waits a whole trip to refill.
-    private int PlannedSaleSlots(int freeSaleSlots) => Math.Max(0,
-        Math.Min(freeSaleSlots, configuration.Current.ProcurementTargetSaleSlots) +
-        configuration.Current.ProcurementBagBufferStacks - ledger.PendingSaleSlots);
+    private int PlannedSaleSlots(int freeSaleSlots)
+    {
+        var free = Math.Min(freeSaleSlots, configuration.Current.ProcurementTargetSaleSlots);
+        var held = ResaleBagSlots;
+        // Fill real vacancies first. Buffer shopping gets a separate, smaller
+        // budget once bags can cover those vacancies.
+        return free > held ? free - held : Math.Max(0, free + configuration.Current.ProcurementBagBufferStacks - held);
+    }
+
+    private static IReadOnlyList<ProcurementMarketItem> ShoppingMarkets(IReadOnlyList<ProcurementMarketItem> items) =>
+        items.Select(x => x with { Listings = x.Listings.Where(y => ProcurementTravelPolicy.CanShopOnWorld(y.WorldName)).ToArray() }).ToArray();
 
     private bool StopUnproductiveTour()
     {
@@ -1582,10 +1646,17 @@ public sealed class ProcurementController : IDisposable
         }
         if (!retainerListings.IsRetainerListOpen)
             return;
+        if (IsStartBlocked?.Invoke() == true)
+            return;
         resumeStoppedRouteAt = DateTimeOffset.MaxValue;
         State = ProcurementState.Idle;
         detail = "Ready to retry procurement after the previous stop.";
         log.Add(AutomationLogLevel.Information, detail);
+        if (ownsRetainerPause && configuration.Current.AutomationEnabled && configuration.Current.AutomaticProcurementEnabled)
+        {
+            ownsRetainerPause = false;
+            repricing.StartNow();
+        }
     }
 
     private bool DelayElapsed() => timeProvider.GetUtcNow() >= nextActionAt;

@@ -125,7 +125,7 @@ public sealed class DashboardWindow : Window
             : automation.RequiresManualRestart ? automation.Status.Detail
             : !config.KeepsRetainersStocked ? "Ready when you are. Review your spending limits, open a summoning bell, and press Start."
             : !bagListing.IsRetainerListOpen ? "Waiting for the summoning-bell retainer list to open."
-            : automation.LastKnownFreeSaleSlots == 0 ? "All checked retainer slots are filled. Waiting for the next sale check."
+            : procurement.ShoppingWaitReason is { } waitReason ? $"Shopping: {waitReason}. Retainer checks continue."
             : procurement.Status.Detail;
         ImGui.TextWrapped(detail);
         if (stockAutomation.NeedsAttention)
@@ -140,7 +140,7 @@ public sealed class DashboardWindow : Window
                 ImGui.Spacing();
                 ImGui.ProgressBar((float)(totalSlots - free) / totalSlots, new Vector2(-1, 0),
                     $"Last completed check: {totalSlots - free} / {totalSlots} sale slots filled");
-                ImGui.Text($"{free} empty slots   |   {procurementLedger.PendingSaleSlots} stacks queued to list");
+                ImGui.Text($"{free} empty slots   |   {procurement.ResaleBagSlots} resale stack(s) in bags   |   {procurementLedger.PendingSaleSlots} queued");
             }
         }
         else
@@ -149,7 +149,7 @@ public sealed class DashboardWindow : Window
         if (status.State == AutomationState.WaitingForScheduledRun && status.NextActionAt is { } next)
             ImGui.Text($"Next retainer check: {next.LocalDateTime:t}");
         if (!procurement.IsActive && procurement.Status.NextAutomaticScan is { } scan &&
-            automation.LastKnownFreeSaleSlots is > 0)
+            procurement.ShoppingWaitReason is null)
             ImGui.Text(scan <= DateTimeOffset.UtcNow
                 ? "Deal search: ready after the retainer check and bag refill."
                 : $"Next deal search / retry: {scan.LocalDateTime:t}");
@@ -159,14 +159,7 @@ public sealed class DashboardWindow : Window
         ImGui.Separator();
 
         ImGui.TextUnformatted("Your limits (saved automatically)");
-        var budget = config.ProcurementBudget;
-        ImGui.SetNextItemWidth(170 * ImGuiHelpers.GlobalScale);
-        if (InputUInt("Gil per shopping trip", ref budget, 1_000, 100_000_000))
-        {
-            config.ProcurementBudget = budget;
-            configurationDirty = true;
-        }
-        ImGui.TextWrapped("This limit resets each trip. Repeated trips can spend more than this amount in total, including gil collected from sales.");
+        DrawSpendingLimits();
         var roi = (float)config.ProcurementMinimumRoiPercent;
         ImGui.SetNextItemWidth(170 * ImGuiHelpers.GlobalScale);
         if (ImGui.DragFloat("Minimum expected return after fees", ref roi, 0.5f, 0, 1_000, "%.1f%%"))
@@ -214,46 +207,91 @@ public sealed class DashboardWindow : Window
             ImGui.TextColored(color, state);
         }
 
+        var armed = config.KeepsRetainersStocked;
+        var retainerPausedForTravel = procurement.IsActive || procurement.IsWaitingToReturnHome;
         Stage("1. Check retainers, reprice, collect gil",
-            automation.IsActive ? running : automation.RequiresManualRestart ? blocked : waiting,
+            automation.IsActive ? running : stockAutomation.NeedsAttention ? blocked : waiting,
             automation.IsActive ? "running now"
+                : retainerPausedForTravel ? "resumes after returning home"
                 : automation.RequiresManualRestart ? "stopped - check the last action in game"
+                : !armed ? "press Start to enable the loop"
                 : !bagListing.IsRetainerListOpen ? "waiting for the summoning-bell list"
                 : automation.Status.NextActionAt is { } next ? $"next at {next.LocalDateTime:t}"
                 : "ready");
 
+        var bagStock = procurement.ResaleBagSlots;
         Stage("2. List stock from your bags",
-            bagListing.IsBusy ? running : free is 0 && pending > 0 ? blocked : waiting,
+            bagListing.IsBusy ? running : waiting,
             bagListing.IsBusy ? "running now"
-                : free is 0 && pending > 0 ? $"{pending} stack(s) waiting for a free slot"
+                : bagListing.Status.State == BagListingState.Failed ? bagListing.Status.Detail
+                : free is 0 && bagStock > 0 ? $"{bagStock} stack(s) ready for future sales"
                 : pending > 0 ? $"{pending} stack(s) queued"
-                : "nothing waiting");
+                : bagStock > 0 ? $"{bagStock} resale stack(s) to check"
+                : "no spare resale stock found");
 
         Stage("3. Travel to other worlds and buy deals",
-            procurement.IsActive ? running
-                : procurement.RequiresManualRestart ? blocked
-                : free is 0 ? goal : waiting,
+            procurement.IsActive ? running : procurement.RequiresManualRestart ? blocked : waiting,
             procurement.IsActive ? "running now"
                 : procurement.RequiresManualRestart ? "stopped - check the last purchase in game"
-                : procurement.IsWaitingToReturnHome ? "returning home"
-                : free is 0 && config.ProcurementBagBufferStacks > 0
-                    ? $"stocking up to {config.ProcurementBagBufferStacks} spare stack(s) for the bags"
-                : free is 0 ? "paused - every sale slot is already full"
+                : procurement.IsWaitingToReturnHome ? "waiting to retry the return home"
+                : !armed ? "press Start to enable the loop"
+                : procurement.ShoppingWaitReason is { } reason ? reason
                 : procurement.Status.NextAutomaticScan is { } scan
-                    ? $"next deal search at {scan.LocalDateTime:t}"
+                    ? scan <= DateTimeOffset.UtcNow ? "ready after retainers and bags" : $"next deal search at {scan.LocalDateTime:t}"
                     : "ready");
 
-        Stage("4. Return home and list what was bought",
-            procurement.IsActive || bagListing.IsBusy ? running : waiting,
-            "runs at the end of each trip");
+        Stage("4. Return home and list what was bought", waiting, "runs at the end of each trip");
         ImGui.EndTable();
 
         if (free is 0)
-            ImGui.TextColored(goal, config.ProcurementBagBufferStacks > 0
-                ? "Nothing is switched off. Every retainer slot is full, which is the goal, so shopping keeps a " +
-                  "small buffer of stacks in the bags instead - ready to list the moment something sells."
-                : "Nothing is switched off: shopping is included in Start and pauses only because there is " +
-                  "nowhere left to put stock. It resumes by itself as soon as something sells.");
+            ImGui.TextColored(goal, $"Retainers are full. Spare stock is limited to {config.ProcurementBagBufferStacks} stacks and " +
+                $"{config.ProcurementBufferGilPercent:0}% of available capital. Sale checks continue.");
+    }
+
+    private void DrawSpendingLimits()
+    {
+        var config = configuration.Current;
+        var reinvest = config.ReinvestAvailableGil;
+        if (ImGui.Checkbox("Reinvest available gil and sale income", ref reinvest))
+        {
+            config.ReinvestAvailableGil = reinvest;
+            configurationDirty = true;
+        }
+        if (!reinvest)
+        {
+            var budget = config.ProcurementBudget;
+            ImGui.SetNextItemWidth(170 * ImGuiHelpers.GlobalScale);
+            if (InputUInt("Maximum gil per trip", ref budget, 1_000, 100_000_000))
+            {
+                config.ProcurementBudget = budget;
+                configurationDirty = true;
+            }
+            ImGui.TextWrapped("The trip cap resets after returning home. Later trips can reinvest sale income.");
+        }
+        var reserve = config.ProcurementTravelReserve;
+        ImGui.SetNextItemWidth(170 * ImGuiHelpers.GlobalScale);
+        if (InputUInt("Gil to keep for travel", ref reserve, 0, 100_000_000))
+        {
+            config.ProcurementTravelReserve = reserve;
+            configurationDirty = true;
+        }
+        var buffer = config.ProcurementBagBufferStacks;
+        ImGui.SetNextItemWidth(170 * ImGuiHelpers.GlobalScale);
+        if (InputInt("Spare resale stacks to keep in bags", ref buffer, 0, 50))
+        {
+            config.ProcurementBagBufferStacks = buffer;
+            configurationDirty = true;
+        }
+        var bufferPercent = (float)config.ProcurementBufferGilPercent;
+        ImGui.SetNextItemWidth(170 * ImGuiHelpers.GlobalScale);
+        if (ImGui.DragFloat("Buffer budget when sale slots are covered", ref bufferPercent, 1f, 0, 100, "%.0f%%"))
+        {
+            config.ProcurementBufferGilPercent = (decimal)Math.Clamp(bufferPercent, 0f, 100f);
+            configurationDirty = true;
+        }
+        ImGui.TextWrapped("Fill empty sale slots first, using existing stock before buying. Spare stock has a smaller budget, " +
+            "including the saved purchase cost of items already in your bags. At 0 spendable gil, checks continue and shopping waits for income.");
+        ImGui.Text($"Available for the next trip: {procurement.ShoppingBudget:N0} gil   |   room for {procurement.PurchaseCapacity} stack(s)");
     }
 
     private void DrawAdvanced()
@@ -779,24 +817,7 @@ public sealed class DashboardWindow : Window
 
         if (ImGui.CollapsingHeader("Shopping limits and travel settings"))
         {
-            var budget = config.ProcurementBudget;
-            if (InputUInt("Maximum gil per trip", ref budget, 1_000, 100_000_000))
-            {
-                config.ProcurementBudget = budget;
-                configurationDirty = true;
-            }
-            ImGui.SameLine();
-            if (ImGui.SmallButton("20M"))
-            {
-                config.ProcurementBudget = 20_000_000;
-                SaveConfiguration();
-            }
-            ImGui.SameLine();
-            if (ImGui.SmallButton("50M"))
-            {
-                config.ProcurementBudget = 50_000_000;
-                SaveConfiguration();
-            }
+            DrawSpendingLimits();
             var guidedWorlds = config.GuidedTourMaximumWorlds;
             if (InputInt("Maximum worlds per guided route", ref guidedWorlds, 1, 20))
             {
@@ -810,31 +831,8 @@ public sealed class DashboardWindow : Window
                 configurationDirty = true;
             }
             ImGui.TextDisabled(highQualityOnly
-                ? "On: normal-quality stock is never bought, and an item with no HQ form is skipped instead of stocked in a quality that will not sell."
+                ? "On: buy HQ when an item has an HQ form. NQ-only items such as dyes are still eligible."
                 : "Off: normal quality is bought whenever an item rule allows it.");
-            var reinvest = config.ReinvestAvailableGil;
-            if (ImGui.Checkbox("Spend whatever gil is in the wallet (reinvest sales)", ref reinvest))
-            {
-                config.ReinvestAvailableGil = reinvest;
-                configurationDirty = true;
-            }
-            ImGui.TextDisabled(reinvest
-                ? "On: every trip may spend the whole wallet minus the travel reserve, so sales compound into the next trip. The per-trip maximum above is ignored."
-                : "Off: each trip is limited to the per-trip maximum above.");
-            var travelReserve = config.ProcurementTravelReserve;
-            if (InputUInt("Gil to keep for travel", ref travelReserve, 0, 100_000_000))
-            {
-                config.ProcurementTravelReserve = travelReserve;
-                configurationDirty = true;
-            }
-            ImGui.TextDisabled("Never spent, so a purchase cannot leave the character without teleport fare. Set 0 to spend everything.");
-            var buffer = config.ProcurementBagBufferStacks;
-            if (InputInt("Spare stacks to keep in bags", ref buffer, 0, 50))
-            {
-                config.ProcurementBagBufferStacks = buffer;
-                configurationDirty = true;
-            }
-            ImGui.TextDisabled("Bought beyond the free retainer slots and held ready to list the moment something sells, so full retainers do not stop shopping. Set 0 to buy only for slots that are already free.");
             var salesShare = (float)config.ProcurementWeeklySalesSharePercent;
             if (ImGui.DragFloat("Maximum stock to hold, as % of weekly sales", ref salesShare, 1f, 1, 100, "%.0f%%"))
             {
@@ -879,14 +877,14 @@ public sealed class DashboardWindow : Window
                 config.ProcurementDataCenter = dataCenter;
                 configurationDirty = true;
             }
-            ImGui.TextDisabled("Default scans every North American world plus Oceania: North-America,Oceania");
+            ImGui.TextDisabled("Default: North-America. Oceania worlds are excluded from all shopping routes.");
             var liveHunt = config.LiveWorldStockHuntEnabled;
             if (ImGui.Checkbox("Use live in-game markets for automatic procurement", ref liveHunt))
             {
                 config.LiveWorldStockHuntEnabled = liveHunt;
                 SaveConfiguration();
             }
-            ImGui.TextWrapped("Full live tours visit every NA and Oceania world before buying and use your home-world price as the resale anchor. Start all automation selects targeted Universalis routes instead.");
+            ImGui.TextWrapped("Full live tours check up to 8 low-stock items across North America and use your home-world price as the resale anchor. Start all automation selects targeted Universalis routes instead.");
             var lowStockThreshold = config.LiveWorldStockThresholdPerItem;
             if (InputInt("Live-tour low-stock threshold per item", ref lowStockThreshold, 1, 9999))
             {

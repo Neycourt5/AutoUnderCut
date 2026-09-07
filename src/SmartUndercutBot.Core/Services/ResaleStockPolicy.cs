@@ -31,4 +31,12 @@ public static class ResaleStockPolicy
         var available = wallet > travelReserve ? wallet - travelReserve : 0;
         return reinvest ? available : Math.Min(available, tripCap > spent ? tripCap - spent : 0);
     }
+
+    // Value existing buffer stock at its saved acquisition cost. Buying moves gil
+    // from the wallet into this exposure, so repeated trips cannot reset the cap.
+    public static uint BufferSpendableGil(uint walletAfterReserve, ulong bufferCost, decimal percent)
+    {
+        var ceiling = decimal.Floor(((decimal)walletAfterReserve + bufferCost) * Math.Clamp(percent, 0m, 100m) / 100m);
+        return (uint)Math.Clamp(ceiling - bufferCost, 0m, walletAfterReserve);
+    }
 }

@@ -11,6 +11,42 @@ Build: use `C:/Users/Acour/.dotnet/dotnet.exe` (SDK 10.0.301), **not** the PATH
 
 ---
 
+## v1.0.0.34 - continuous loop and North America shopping
+User reported travel to Oceania and a false "No retainers were available" stop
+while the screenshot showed three active retainers. User asked to finish and publish.
+
+- Removed the guessed RetainerList AtkValue row/availability offsets. Read the
+  game's sorted RetainerManager records with IsReady and Available instead, keeping
+  unsubscribed retainers excluded. Wait 30 seconds for initial data, then retry.
+  Reference: https://github.com/aers/FFXIVClientStructs/blob/main/FFXIVClientStructs/FFXIV/Client/Game/RetainerManager.cs
+- Safe menu/read failures unwind owned retainer windows for up to 60 seconds, then
+  retry a full pass after one minute. A failed unwind, movement, explicit Stop,
+  exceptions and unverified writes stay stopped. A route retry at the bell releases
+  only its own repricing pause.
+- Bag fills preserve the next full price/gil check deadline instead of pushing it
+  back on every refill. The production retainer controller now has an injectable
+  clock and tests through the same native-service contract used by the plugin.
+- Actual four-bag resale stock counts toward spare capacity even with no in-memory
+  ledger after reload; ledger and inventory are merged, not added. Personal stock
+  reserves are excluded. Scan actual bag items instead of querying hundreds of
+  empty dye/materia rules each frame.
+- Fill real vacancies first. Once covered, spare stock defaults to 5 stacks and
+  20% of available capital, counting saved acquisition costs already held. This
+  allowance does not reset each trip. Wallet reinvestment still fills real vacancies.
+- Zero spendable gil causes no automatic scans/trips. New income triggers a scan
+  without waiting for the normal interval. Recheck item eligibility, owned exposure
+  and capacity immediately before submitting a purchase.
+- North-America is the default scope. Remove Oceania/Materia/world scopes when
+  normalizing settings and filter Oceanic listings/plans/routes. The final outgoing
+  travel guard rejects Oceanic shopping; returning to the actual home world remains
+  possible. Live tours cover NA and at most 8 low-stock rules.
+- Home and Shopping share real spending controls. Explain ready bag stock, buffer
+  limits, no-gil waits, and retainer pauses during travel. Correct HQ-only dye text.
+- Config version 24. 125 tests pass; Release plugin build has 0 warnings/errors.
+  Tests include a simulated three-day retainer loop, late loading, recovery, Stop,
+  unknown listing, zero-wallet/income, buffer bounds, and all five excluded worlds.
+- Publishing v1.0.0.34; final installer verification will be recorded after release.
+
 ## v1.0.0.33 - one button, bag buffer, buyable dyes
 User asked why a shopping trip was not running while "Keep retainers stocked" was
 ON, and wanted one button for all automation, a stock buffer in the bags,
@@ -91,6 +127,5 @@ Also unified the sale-slot maths - `PollScan` stored a pending-adjusted count wh
 - Quieter travel destinations are deferred at the user's request. Only the
   non-breaking half is in: an optional separate Lifestream command for the bell leg,
   defaulting to empty.
-- The all-world live tour has no cap on rule count. With many seeded buy rules it
-  would scan every item on every world. It is off by default (`Start` uses targeted
-  Universalis routes) but should be capped before being recommended.
+- Live tours are now capped at 8 rules and exclude Oceania. Regular Start continues
+  to use targeted Universalis routes; native travel still needs an in-game smoke test.

@@ -4,12 +4,6 @@ using SmartUndercutBot.Core.Models;
 
 namespace SmartUndercutBot.Services;
 
-public interface IMarketDataService
-{
-    Task<MarketSnapshot> GetSnapshotAsync(uint itemId, CancellationToken cancellationToken);
-    void ClearCache();
-}
-
 /// <summary>
 /// Captures the market-board packets produced by the game's Compare Prices button.
 /// This keeps pricing tied to the live in-game result instead of a delayed web cache.

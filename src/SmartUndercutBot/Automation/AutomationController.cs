@@ -9,6 +9,7 @@ namespace SmartUndercutBot.Automation;
 public enum AutomationState
 {
     Idle,
+    WaitingForAvailableRetainers,
     WaitingBeforeRetainerSelection,
     WaitingForRetainerMenu,
     WaitingBeforeOpeningSellList,
@@ -37,6 +38,8 @@ public enum AutomationState
     WaitingBeforeClosingRetainer,
     WaitingForRetainerList,
     WaitingForScheduledRun,
+    RecoveringRetainerInterface,
+    WaitingToRetryRetainers,
     Completed,
     Halted,
     Faulted,
@@ -58,7 +61,7 @@ public sealed record AutomationStatus(
     int CurrentRetainer,
     int TotalRetainers);
 
-public sealed class AutomationController : IDisposable
+public sealed class AutomationController : IRetainerAutomation, IDisposable
 {
     private static readonly TimeSpan SameItemMarketReuseWindow = TimeSpan.FromSeconds(30);
     private static readonly HashSet<string> CuratedAutoListItems = new(StringComparer.OrdinalIgnoreCase)
@@ -77,6 +80,8 @@ public sealed class AutomationController : IDisposable
     private readonly ConfigurationService configuration;
     private readonly ProcurementLedger procurementLedger;
     private readonly AutomationLog log;
+    private readonly TimeProvider timeProvider;
+    private readonly RetainerRunSchedule runSchedule = new();
     private readonly List<AutomationQueueEntry> queue = [];
     private readonly HashSet<short> processedSlots = [];
     private readonly HashSet<short> freshlyRepricedAutoListingSlots = [];
@@ -131,7 +136,8 @@ public sealed class AutomationController : IDisposable
         IPortfolioValuationService portfolioValuation,
         ConfigurationService configuration,
         ProcurementLedger procurementLedger,
-        AutomationLog log)
+        AutomationLog log,
+        TimeProvider? timeProvider = null)
     {
         this.framework = framework;
         this.retainerListings = retainerListings;
@@ -141,6 +147,7 @@ public sealed class AutomationController : IDisposable
         this.configuration = configuration;
         this.procurementLedger = procurementLedger;
         this.log = log;
+        this.timeProvider = timeProvider ?? TimeProvider.System;
         framework.Update += OnFrameworkUpdate;
     }
 
@@ -275,18 +282,35 @@ public sealed class AutomationController : IDisposable
 
         if (retainerListings.IsTalkOpen && State is AutomationState.WaitingForRetainerMenu or AutomationState.WaitingForRetainerList)
         {
-            if (DateTimeOffset.UtcNow >= stateDeadline)
-                Halt("Retainer dialogue did not finish before the timeout.");
+            if (timeProvider.GetUtcNow() >= stateDeadline)
+                RecoverInterface("Retainer dialogue did not finish before the timeout.");
             else if (DelayElapsed())
             {
                 retainerListings.AdvanceTalk();
-                nextActionAt = DateTimeOffset.UtcNow.AddMilliseconds(500);
+                nextActionAt = timeProvider.GetUtcNow().AddMilliseconds(500);
             }
             return;
         }
 
         switch (State)
         {
+            case AutomationState.WaitingForAvailableRetainers:
+                if (retainerListings.IsRetainerListOpen && retainerListings.AvailableRetainerIndices.Count > 0)
+                    BeginBellSession();
+                else
+                    CheckTimeout("Retainer data did not become ready. The available-retainer check will retry.");
+                break;
+            case AutomationState.RecoveringRetainerInterface:
+                PollInterfaceRecovery();
+                break;
+            case AutomationState.WaitingToRetryRetainers:
+                if (!configuration.Current.AutomationEnabled || !configuration.Current.RepeatBellRuns)
+                    Complete("Automatic retainer retries were disabled.");
+                else if (DelayElapsed() && retainerListings.IsRetainerListOpen)
+                    BeginBellSession();
+                else if (timeProvider.GetUtcNow() >= nextActionAt.AddMinutes(1))
+                    Halt("The bell closed before the retry. Open the bell and press Start.");
+                break;
             case AutomationState.WaitingBeforeRetainerSelection:
                 if (DelayElapsed()) SelectCurrentRetainer();
                 break;
@@ -373,7 +397,7 @@ public sealed class AutomationController : IDisposable
             case AutomationState.WaitingForBank:
                 if (retainerListings.IsBankOpen)
                     Schedule(AutomationState.WaitingBeforeGilAmount, "Preparing the retainer gil withdrawal amount.");
-                else if (DateTimeOffset.UtcNow >= stateDeadline)
+                else if (timeProvider.GetUtcNow() >= stateDeadline)
                     SkipGilCollection("Timed out opening the retainer gil window.");
                 break;
             case AutomationState.WaitingBeforeGilAmount:
@@ -456,7 +480,9 @@ public sealed class AutomationController : IDisposable
         RetainerInterfaceOpened?.Invoke();
         if (retainerCount <= 0)
         {
-            Halt("No retainers were available in the summoning-bell list.");
+            LastKnownFreeSaleSlots = null;
+            WaitFor(AutomationState.WaitingForAvailableRetainers,
+                "Waiting for the game to load the available retainer list.", 30);
             return;
         }
 
@@ -517,7 +543,7 @@ public sealed class AutomationController : IDisposable
     {
         portfolioListings.Clear();
         portfolioRetainers.Clear();
-        portfolioStartedAt = DateTimeOffset.UtcNow;
+        portfolioStartedAt = timeProvider.GetUtcNow();
         portfolioCompletedAt = null;
         portfolioFullBellRun = isFullBellRun;
         portfolioComplete = false;
@@ -533,7 +559,7 @@ public sealed class AutomationController : IDisposable
     {
         if (retainerIndex >= retainerRows.Count || !retainerListings.SelectRetainer(retainerRows[retainerIndex]))
         {
-            Halt($"Could not select retainer {retainerIndex + 1}.");
+            RecoverInterface($"Could not select retainer {retainerIndex + 1}.");
             return;
         }
         WaitFor(AutomationState.WaitingForRetainerMenu, $"Waiting for retainer {retainerIndex + 1} of {retainerCount}.");
@@ -543,7 +569,7 @@ public sealed class AutomationController : IDisposable
     {
         if (!retainerListings.SelectSellItems())
         {
-            Halt("Could not select the retainer's market-listings menu entry.");
+            RecoverInterface("Could not select the retainer's market-listings menu entry.");
             return;
         }
         WaitFor(AutomationState.WaitingForSellList, "Waiting for the retainer sell list.");
@@ -574,7 +600,7 @@ public sealed class AutomationController : IDisposable
                 retainerListings.TryAutoListPurchase(procurementLedger, out var fillListing) && fillListing is not null)
             {
                 pendingAutoListing = fillListing;
-                verificationDeadline = DateTimeOffset.UtcNow.AddSeconds(10);
+                verificationDeadline = timeProvider.GetUtcNow().AddSeconds(10);
                 Schedule(AutomationState.WaitingAfterAutoListing,
                     $"Listing {fillListing.ItemName} x{fillListing.Quantity} on {retainerListings.ActiveRetainerName}.");
                 return;
@@ -592,7 +618,7 @@ public sealed class AutomationController : IDisposable
             retainerListings.TryAutoListPurchase(procurementLedger, out var autoListing) && autoListing is not null)
         {
             pendingAutoListing = autoListing;
-            verificationDeadline = DateTimeOffset.UtcNow.AddSeconds(10);
+            verificationDeadline = timeProvider.GetUtcNow().AddSeconds(10);
             Schedule(AutomationState.WaitingAfterAutoListing,
                 $"Listing purchased {autoListing.ItemName} x{autoListing.Quantity} on {retainerListings.ActiveRetainerName}.");
             return;
@@ -654,9 +680,9 @@ public sealed class AutomationController : IDisposable
         }
         if (!retainerListings.VerifyAutoListing(pendingAutoListing))
         {
-            if (DateTimeOffset.UtcNow < verificationDeadline)
+            if (timeProvider.GetUtcNow() < verificationDeadline)
             {
-                nextActionAt = DateTimeOffset.UtcNow.AddMilliseconds(250);
+                nextActionAt = timeProvider.GetUtcNow().AddMilliseconds(250);
                 return;
             }
             log.Add(AutomationLogLevel.Error,
@@ -728,7 +754,7 @@ public sealed class AutomationController : IDisposable
                     $"Could not open visible row {queue[currentIndex].Index + 1} while locating the safety seed.");
                 return;
             }
-            Halt($"Could not open listing {queue[currentIndex].Index + 1}.");
+            RecoverInterface($"Could not open listing {queue[currentIndex].Index + 1}.");
             return;
         }
         WaitFor(AutomationState.WaitingForContextMenu, "Waiting for the listing menu.");
@@ -743,7 +769,7 @@ public sealed class AutomationController : IDisposable
                 AbortFreshAutoListing("Could not open Adjust Price while locating the new safety seed.");
                 return;
             }
-            Halt("Could not select Adjust Price.");
+            RecoverInterface("Could not select Adjust Price.");
             return;
         }
         WaitFor(AutomationState.WaitingForPriceEditor, "Waiting for the Adjust Price window.");
@@ -797,7 +823,7 @@ public sealed class AutomationController : IDisposable
 
         var cooldown = TimeSpan.FromMilliseconds(configuration.Current.MarketRequestCooldownMs);
         var earliestRequestAt = lastMarketRequestAt + cooldown;
-        if (DateTimeOffset.UtcNow < earliestRequestAt)
+        if (timeProvider.GetUtcNow() < earliestRequestAt)
         {
             ReplaceCurrent(queue[currentIndex] with { Status = "Waiting for market cooldown" });
             nextActionAt = earliestRequestAt;
@@ -832,7 +858,7 @@ public sealed class AutomationController : IDisposable
                 AbortFreshAutoListing("The Adjust Price window closed before the guarded live request could run.");
                 return;
             }
-            Halt("The Adjust Price window closed before the market cooldown elapsed.");
+            RecoverInterface("The Adjust Price window closed before the market cooldown elapsed.");
             return;
         }
         ReplaceCurrent(entry with { Status = "Reading live market" });
@@ -845,10 +871,10 @@ public sealed class AutomationController : IDisposable
                 AbortFreshAutoListing("Could not request live prices for the safety-seeded listing.");
                 return;
             }
-            Halt("Could not click Compare Prices.");
+            RecoverInterface("Could not click Compare Prices.");
             return;
         }
-        lastMarketRequestAt = DateTimeOffset.UtcNow;
+        lastMarketRequestAt = timeProvider.GetUtcNow();
         Transition(AutomationState.RequestingMarketData, $"Reading live prices for visible row {currentIndex + 1}.");
     }
 
@@ -870,7 +896,7 @@ public sealed class AutomationController : IDisposable
                 var totalAttempts = configuration.Current.MarketRequestRetryCount + 1;
                 var retryDelay = configuration.Current.MarketRetryBackoffMs * marketRequestAttempts;
                 var cooldownAt = lastMarketRequestAt.AddMilliseconds(configuration.Current.MarketRequestCooldownMs);
-                nextActionAt = DateTimeOffset.UtcNow.AddMilliseconds(retryDelay);
+                nextActionAt = timeProvider.GetUtcNow().AddMilliseconds(retryDelay);
                 if (cooldownAt > nextActionAt)
                     nextActionAt = cooldownAt;
                 marketData.ClearCache();
@@ -883,7 +909,7 @@ public sealed class AutomationController : IDisposable
                 log.Add(AutomationLogLevel.Warning,
                     $"{failedEntry.Listing.ItemName}: market prices did not load on attempt " +
                     $"{marketRequestAttempts}/{totalAttempts}; retrying this row in " +
-                    $"{Math.Ceiling((nextActionAt - DateTimeOffset.UtcNow).TotalSeconds):N0}s. {message}");
+                    $"{Math.Ceiling((nextActionAt - timeProvider.GetUtcNow()).TotalSeconds):N0}s. {message}");
                 Transition(AutomationState.WaitingBeforeMarketRequest,
                     $"Waiting to retry live prices for {failedEntry.Listing.ItemName}.");
                 return;
@@ -954,7 +980,7 @@ public sealed class AutomationController : IDisposable
     {
         var candidate = reusableMarket;
         if (candidate is null || candidate.ItemId != entry.Listing.ItemId ||
-            DateTimeOffset.UtcNow - candidate.CapturedAt > SameItemMarketReuseWindow)
+            timeProvider.GetUtcNow() - candidate.CapturedAt > SameItemMarketReuseWindow)
             return false;
 
         // If the stable editor still could not be mapped, fall back to a normal Compare
@@ -1142,7 +1168,7 @@ public sealed class AutomationController : IDisposable
         }
 
         updatesSubmitted++;
-        verificationDeadline = DateTimeOffset.UtcNow.AddSeconds(10);
+        verificationDeadline = timeProvider.GetUtcNow().AddSeconds(10);
         ReplaceCurrent(entry with { Status = $"Submitted {target:N0} gil" });
         log.Add(AutomationLogLevel.Information,
             $"SUBMITTED {entry.Listing.ItemName} ({entry.Listing.RetainerName}, slot {entry.Listing.Slot}): " +
@@ -1160,9 +1186,9 @@ public sealed class AutomationController : IDisposable
                 current.RetainerId != entry.Listing.RetainerId || current.ItemId != entry.Listing.ItemId ||
                 current.CurrentPrice != target)
             {
-                if (DateTimeOffset.UtcNow < verificationDeadline)
+                if (timeProvider.GetUtcNow() < verificationDeadline)
                 {
-                    nextActionAt = DateTimeOffset.UtcNow.AddMilliseconds(250);
+                    nextActionAt = timeProvider.GetUtcNow().AddMilliseconds(250);
                     return;
                 }
                 ReplaceCurrent(entry with { Status = "Server verification failed" });
@@ -1251,7 +1277,7 @@ public sealed class AutomationController : IDisposable
         if (!bellSession)
         {
             portfolioComplete = true;
-            portfolioCompletedAt = DateTimeOffset.UtcNow;
+            portfolioCompletedAt = timeProvider.GetUtcNow();
             Complete($"Processed {queue.Count} listing(s); submitted {updatesSubmitted} update(s).");
             return;
         }
@@ -1262,7 +1288,7 @@ public sealed class AutomationController : IDisposable
     {
         if (!retainerListings.CloseSellList())
         {
-            Halt("Could not close the retainer sell list.");
+            RecoverInterface("Could not close the retainer sell list.");
             return;
         }
         WaitFor(AutomationState.WaitingForRetainerMenuAfterSellList, "Waiting for the retainer menu.");
@@ -1272,7 +1298,7 @@ public sealed class AutomationController : IDisposable
     {
         if (!retainerListings.CloseRetainerMenu())
         {
-            Halt("Could not dismiss the active retainer.");
+            RecoverInterface("Could not dismiss the active retainer.");
             return;
         }
         WaitFor(AutomationState.WaitingForRetainerList, "Waiting for the summoning-bell retainer list.", 15);
@@ -1347,7 +1373,7 @@ public sealed class AutomationController : IDisposable
                 $"Gil collected; dismissing {retainerListings.ActiveRetainerName}.");
             return;
         }
-        if (DateTimeOffset.UtcNow >= stateDeadline)
+        if (timeProvider.GetUtcNow() >= stateDeadline)
             SkipGilCollection($"Server verification did not confirm the {pendingGilWithdrawal:N0} gil withdrawal.");
     }
 
@@ -1381,7 +1407,7 @@ public sealed class AutomationController : IDisposable
         if (retainerIndex >= retainerCount)
         {
             portfolioComplete = true;
-            portfolioCompletedAt = DateTimeOffset.UtcNow;
+            portfolioCompletedAt = timeProvider.GetUtcNow();
             var finalListingCount = fillOnlyRun ? fillListingCounts.Values.Sum() : listingsSeenAcrossRetainers;
             LastKnownFreeSaleSlots = Math.Max(0, retainerCount * 20 - finalListingCount);
             if (configuration.Current.ProcessAllRetainers)
@@ -1390,6 +1416,7 @@ public sealed class AutomationController : IDisposable
                     .Select(x => new StockExposure(x.Key.ItemId, x.Key.IsHighQuality,
                         (uint)Math.Min(uint.MaxValue, x.Sum(y => (long)y.Quantity)), x.Count())).ToArray();
             procurementLedger.ClearCompleted();
+            var completedFillOnly = fillOnlyRun;
             var message = $"Finished {retainerCount} retainer(s); submitted {updatesSubmitted} update(s).";
             if (fillOnlyRun)
             {
@@ -1397,7 +1424,7 @@ public sealed class AutomationController : IDisposable
                 requestedFillOnlyRun = false;
             }
             if (configuration.Current.RepeatBellRuns)
-                ScheduleNextBellRun(message);
+                ScheduleNextBellRun(message, completedFillOnly);
             else
                 Complete(message);
             return;
@@ -1413,14 +1440,14 @@ public sealed class AutomationController : IDisposable
         log.Add(AutomationLogLevel.Information, message);
     }
 
-    private void ScheduleNextBellRun(string completedMessage)
+    private void ScheduleNextBellRun(string completedMessage, bool completedFillOnly)
     {
         var minimumMinutes = configuration.Current.RepeatMinimumMinutes;
         var maximumMinutes = configuration.Current.RepeatMaximumMinutes;
         var minutes = Random.Shared.Next(minimumMinutes, maximumMinutes + 1);
-        nextActionAt = DateTimeOffset.UtcNow.AddMinutes(minutes);
+        nextActionAt = runSchedule.CompletePass(timeProvider.GetUtcNow(), TimeSpan.FromMinutes(minutes), completedFillOnly);
         Transition(AutomationState.WaitingForScheduledRun,
-            $"{completedMessage} Next bell run in {minutes} minute(s).");
+            $"{completedMessage} Next full retainer check at {nextActionAt.LocalDateTime:t}.");
         log.Add(AutomationLogLevel.Information,
             $"{completedMessage} Scheduled the next bell run for {nextActionAt.LocalDateTime:t}.");
     }
@@ -1429,7 +1456,7 @@ public sealed class AutomationController : IDisposable
     {
         var config = configuration.Current;
         var delay = Random.Shared.Next(config.MinimumDelayMs, config.MaximumDelayMs + 1);
-        nextActionAt = DateTimeOffset.UtcNow.AddMilliseconds(delay);
+        nextActionAt = timeProvider.GetUtcNow().AddMilliseconds(delay);
         Transition(state, message);
     }
 
@@ -1483,22 +1510,74 @@ public sealed class AutomationController : IDisposable
 
     private void WaitFor(AutomationState state, string message, int seconds = 10)
     {
-        stateDeadline = DateTimeOffset.UtcNow.AddSeconds(seconds);
+        stateDeadline = timeProvider.GetUtcNow().AddSeconds(seconds);
         Transition(state, message);
     }
 
     private void CheckTimeout(string message)
     {
-        if (DateTimeOffset.UtcNow >= stateDeadline)
+        if (timeProvider.GetUtcNow() >= stateDeadline)
         {
             if (returnToAutoListingAfterCurrent)
                 AbortFreshAutoListing(message);
             else
-                Halt(message);
+                RecoverInterface(message);
         }
     }
 
-    private bool DelayElapsed() => DateTimeOffset.UtcNow >= nextActionAt;
+    // Only call for menu/read failures, never an unverified write. Unwind owned
+    // retainer windows, then retry a full pass with fresh listings after a backoff.
+    private void RecoverInterface(string reason)
+    {
+        if (returnToAutoListingAfterCurrent)
+        {
+            AbortFreshAutoListing(reason);
+            return;
+        }
+        if (!bellSession || !configuration.Current.AutomationEnabled || !configuration.Current.RepeatBellRuns)
+        {
+            Halt(reason);
+            return;
+        }
+        sessionCancellation?.Cancel();
+        marketTask = null;
+        LastKnownFreeSaleSlots = null;
+        requestedFillOnlyRun = false;
+        fillOnlyRun = false;
+        nextActionAt = timeProvider.GetUtcNow();
+        WaitFor(AutomationState.RecoveringRetainerInterface, $"{reason} Returning to the bell to retry.", 60);
+        log.Add(AutomationLogLevel.Warning, detail);
+    }
+
+    private void PollInterfaceRecovery()
+    {
+        if (timeProvider.GetUtcNow() >= stateDeadline)
+        {
+            Halt("Could not recover the retainer interface within 60 seconds. Open the bell and press Start.");
+            return;
+        }
+        if (!DelayElapsed())
+            return;
+        nextActionAt = timeProvider.GetUtcNow().AddSeconds(1);
+        if (retainerListings.IsPriceEditorOpen)
+        {
+            retainerListings.CloseComparePrices();
+            retainerListings.CancelPriceEditor();
+        }
+        else if (retainerListings.IsContextMenuOpen) retainerListings.CloseContextMenu();
+        else if (retainerListings.IsBankOpen) retainerListings.CancelBankDialog();
+        else if (retainerListings.IsSellListOpen) retainerListings.CloseSellList();
+        else if (retainerListings.IsTalkOpen) retainerListings.AdvanceTalk();
+        else if (retainerListings.IsRetainerMenuOpen) retainerListings.CloseRetainerMenu();
+        else if (retainerListings.IsRetainerListOpen)
+        {
+            nextActionAt = timeProvider.GetUtcNow().AddMinutes(1);
+            Transition(AutomationState.WaitingToRetryRetainers,
+                $"Back at the bell. Retainer check retries at {nextActionAt.LocalDateTime:t}.");
+        }
+    }
+
+    private bool DelayElapsed() => timeProvider.GetUtcNow() >= nextActionAt;
 
     private void Transition(AutomationState state, string message)
     {
@@ -1526,7 +1605,8 @@ public sealed class AutomationController : IDisposable
         AutomationState.WaitingBeforeGilAmount or
         AutomationState.WaitingBeforeGilConfirmation or
         AutomationState.WaitingBeforeClosingRetainer or
-        AutomationState.WaitingForScheduledRun;
+        AutomationState.WaitingForScheduledRun or
+        AutomationState.WaitingToRetryRetainers;
 
     public void Dispose()
     {

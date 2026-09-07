@@ -5,9 +5,9 @@ Smart Undercutter is a Dalamud SDK 15 plugin for guarded retainer-market reprici
 ## Keep retainers stocked
 
 1. Enable Lifestream and vnavmesh, and open the summoning-bell retainer list.
-2. Open `/sub`. On **Home**, review **Gil per shopping trip**, minimum expected
-   return, and the quantity to keep in your bags.
-3. Press **Start keeping retainers stocked** (or use `/sub start`). This enables
+2. Open `/sub`. On **Home**, review reinvestment, travel gil, spare-stock limits,
+   minimum expected return, and the quantity to keep in your bags.
+3. Press **Start all automation** (or use `/sub start`). This enables
    automatic price changes, purchases, listing, gil collection, and repeat checks.
 
 The loop checks every retainer, fills empty slots from eligible bag stock, searches
@@ -18,7 +18,7 @@ The normal deal search uses Universalis to choose destinations and rechecks each
 purchase against the live in-game listing. Home-world sale history and competing
 listings set the resale estimate; the player's own retainers are excluded.
 
-By default **Spend whatever gil is in the wallet** is on, so each trip may spend
+By default **Reinvest available gil and sale income** is on, so each trip may spend
 the whole balance apart from the travel reserve (5,000 gil, configurable to 0) and
 sales compound into the next trip. Turn it off to fall back to the per-trip
 maximum, which applies per trip and resets on the next one.
@@ -27,8 +27,7 @@ Starting from nothing works: at zero spendable gil no trip begins, and if the
 wallet runs dry partway through a route the trip is abandoned and the character
 returns to the home-world summoning bell rather than touring with no money. Start
 keeps repeating retainer passes there, which collect gil from anything that sold
-and notice freed sale slots, so shopping resumes on the next interval once there
-is gil to spend.
+and notice freed sale slots, so shopping wakes as soon as new spendable income is detected.
 
 How much of one item may be held is capped by **maximum stock to hold**, a share of
 that item's observed weekly sales (25% by default). The cap counts stacks already
@@ -45,9 +44,13 @@ qualities, only the high-quality form is bought. Categories that have no
 high-quality form at all, such as dyes, stay tradeable. This applies to buying only
 - sell-only stock is still listed from the bags whatever its quality.
 
-**Spare stacks to keep in bags** (5 by default) is bought on top of the free
-retainer slots and held ready to list the moment something sells, so full retainers
-do not stop shopping. Set it to 0 to buy only for slots that are already free.
+**Spare resale stacks to keep in bags** (5 by default) are bought after stock covers
+real vacancies. Buffer purchases are limited to 20% of available capital by default,
+including the saved acquisition cost of resale stock already in the bags. Repeated
+trips do not reset that allowance. The four main bags are scanned even after a
+plugin reload; queued purchases and their matching inventory are counted once.
+Personal reserves do not use resale capacity. Set the spare-stack limit to 0 to
+buy only for slots that are already free.
 
 Configure additional buying rules in **Shopping**. Dyes, materia and ethers are
 seeded as **sell-only**: everything held is listed from the bags with nothing kept
@@ -71,7 +74,9 @@ timing, and the activity log. Settings save automatically.
 
 **Stop all automation** or `/sub stop` stops every controller and disarms recurring
 work, including after a plugin reload. To resume, return to the bell and press
-Start. When a purchase or listing could not be verified, check it in the game
+Start. Initial retainer loading waits for the game data; transient menu failures
+return to the bell and retry after a minute. Bag refills preserve the next full
+retainer-check deadline. When a purchase or listing could not be verified, check it in the game
 before restarting. Temporary failures while returning home schedule another home
 attempt; they do not start another shopping route on the visited world.
 
@@ -86,14 +91,15 @@ attempt; they do not start another shopping route on the visited world.
 - Defaults to undercutting the lowest real competitor by one gil with no tolerance band.
 - Detects extreme crash listings (60% below recent history by default) and leaves the item unchanged without blocking normal market swings.
 - Submits through the real Adjust Price numeric control and confirm callback, then verifies the server-updated retainer slot.
-- Uses randomized 250-450 ms action delays and immediately stops on movement, logout, unexpected UI state, changed listing, or failed confirmation.
+- Uses randomized 250-450 ms action delays and stops on movement, logout, changed listings, or unknown write outcomes; known menu/read failures have bounded recovery.
 - Supports price floors, cost-basis margins, HQ/NQ filtering, match-lowest mode, optional tolerance bands, and 99/999 rounding.
 - Provides an ImGui status dashboard, per-retainer progress, queue with live/target prices, configuration, and audit log.
 - Shows a Portfolio estimate with wallet and retainer gil, gross asking value, live market-aligned value, per-retainer seller tax, estimated net proceeds, markdown risk, and projected total wealth.
 - Automatically filters bag stock to HQ Grade 4 gemdraughts and HQ Caramel Popcorn, prices them from the current-world market, and fills free retainer slots with complete 99-stacks while preserving 100 of each item for personal use by default.
 - Consolidates inventory stacks before bag filling, skips retainers already at 20/20 during fill-only runs, validates the exact visible safety-seeded row before every write, and returns to the main bell list before idling.
 - Builds diversified purchase plans from home-world Universalis sale history and competing listings, constrained by gil, bag slots, confirmed retainer sale slots, weekly sales, ROI, and per-item limits.
-- Scans all North American worlds plus Oceania by default and merges them into one travel-ready procurement plan.
+- Searches North America by default. Oceania is excluded from saved search scopes, automatic plans, guided routes, live tours and outgoing shopping travel.
+- Full live tours are limited to 8 low-stock items; regular automation uses targeted deal routes.
 - Uses Lifestream for world and cross-data-center travel and vnavmesh for local approaches, then revalidates every candidate against the live in-game listing before submitting a purchase.
 - Offers a guided deal route that prioritizes Universalis opportunities by world, travels to each market board, flashes the FFXIV taskbar icon, shows expected prices and guarded ceilings, and waits for a manual Done / Next command.
 - Returns home, opens a summoning bell, distributes purchased stacks into open retainer slots, and feeds them through the normal live repricing pass.

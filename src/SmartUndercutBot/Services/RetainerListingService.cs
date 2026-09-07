@@ -13,74 +13,6 @@ using SmartUndercutBot.Core.Services;
 
 namespace SmartUndercutBot.Services;
 
-public sealed record SafetySnapshot(bool IsSafe, string Reason);
-public sealed record PriceUpdateResult(bool Succeeded, string Message);
-public sealed record PendingAutoListing(
-    uint ItemId,
-    string ItemName,
-    uint Quantity,
-    uint UnitPrice,
-    short MarketSlot,
-    bool IsHighQuality);
-public sealed record BagListingCandidate(
-    InventoryType SourceType,
-    ushort SourceSlot,
-    uint ItemId,
-    string ItemName,
-    uint Quantity,
-    bool IsHighQuality,
-    uint StackSize);
-
-public interface IRetainerListingService
-{
-    bool IsRetainerListOpen { get; }
-    bool IsRetainerMenuOpen { get; }
-    bool IsSellListOpen { get; }
-    bool IsContextMenuOpen { get; }
-    bool IsPriceEditorOpen { get; }
-    bool IsBankOpen { get; }
-    bool IsTalkOpen { get; }
-    int RetainerCount { get; }
-    IReadOnlyList<int> AvailableRetainerIndices { get; }
-    IReadOnlySet<ulong> OwnedRetainerIds { get; }
-    ulong ActiveRetainerId { get; }
-    string ActiveRetainerName { get; }
-    uint PlayerGil { get; }
-    uint ActiveRetainerGil { get; }
-    SafetySnapshot CheckSafety(Vector3 sessionPosition);
-    IReadOnlyList<RetainerListing> ReadCurrentListings();
-    bool TryReadListing(short slot, out RetainerListing? listing);
-    bool TryResolveOpenPriceEditor(uint itemId, IReadOnlySet<short> excludedSlots, out RetainerListing? listing);
-    bool IsOpenPriceEditorFor(RetainerListing expected, bool requirePriceMatch);
-    bool SelectRetainer(int index);
-    bool SelectSellItems();
-    bool OpenListingContextMenu(int rowIndex);
-    bool SelectAdjustPrice();
-    bool RequestComparePrices();
-    bool TryReadSellerFeePercent(out decimal feePercent);
-    void CloseComparePrices();
-    void CloseContextMenu();
-    void CancelPriceEditor();
-    PriceUpdateResult CommitPrice(RetainerListing expected, uint targetPrice);
-    bool CloseSellList();
-    bool SelectEntrustGil(out string message);
-    bool SetWithdrawAllRetainerGil(out uint amount, out string message);
-    bool ConfirmGilWithdrawal();
-    void CancelBankDialog();
-    bool CloseRetainerMenu();
-    bool AdvanceTalk();
-    bool TryAutoListPurchase(ProcurementLedger ledger, out PendingAutoListing? pending);
-    IReadOnlyList<BagListingCandidate> ReadBagListingCandidates();
-    bool TryListBagItem(
-        BagListingCandidate candidate,
-        uint quantity,
-        uint unitPrice,
-        out PendingAutoListing? pending,
-        out string message);
-    bool VerifyAutoListing(PendingAutoListing pending);
-    Vector3? GetPlayerPosition();
-}
-
 public sealed unsafe class RetainerListingService : IRetainerListingService
 {
     private const int MaximumRetainerMarketSlots = 20;
@@ -114,21 +46,19 @@ public sealed unsafe class RetainerListingService : IRetainerListingService
     {
         get
         {
-            var addon = GetAddon("RetainerList");
-            if (addon == null || addon->AtkValues == null)
+            var manager = RetainerManager.Instance();
+            if (!IsRetainerListOpen || manager == null || !manager->IsReady)
                 return [];
 
             var result = new List<int>(10);
-            for (var index = 0; index < 10; index++)
+            var count = Math.Min(10, (int)manager->GetRetainerCount());
+            for (var index = 0; index < count; index++)
             {
-                // RetainerList stores ten AtkValues per visible row beginning at index 3.
-                // Offset 0 is the name (null ends the list); offset 8 is the UI's active flag.
-                var rowOffset = 3 + (index * 10);
-                var activeOffset = rowOffset + 8;
-                if (activeOffset >= addon->AtkValuesCount || addon->AtkValues[rowOffset].Type == 0)
-                    break;
-                var active = addon->AtkValues[activeOffset];
-                if (active.Type == AtkValueType.Bool && active.Byte != 0)
+                // Use the game's sorted retainer records, including entitlement,
+                // instead of guessed AtkValue offsets that can report zero rows
+                // while the visible list already shows active retainers.
+                var retainer = manager->GetRetainerBySortedIndex((uint)index);
+                if (retainer != null && retainer->RetainerId != 0 && retainer->Available)
                     result.Add(index);
             }
             return result;

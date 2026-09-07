@@ -49,7 +49,7 @@ public sealed class UniversalisService : IUniversalisService, IDisposable
     {
         if (!string.IsNullOrWhiteSpace(configuredDataCenter))
             return configuredDataCenter.Trim();
-        return "North-America,Oceania";
+        return "North-America";
     }
 
     public IReadOnlyList<ProcurementRule> CreateFavoriteRules()

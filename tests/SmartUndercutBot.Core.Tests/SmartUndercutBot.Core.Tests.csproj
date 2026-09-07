@@ -13,6 +13,10 @@
   </ItemGroup>
   <ItemGroup>
     <!-- Exercise the production state machine without loading native game code. -->
+    <Compile Include="../../src/SmartUndercutBot/Automation/AutomationController.cs" Link="Production/AutomationController.cs" />
+    <Compile Include="../../src/SmartUndercutBot/Automation/IRetainerAutomation.cs" Link="Production/IRetainerAutomation.cs" />
+    <Compile Include="../../src/SmartUndercutBot/Services/IRetainerListingService.cs" Link="Production/IRetainerListingService.cs" />
+    <Compile Include="../../src/SmartUndercutBot/Services/IMarketDataService.cs" Link="Production/IMarketDataService.cs" />
     <Compile Include="../../src/SmartUndercutBot/Automation/ProcurementController.cs" Link="Production/ProcurementController.cs" />
     <Compile Include="../../src/SmartUndercutBot/Automation/StockAutomationController.cs" Link="Production/StockAutomationController.cs" />
     <Compile Include="../../src/SmartUndercutBot/Configuration.cs" Link="Production/Configuration.cs" />

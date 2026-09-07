@@ -11,6 +11,115 @@ namespace SmartUndercutBot.Core.Tests.Automation;
 public sealed class ProcurementControllerTests
 {
     [Fact]
+    public void ZeroGilWaitsWithoutTripsAndWakesAsSoonAsIncomeArrives()
+    {
+        using var run = new Route();
+        run.Config.Current.EnableStockAutomation();
+        run.Game.Gil = 0;
+        for (var i = 0; i < 72; i++) run.Tick(3600);
+        Assert.Equal(0, run.Game.Scans);
+        Assert.Empty(run.Game.Commands);
+        Assert.Contains("income", run.Controller.ShoppingWaitReason);
+        run.Game.Gil = 500_000;
+        run.Tick();
+        Assert.Equal(ProcurementState.ScanningUniversalis, run.Controller.State);
+    }
+
+    [Fact]
+    public void NewIncomeRetriesAnUnaffordablePlanBeforeTheNormalInterval()
+    {
+        using var run = new Route();
+        run.Config.Current.EnableStockAutomation();
+        run.Game.Gil = 6_000;
+        run.Tick(); run.Tick();
+        Assert.Equal(ProcurementState.PlanReady, run.Controller.State);
+        Assert.Empty(run.Controller.Plan.Orders);
+        var scans = run.Game.Scans;
+        run.Tick(1);
+        Assert.Equal(scans, run.Game.Scans);
+        run.Game.Gil = 500_000;
+        run.Tick(1);
+        Assert.Equal(scans + 2, run.Game.Scans);
+    }
+
+    [Fact]
+    public void ExistingBagBufferStillCountsAfterAnEmptyLedgerOrReload()
+    {
+        using var run = new Route();
+        run.Config.Current.EnableStockAutomation();
+        run.Config.Current.ProcurementBagBufferStacks = 2;
+        run.Repricing.LastKnownFreeSaleSlots = 0;
+        run.Game.Inventory = 198;
+        Assert.Empty(run.Ledger.Snapshot());
+        Assert.Equal(2, run.Controller.ResaleBagSlots);
+        run.Tick(601);
+        Assert.Equal(0, run.Game.Scans);
+        Assert.Equal(0, run.Controller.PurchaseCapacity);
+    }
+
+    [Fact]
+    public void BoughtInventoryAndItsLedgerEntryCountOnce()
+    {
+        using var run = new Route();
+        run.Game.Inventory = 99;
+        run.Ledger.RecordPurchase(new(1, "Popcorn", 1, 1, "Siren", 1, 1_000, 99, true, 2_000, 1_500, 100, 1), 99);
+        Assert.Equal(1, run.Controller.ResaleBagSlots);
+        Assert.Equal(4, run.Controller.PurchaseCapacity);
+    }
+
+    [Fact]
+    public void PersonalConsumableReserveDoesNotFillTheResaleBuffer()
+    {
+        using var run = new Route();
+        run.Config.Current.ProcurementRules[0].ItemName = "Caramel Popcorn";
+        run.Game.Inventory = 100;
+        Assert.Equal(0, run.Controller.ResaleBagSlots);
+    }
+
+    [Fact]
+    public void SaturatedBufferBudgetIncludesTheCostOfStockAlreadyBought()
+    {
+        using var run = new Route();
+        run.Repricing.LastKnownFreeSaleSlots = 0;
+        Assert.Equal(199_000u, run.Controller.ShoppingBudget);
+        run.Game.Gil -= 103_950;
+        run.Game.Inventory = 99;
+        run.Config.Current.PerItemRules[1] = new() { CostBasis = 1_050 };
+        Assert.Equal(95_050u, run.Controller.ShoppingBudget);
+        // A later trip or cleared in-memory ledger cannot reset the allowance.
+        run.Controller.ResumeAutomatic();
+        Assert.Equal(95_050u, run.Controller.ShoppingBudget);
+        run.Repricing.LastKnownFreeSaleSlots = 5;
+        Assert.Equal(891_050u, run.Controller.ShoppingBudget);
+    }
+
+    [Theory]
+    [InlineData("Bismarck")]
+    [InlineData("Ravana")]
+    [InlineData("Sephirot")]
+    [InlineData("Sophia")]
+    [InlineData("Zurvan")]
+    public void OceanicDealsCannotEnterAnAutomaticRoute(string world)
+    {
+        using var run = new Route();
+        run.Game.BuyingWorld = world;
+        run.Controller.RunNow();
+        run.Tick();
+        Assert.Empty(run.Controller.Plan.Orders);
+        Assert.Empty(run.Game.Commands);
+    }
+
+    [Fact]
+    public void RuleChangedToSellOnlyDuringTravelCannotBePurchased()
+    {
+        using var run = new Route();
+        run.ReachListings();
+        run.Config.Current.ProcurementRules[0].LiquidateOnly = true;
+        run.Tick();
+        Assert.Equal(0, run.Game.Purchases);
+    }
+
+    [Fact]
     public void EmptyHomeScanExplainsWhyShoppingReturnedWithoutBuying()
     {
         using var run = new Route();
@@ -38,7 +147,8 @@ public sealed class ProcurementControllerTests
             run.Tick(2);
         Assert.Equal(ProcurementState.Completed, run.Controller.State);
         Assert.Equal(expectedPurchases, run.Game.Purchases);
-        Assert.Contains("/li Ravana", run.Game.Commands);
+        Assert.DoesNotContain("/li Ravana", run.Game.Commands);
+        Assert.Contains("/li Seraph", run.Game.Commands);
         Assert.Equal("Siren", run.Game.World);
         Assert.Equal(1, run.Repricing.Starts);
     }
@@ -571,7 +681,7 @@ public sealed class ProcurementControllerTests
         public Game Game { get; } = new();
         public ConfigurationService Config { get; } = new();
         public ProcurementLedger Ledger { get; } = new();
-        public AutomationController Repricing { get; } = new();
+        public TestRetainerAutomation Repricing { get; } = new();
         public AutomationLog Log { get; } = new();
         public ProcurementController Controller { get; }
         private readonly Clock clock = new();
@@ -613,7 +723,7 @@ public sealed class ProcurementControllerTests
         public void Dispose() => Controller.Dispose();
     }
 
-    private sealed class Game : IFramework, IPlayerState, ICommandManager, IRetainerListingService,
+    private sealed class Game : FakeRetainerService, IFramework, IPlayerState, ICommandManager, IRetainerListingService,
         IUniversalisService, IMarketPurchaseService, IVnavmeshService, ILifestreamService, ITaskbarAttentionService
     {
         public event Action<IFramework>? Update;
@@ -632,8 +742,9 @@ public sealed class ProcurementControllerTests
         public bool ListingsReady { get; set; } = true;
         public bool CheapOversizedHomeStack { get; set; }
         public bool MissingHomeListings { get; set; }
-        public bool IsRetainerListOpen => BellOpen;
-        public IReadOnlySet<ulong> OwnedRetainerIds { get; } = new HashSet<ulong>();
+        public string BuyingWorld { get; set; } = "Cactuar";
+        public override bool IsRetainerListOpen => BellOpen;
+        public override IReadOnlySet<ulong> OwnedRetainerIds { get; } = new HashSet<ulong>();
         public uint FreeInventorySlots { get; set; } = 50;
         public uint Gil { get; set; } = 1_000_000;
         public int Inventory { get; set; }
@@ -668,10 +779,12 @@ public sealed class ProcurementControllerTests
             return Task.FromResult<IReadOnlyList<ProcurementMarketItem>>(
                 [new(1, "Popcorn", dataCenter == "Siren"
                         ? [new(1, 11, 21, "Siren", 2, 2_000, 99, true)]
-                        : [new(1, 10, 20, "Cactuar", 1, 1_000, 99, true)],
+                        : [new(1, 10, 20, BuyingWorld, 1, 1_000, 99, true)],
                     [new(2_000, 99, true, DateTimeOffset.UtcNow)])]);
         }
-        public int GetInventoryCount(uint itemId, bool highQuality) => Inventory;
+        public int GetInventoryCount(uint itemId, bool highQuality) => itemId == 1 && highQuality ? Inventory : 0;
+        public override IReadOnlyList<BagListingCandidate> ReadBagListingCandidates() => Inventory <= 0 ? [] :
+            [new(FFXIVClientStructs.FFXIV.Client.Game.InventoryType.Inventory1, 0, 1, "Popcorn", (uint)Inventory, true, 999)];
         public Vector3? FindNearest(string objectName) => Vector3.Zero;
         public float DistanceTo(Vector3 position) => 1;
         public bool InteractNearest(string objectName, float maximumDistance = 5)
@@ -702,7 +815,11 @@ public sealed class ProcurementControllerTests
         {
             Purchases++;
             if (ThrowAfterPurchaseSubmission) throw new InvalidOperationException("Submission response lost.");
-            if (AutomaticPurchaseConfirmation) Inventory += (int)listing.Quantity;
+            if (AutomaticPurchaseConfirmation)
+            {
+                Inventory += (int)listing.Quantity;
+                Gil -= listing.PricePerUnit * listing.Quantity + listing.TotalTax;
+            }
             return true;
         }
         public void CloseMarketBoard() => BoardOpen = false;

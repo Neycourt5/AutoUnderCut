@@ -1,12 +1,13 @@
 using Dalamud.Configuration;
 using SmartUndercutBot.Core.Models;
+using SmartUndercutBot.Core.Services;
 
 namespace SmartUndercutBot;
 
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 23;
+    public int Version { get; set; } = 24;
     public bool AutomationEnabled { get; set; }
     public bool ProcessAllRetainers { get; set; } = true;
     public bool RepeatBellRuns { get; set; }
@@ -32,6 +33,7 @@ public sealed class Configuration : IPluginConfiguration
     public bool ReinvestAvailableGil { get; set; } = true;
     public bool BuyHighQualityOnly { get; set; } = true;
     public int ProcurementBagBufferStacks { get; set; } = 5;
+    public decimal ProcurementBufferGilPercent { get; set; } = 20m;
     public uint ProcurementTravelReserve { get; set; } = 5_000;
     public decimal ProcurementWeeklySalesSharePercent { get; set; } = 25m;
     public bool DyeRulesSeeded { get; set; }
@@ -41,7 +43,7 @@ public sealed class Configuration : IPluginConfiguration
     public int ProcurementInventoryReserve { get; set; } = 10;
     public decimal ProcurementMinimumRoiPercent { get; set; } = 20m;
     public uint ProcurementMinimumProfitPerUnit { get; set; } = 100;
-    public string ProcurementDataCenter { get; set; } = "North-America,Oceania";
+    public string ProcurementDataCenter { get; set; } = "North-America";
     public string MarketBoardTravelCommand { get; set; } = "/li mb";
     // Empty means "use the market-board command", which is the original behaviour.
     public string SummoningBellTravelCommand { get; set; } = string.Empty;
@@ -300,6 +302,8 @@ public sealed class Configuration : IPluginConfiguration
                  x.ItemName.StartsWith("Wide-Spectrum ", StringComparison.OrdinalIgnoreCase)));
             Version = 23;
         }
+        Version = Math.Max(Version, 24);
+        ProcurementBufferGilPercent = Math.Clamp(ProcurementBufferGilPercent, 0m, 100m);
         ProcurementBagBufferStacks = Math.Clamp(ProcurementBagBufferStacks, 0, 50);
         ProcurementTravelReserve = Math.Min(ProcurementTravelReserve, 100_000_000u);
         ProcurementWeeklySalesSharePercent = Math.Clamp(ProcurementWeeklySalesSharePercent, 1m, 100m);
@@ -322,9 +326,7 @@ public sealed class Configuration : IPluginConfiguration
         BagListingReservePerItem = Math.Clamp(BagListingReservePerItem, 0, 9999);
         ProcurementMinimumRoiPercent = Math.Clamp(ProcurementMinimumRoiPercent, 0m, 1_000m);
         ProcurementMinimumProfitPerUnit = Math.Clamp(ProcurementMinimumProfitPerUnit, 0u, 100_000_000u);
-        ProcurementDataCenter = string.IsNullOrWhiteSpace(ProcurementDataCenter)
-            ? "North-America,Oceania"
-            : ProcurementDataCenter.Trim();
+        ProcurementDataCenter = ProcurementTravelPolicy.ShoppingScope(ProcurementDataCenter);
         SummoningBellTravelCommand = SummoningBellTravelCommand?.Trim() ?? string.Empty;
         MarketBoardTravelCommand = string.IsNullOrWhiteSpace(MarketBoardTravelCommand)
             ? "/li mb"
