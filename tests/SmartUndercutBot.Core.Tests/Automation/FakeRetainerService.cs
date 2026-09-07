@@ -14,6 +14,9 @@ namespace SmartUndercutBot.Core.Tests.Automation
     public class FakeRetainerService : IRetainerListingService
     {
         public virtual bool IsRetainerListOpen => false;
+        public virtual bool IsRetainerListReady => IsRetainerListOpen && AvailableRetainerIndices.Count > 0;
+        public virtual bool TryReopenRetainerList() => false;
+        public virtual void CloseRetainerList() { }
         public virtual bool IsRetainerMenuOpen => false;
         public virtual bool IsSellListOpen => false;
         public virtual bool IsContextMenuOpen => false;

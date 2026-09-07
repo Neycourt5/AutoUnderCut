@@ -25,6 +25,10 @@ public sealed record BagListingCandidate(
 public interface IRetainerListingService
 {
     bool IsRetainerListOpen { get; }
+    bool IsRetainerListReady => IsRetainerListOpen && AvailableRetainerIndices.Count > 0;
+    // Menu recovery only: never navigate or spend gil to reopen the bell.
+    bool TryReopenRetainerList() => false;
+    void CloseRetainerList() { }
     bool IsRetainerMenuOpen { get; }
     bool IsSellListOpen { get; }
     bool IsContextMenuOpen { get; }

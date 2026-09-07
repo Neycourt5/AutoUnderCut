@@ -139,7 +139,7 @@ public sealed class DashboardWindow : Window
         if (automation.LastWriteFailure is { } writeFailure)
             ImGui.TextWrapped($"A price update was refused by the game and that listing is being left alone: {writeFailure}");
         if (stockAutomation.NeedsAttention)
-            ImGui.TextWrapped("Check the last purchase or listing in the game before restarting. Activity has been held to avoid repeating an unverified action.");
+            ImGui.TextWrapped("Resolve the message above, then press Start to resume.");
 
         var status = automation.Status;
         if (status.TotalRetainers > 0)
@@ -225,7 +225,7 @@ public sealed class DashboardWindow : Window
             automation.IsActive ? running : stockAutomation.NeedsAttention ? blocked : waiting,
             automation.IsActive ? "running now"
                 : retainerPausedForTravel ? "resumes after returning home"
-                : automation.RequiresManualRestart ? "stopped - check the last action in game"
+                : automation.RequiresManualRestart ? "paused - see the message above"
                 : !armed ? "press Start to enable the loop"
                 : !bagListing.IsRetainerListOpen ? "waiting for the summoning-bell list"
                 : automation.Status.NextActionAt is { } next ? $"next at {next.LocalDateTime:t}"

@@ -1338,7 +1338,7 @@ public sealed class ProcurementControllerTests
             return true;
         }
         public void CloseMarketBoard() => BoardOpen = false;
-        public void CloseRetainerList() => BellOpen = false;
+        public override void CloseRetainerList() => BellOpen = false;
         public bool MoveTo(Vector3 destination, float tolerance = 3) => true;
         public void Stop() { }
         public void StopFlashing() { }

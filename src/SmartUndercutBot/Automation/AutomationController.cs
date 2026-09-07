@@ -90,6 +90,11 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
     private readonly Dictionary<(ulong Retainer, short Slot), int> listingFailureCounts = [];
     private readonly HashSet<(ulong Retainer, short Slot)> skippedProblemListings = [];
     private int consecutiveRecoveries;
+    private int selectionAttempts;
+    private DateTimeOffset retrySelectionAt;
+    private DateTimeOffset nextBellInteractionAt;
+    private DateTimeOffset? readyBellSince;
+    private string lastRecoveryObservation = string.Empty;
     private string? lastWriteFailure;
     private readonly Dictionary<uint, (DateTimeOffset At, IReadOnlyList<MarketListing> Listings)> observedHomePrices = [];
     private readonly List<int> retainerRows = [];
@@ -313,7 +318,7 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
         switch (State)
         {
             case AutomationState.WaitingForAvailableRetainers:
-                if (retainerListings.IsRetainerListOpen && retainerListings.AvailableRetainerIndices.Count > 0)
+                if (retainerListings.IsRetainerListReady)
                     BeginBellSession();
                 else
                     CheckTimeout("Retainer data did not become ready. The available-retainer check will retry.");
@@ -324,19 +329,19 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
             case AutomationState.WaitingToRetryRetainers:
                 if (!configuration.Current.AutomationEnabled || !configuration.Current.RepeatBellRuns)
                     Complete("Automatic retainer retries were disabled.");
-                else if (DelayElapsed() && retainerListings.IsRetainerListOpen)
+                else if (DelayElapsed() && retainerListings.IsRetainerListReady && !HasRetainerChildWindow)
                     BeginBellSession();
-                else if (timeProvider.GetUtcNow() >= nextActionAt.AddMinutes(1))
-                    Halt("The bell closed before the retry. Open the bell and press Start.");
+                else if (DelayElapsed())
+                    RecoverInterface("The retainer list is not ready for the scheduled retry.");
                 break;
             case AutomationState.WaitingBeforeRetainerSelection:
-                if (DelayElapsed()) SelectCurrentRetainer();
+                if (DelayElapsed()) PollRetainerSelection();
                 break;
             case AutomationState.WaitingForRetainerMenu:
                 if (retainerListings.IsRetainerMenuOpen)
                     Schedule(AutomationState.WaitingBeforeOpeningSellList, $"Opening {retainerListings.ActiveRetainerName}'s market listings.");
                 else
-                    CheckTimeout("Timed out waiting for the selected retainer.");
+                    PollSelectedRetainer();
                 break;
             case AutomationState.WaitingBeforeOpeningSellList:
                 if (DelayElapsed()) OpenSellList();
@@ -496,7 +501,7 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
         retainerCount = retainerRows.Count;
         handledBell = true;
         RetainerInterfaceOpened?.Invoke();
-        if (retainerCount <= 0)
+        if (retainerCount <= 0 || !retainerListings.IsRetainerListReady)
         {
             LastKnownFreeSaleSlots = null;
             WaitFor(AutomationState.WaitingForAvailableRetainers,
@@ -551,6 +556,8 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
         pendingGilWithdrawal = 0;
         abortFillReason = string.Empty;
         marketTask = null;
+        selectionAttempts = 0;
+        readyBellSince = null;
         lastMarketRequestAt = DateTimeOffset.MinValue;
         listingsSeenAcrossRetainers = 0;
         fillListingCounts.Clear();
@@ -575,12 +582,46 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
 
     private void SelectCurrentRetainer()
     {
+        selectionAttempts++;
+        readyBellSince = null;
         if (retainerIndex >= retainerRows.Count || !retainerListings.SelectRetainer(retainerRows[retainerIndex]))
         {
             RecoverInterface($"Could not select retainer {retainerIndex + 1}.");
             return;
         }
-        WaitFor(AutomationState.WaitingForRetainerMenu, $"Waiting for retainer {retainerIndex + 1} of {retainerCount}.");
+        retrySelectionAt = timeProvider.GetUtcNow().AddSeconds(5);
+        WaitFor(AutomationState.WaitingForRetainerMenu, $"Waiting for retainer {retainerIndex + 1} of {retainerCount}.", 20);
+    }
+
+    private bool HasRetainerChildWindow => retainerListings.IsPriceEditorOpen || retainerListings.IsContextMenuOpen ||
+        retainerListings.IsBankOpen || retainerListings.IsSellListOpen || retainerListings.IsTalkOpen || retainerListings.IsRetainerMenuOpen;
+
+    private void PollRetainerSelection()
+    {
+        if (!retainerListings.IsRetainerListReady || HasRetainerChildWindow)
+        {
+            readyBellSince = null;
+            RecoverInterface("The retainer list is not ready to accept a selection.");
+            return;
+        }
+        if (readyBellSince is null) { readyBellSince = timeProvider.GetUtcNow(); return; }
+        if (timeProvider.GetUtcNow() - readyBellSince < TimeSpan.FromSeconds(1)) return;
+        selectionAttempts = 0;
+        SelectCurrentRetainer();
+    }
+
+    private void PollSelectedRetainer()
+    {
+        // A callback can be dropped while a freshly opened list is initialising.
+        // Retry only if the list is still ready and no child window has opened.
+        if (selectionAttempts < 2 && timeProvider.GetUtcNow() >= retrySelectionAt &&
+            retainerListings.IsRetainerListReady && !HasRetainerChildWindow)
+        {
+            log.Add(AutomationLogLevel.Warning, $"Retainer {retainerIndex + 1} selection did not open a menu; retrying the visible list once. {RetainerInterfaceSummary()}");
+            SelectCurrentRetainer();
+            return;
+        }
+        CheckTimeout("Timed out waiting for the selected retainer.");
     }
 
     private void OpenSellList()
@@ -1595,6 +1636,12 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
     // retainer windows, then retry a full pass with fresh listings after a backoff.
     private void RecoverInterface(string reason)
     {
+        if (pendingAutoListing is not null || State is AutomationState.CommittingPrice or AutomationState.WaitingForGilVerification ||
+            (currentIndex < queue.Count && queue[currentIndex].Status.StartsWith("Submitted", StringComparison.Ordinal)))
+        {
+            Halt($"An action still needs server verification. Check the last listing or gil transfer before restarting. {reason}");
+            return;
+        }
         if (returnToAutoListingAfterCurrent)
         {
             AbortFreshAutoListing(reason);
@@ -1606,23 +1653,34 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
             Halt(reason);
             return;
         }
-        if (consecutiveRecoveries >= MaximumConsecutiveRecoveries)
-        {
-            Halt($"{reason} Recovery has restarted the retainer pass {consecutiveRecoveries} times without " +
-                 "finishing a retainer, so it has stopped instead of retrying the same step forever.");
-            return;
-        }
         sessionCancellation?.Cancel();
         marketTask = null;
         LastKnownFreeSaleSlots = null;
         requestedFillOnlyRun = false;
         fillOnlyRun = false;
         nextActionAt = timeProvider.GetUtcNow();
+        readyBellSince = null;
+        nextBellInteractionAt = nextActionAt;
+        lastRecoveryObservation = string.Empty;
         WaitFor(AutomationState.RecoveringRetainerInterface, $"{reason} Returning to the bell to retry.", 60);
-        log.Add(AutomationLogLevel.Warning, detail);
+        log.Add(AutomationLogLevel.Warning, $"{detail} {RetainerInterfaceSummary()}");
     }
 
-    private const int MaximumConsecutiveRecoveries = 4;
+    private string RetainerInterfaceSummary() =>
+        $"Retainer UI: list={retainerListings.IsRetainerListOpen}, ready={retainerListings.IsRetainerListReady}, " +
+        $"menu={retainerListings.IsRetainerMenuOpen}, sell={retainerListings.IsSellListOpen}, " +
+        $"editor={retainerListings.IsPriceEditorOpen}, context={retainerListings.IsContextMenuOpen}, " +
+        $"talk={retainerListings.IsTalkOpen}, bank={retainerListings.IsBankOpen}, " +
+        $"available={retainerListings.AvailableRetainerIndices.Count}, active={retainerListings.ActiveRetainerId}.";
+
+    private void ScheduleRetainerRetry(string reason)
+    {
+        var seconds = Math.Min(300, 15 * (1 << Math.Clamp(consecutiveRecoveries - 1, 0, 5)));
+        nextActionAt = timeProvider.GetUtcNow().AddSeconds(seconds);
+        Transition(AutomationState.WaitingToRetryRetainers,
+            $"{reason} Retainer check retries automatically at {nextActionAt.LocalDateTime:T}. Shopping waits for a complete check.");
+        log.Add(AutomationLogLevel.Warning, detail);
+    }
 
     // Only a deliberate Start forgets a bad row. Interface recovery replays the
     // pass through the same session reset, so clearing this there would wipe the
@@ -1640,7 +1698,7 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
     // row after a second failure and let the rest of the run continue.
     private void NoteRecoveryFailure(string reason)
     {
-        consecutiveRecoveries++;
+        consecutiveRecoveries = Math.Min(30, consecutiveRecoveries + 1);
         if (queue.Count == 0 || currentIndex >= queue.Count)
             return;
         var listing = queue[currentIndex].Listing;
@@ -1672,14 +1730,34 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
 
     private void PollInterfaceRecovery()
     {
+        if (!configuration.Current.AutomationEnabled || !configuration.Current.RepeatBellRuns)
+        {
+            Complete("Automatic retainer recovery was disabled.");
+            return;
+        }
+        if (retainerListings.IsRetainerListReady && !HasRetainerChildWindow)
+        {
+            ScheduleRetainerRetry("Back at the bell.");
+            return;
+        }
         if (timeProvider.GetUtcNow() >= stateDeadline)
         {
-            Halt("Could not recover the retainer interface within 60 seconds. Open the bell and press Start.");
+            // No submitted write enters this state. A missing/stale menu can be
+            // retried after backoff instead of permanently disabling the loop.
+            if (retainerListings.IsRetainerListOpen && !HasRetainerChildWindow)
+                retainerListings.CloseRetainerList();
+            ScheduleRetainerRetry($"Retainer menus did not recover in 60 seconds. {RetainerInterfaceSummary()}");
             return;
         }
         if (!DelayElapsed())
             return;
         nextActionAt = timeProvider.GetUtcNow().AddSeconds(1);
+        var observed = RetainerInterfaceSummary();
+        if (observed != lastRecoveryObservation)
+        {
+            lastRecoveryObservation = observed;
+            log.Add(AutomationLogLevel.Debug, $"Recovering: {observed}");
+        }
         if (retainerListings.IsPriceEditorOpen)
         {
             retainerListings.CloseComparePrices();
@@ -1690,11 +1768,11 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
         else if (retainerListings.IsSellListOpen) retainerListings.CloseSellList();
         else if (retainerListings.IsTalkOpen) retainerListings.AdvanceTalk();
         else if (retainerListings.IsRetainerMenuOpen) retainerListings.CloseRetainerMenu();
-        else if (retainerListings.IsRetainerListOpen)
+        else if (!retainerListings.IsRetainerListOpen && timeProvider.GetUtcNow() >= nextBellInteractionAt)
         {
-            nextActionAt = timeProvider.GetUtcNow().AddMinutes(1);
-            Transition(AutomationState.WaitingToRetryRetainers,
-                $"Back at the bell. Retainer check retries at {nextActionAt.LocalDateTime:t}.");
+            nextBellInteractionAt = timeProvider.GetUtcNow().AddSeconds(5);
+            if (retainerListings.TryReopenRetainerList())
+                log.Add(AutomationLogLevel.Information, "Reopening the nearby summoning bell after a menu failure; waiting for its retainer list.");
         }
     }
 

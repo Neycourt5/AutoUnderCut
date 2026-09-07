@@ -31,6 +31,7 @@ public sealed class RetainerAutomationTests
         run.Game.FailNextSelection = true;
         run.Bot.StartNow();
         run.Tick();
+        run.Tick(); // ready list must remain stable before selection
         Assert.Equal(AutomationState.RecoveringRetainerInterface, run.Bot.State);
         run.Tick();
         Assert.Equal(AutomationState.WaitingToRetryRetainers, run.Bot.State);
@@ -71,16 +72,17 @@ public sealed class RetainerAutomationTests
     }
 
     [Fact]
-    public void MenuThatCannotCloseStopsAfterRecoveryDeadline()
+    public void MissingBellSchedulesAutomaticRecoveryAfterTheDeadline()
     {
         using var run = new Session();
         run.Game.FailNextSelection = true;
-        run.Bot.StartNow(); run.Tick();
+        run.Bot.StartNow(); run.Tick(); run.Tick();
         run.Game.BellOpen = false;
         run.Tick(61);
-        Assert.Equal(AutomationState.Halted, run.Bot.State);
-        Assert.True(run.Bot.RequiresManualRestart);
+        Assert.Equal(AutomationState.WaitingToRetryRetainers, run.Bot.State);
+        Assert.False(run.Bot.RequiresManualRestart);
         Assert.Contains("60 seconds", run.Bot.Status.Detail);
+        Assert.Contains("retries automatically", run.Bot.Status.Detail);
     }
 
     [Fact]
@@ -146,14 +148,118 @@ public sealed class RetainerAutomationTests
         Assert.Equal(6596u, run.Game.Listings.Single(x => x.ItemId == 13721).CurrentPrice);
     }
 
+    [Fact]
+    public void DroppedSelectionIsRetriedOnceAfterTheFreshBellSettles()
+    {
+        using var run = new Session();
+        run.Game.DropSelections = 1;
+        run.Bot.StartNow();
+        run.Tick();
+        Assert.Equal(0, run.Game.Selections);
+        run.Tick();
+        Assert.Equal(1, run.Game.Selections);
+        run.Tick(4);
+        Assert.Equal(1, run.Game.Selections);
+        run.Tick(1);
+        Assert.Equal(2, run.Game.Selections);
+        run.CompletePass();
+        Assert.Equal(20, run.Bot.LastKnownFreeSaleSlots);
+        Assert.False(run.Bot.RequiresManualRestart);
+    }
+
+    [Fact]
+    public void AMenuThatDisappearsAfterSelectionReopensTheNearbyBellAndFinishes()
+    {
+        using var run = new Session();
+        run.Game.DropSelections = 1;
+        run.Game.CloseBellWhenSelectionDrops = true;
+        run.Game.CanReopenBell = true;
+        run.Bot.StartNow(); run.Tick(); run.Tick();
+        run.Tick(21);
+        Assert.Equal(AutomationState.RecoveringRetainerInterface, run.Bot.State);
+        run.Tick();
+        Assert.Equal(1, run.Game.BellInteractions);
+        Assert.True(run.Game.BellOpen);
+        for (var i = 0; i < 100 && run.Bot.State != AutomationState.WaitingForScheduledRun; i++) run.Tick();
+        Assert.Equal(AutomationState.WaitingForScheduledRun, run.Bot.State);
+        Assert.False(run.Bot.RequiresManualRestart);
+        Assert.Equal(20, run.Bot.LastKnownFreeSaleSlots);
+        Assert.Equal(2, run.Game.Selections);
+    }
+
+    [Fact]
+    public void RecoveryAcceptsAReadyBellEvenWhenTheNextFrameArrivesAfterTheDeadline()
+    {
+        using var run = new Session();
+        run.Game.FailNextSelection = true;
+        run.Bot.StartNow(); run.Tick(); run.Tick();
+        run.Tick(61);
+        Assert.Equal(AutomationState.WaitingToRetryRetainers, run.Bot.State);
+        Assert.True(run.Game.BellOpen);
+        Assert.Equal(0, run.Game.BellCloses);
+    }
+
+    [Fact]
+    public void ProlongedMenuOutageBacksOffThenRecoversWhenTheBellReturns()
+    {
+        using var run = new Session();
+        run.Game.DropSelections = 1;
+        run.Game.CloseBellWhenSelectionDrops = true;
+        run.Bot.StartNow(); run.Tick(); run.Tick(); run.Tick(21);
+        // Six hours with no usable bell. Recovery must not click every frame or
+        // permanently latch after its fourth attempt.
+        for (var i = 0; i < 6 * 60 * 60; i++) run.Tick(1);
+        Assert.False(run.Bot.RequiresManualRestart);
+        Assert.Null(run.Bot.LastKnownFreeSaleSlots);
+        Assert.InRange(run.Game.BellInteractions, 12, 900);
+        var before = run.Game.BellInteractions;
+        run.Game.CanReopenBell = true;
+        for (var i = 0; i < 200 && run.Bot.State != AutomationState.WaitingForScheduledRun; i++) run.Tick(5);
+        Assert.Equal(AutomationState.WaitingForScheduledRun, run.Bot.State);
+        Assert.Equal(before + 1, run.Game.BellInteractions);
+        Assert.Equal(20, run.Bot.LastKnownFreeSaleSlots);
+        Assert.Equal(0, run.Game.ListingSubmissions);
+    }
+
+    [Fact]
+    public void AnUninitialisedVisibleBellIsReopenedInsteadOfSelected()
+    {
+        using var run = new Session();
+        run.Game.BellReady = false;
+        run.Game.CanReopenBell = true;
+        run.Bot.StartNow(); run.Tick(31);
+        Assert.Equal(AutomationState.RecoveringRetainerInterface, run.Bot.State);
+        run.Tick(61);
+        Assert.Equal(1, run.Game.BellCloses);
+        Assert.Equal(0, run.Game.Selections);
+        for (var i = 0; i < 100 && run.Bot.State != AutomationState.WaitingForScheduledRun; i++) run.Tick(2);
+        Assert.Equal(AutomationState.WaitingForScheduledRun, run.Bot.State);
+        Assert.Equal(1, run.Game.BellInteractions);
+    }
+
+    [Fact]
+    public void DisablingAutomationDuringRecoveryPreventsAnotherBellInteraction()
+    {
+        using var run = new Session();
+        run.Game.DropSelections = 1;
+        run.Game.CloseBellWhenSelectionDrops = true;
+        run.Bot.StartNow(); run.Tick(); run.Tick(); run.Tick(21);
+        run.Config.Current.DisableStockAutomation();
+        run.Game.CanReopenBell = true;
+        for (var i = 0; i < 100; i++) run.Tick(30);
+        Assert.Equal(0, run.Game.BellInteractions);
+        Assert.Equal(AutomationState.Completed, run.Bot.State);
+    }
+
     private sealed class Session : IDisposable
     {
         public Game Game { get; } = new();
         public AutomationController Bot { get; }
+        public ConfigurationService Config { get; } = new();
         private readonly Clock clock = new();
         public Session()
         {
-            var config = new ConfigurationService();
+            var config = Config;
             config.Current.EnableStockAutomation();
             config.Current.RepeatMinimumMinutes = config.Current.RepeatMaximumMinutes = 5;
             Bot = new(Game, Game, Game, new PricingStrategyService(), new PortfolioValuationService(),
@@ -183,17 +289,40 @@ public sealed class RetainerAutomationTests
         private bool menuOpen;
         private bool sellOpen;
         public bool FailNextSelection;
+        public int DropSelections;
+        public bool CloseBellWhenSelectionDrops;
+        public bool BellReady = true;
+        public bool CanReopenBell;
+        public int Selections;
+        public int BellInteractions;
+        public int BellCloses;
         public bool RetainerDataReady = true;
         public bool UnverifiedListing;
         public int CompletedPasses;
         public int ListingSubmissions;
         public override bool IsRetainerListOpen => BellOpen;
+        public override bool IsRetainerListReady => BellOpen && BellReady && RetainerDataReady;
+        public override bool TryReopenRetainerList()
+        {
+            BellInteractions++;
+            if (!CanReopenBell) return false;
+            BellOpen = BellReady = true;
+            return true;
+        }
+        public override void CloseRetainerList() { BellCloses++; BellOpen = false; }
         public override bool IsRetainerMenuOpen => menuOpen;
         public override bool IsSellListOpen => sellOpen;
         public override IReadOnlyList<int> AvailableRetainerIndices => RetainerDataReady ? [0] : [];
         public override bool SelectRetainer(int index)
         {
+            Selections++;
             if (FailNextSelection) { FailNextSelection = false; return false; }
+            if (DropSelections > 0)
+            {
+                DropSelections--;
+                if (CloseBellWhenSelectionDrops) BellOpen = false;
+                return true;
+            }
             BellOpen = false; menuOpen = true; return true;
         }
         public override bool SelectSellItems() { menuOpen = false; sellOpen = true; return true; }

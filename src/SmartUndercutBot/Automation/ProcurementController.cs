@@ -169,7 +169,7 @@ public sealed partial class ProcurementController : IDisposable
     public int PurchaseCapacity => AvailablePurchaseSlots();
     public uint ShoppingBudget => SpendableGil(newTrip: true);
     public string? ShoppingWaitReason => repricing.LastKnownFreeSaleSlots is null
-        ? "waiting for the first complete retainer check"
+        ? "waiting for a complete retainer check"
         : market.FreeInventorySlots <= configuration.Current.ProcurementInventoryReserve ? "waiting for free bag space"
         : AvailablePurchaseSlots() == 0 ? configuration.Current.ContinueShoppingWhenStocked
             ? $"comfortable trading stock is ready ({ResaleBagSlots}/{ComfortableStockTarget} sale stacks); watching for restocks"

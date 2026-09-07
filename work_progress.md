@@ -114,6 +114,34 @@ Primary source checks: [FFXIVClientStructs market proxy](https://github.com/aers
 [Lifestream market shortcut](https://github.com/NightmareXIV/Lifestream/blob/main/Lifestream/Tasks/Shortcuts/TaskMBShortcut.cs),
 [Lifestream public IPC](https://github.com/NightmareXIV/Lifestream/blob/main/Lifestream/IPC/IPCProvider.cs).
 
+## v1.0.0.55 - retainer recovery no longer latches after a shopping return
+
+The screenshot's "could not recover the retainer interface" was terminal: after a
+shopping trip returned to the bell, the next retainer selection never completed
+and recovery **halted permanently** 60 seconds later. The log for that session
+(session-20260907-100244) shows the trip itself went well - all four data centers
+scouted, items purchased, Sky Blue Dye repriced - and no unverified write was
+involved, so latching was pure loss.
+
+- That `Halt` is now `ScheduleRetainerRetry`, with cooldowns escalating 15s to
+  300s instead of stopping.
+- Selection waits for a retainer list that is **ready and settled** for a second
+  with no child window open, rather than firing at a list still initialising.
+- A dropped selection callback is retried once; a menu that vanishes reopens the
+  nearby bell.
+- `IsRetainerListReady` was added to the retainer service so "visible" and
+  "usable" are no longer conflated.
+- Failures log a full `Retainer UI:` state summary, so the next one is
+  diagnosable from the log rather than a screenshot.
+
+Uncertain writes still latch: a pending auto-listing, an in-flight commit or gil
+verification, or a submitted-but-unconfirmed row still halts rather than retrying,
+which is the one case where repeating is worse than stopping.
+
+Seven regression tests cover dropped selections, a vanished menu, a bell that is
+visible but uninitialised, a prolonged outage that backs off then recovers, a
+late frame after the deadline, and automation being disabled mid-recovery.
+
 ## v1.0.0.53 - stock health by value, longer trips, no redundant home sweep
 
 The loop is working now: it reached Adamantoise and Cactuar and kept the retainers

@@ -5,6 +5,8 @@ using Dalamud.Memory;
 using Dalamud.Plugin.Services;
 using Dalamud.Utility;
 using FFXIVClientStructs.FFXIV.Client.Game;
+using FFXIVClientStructs.FFXIV.Client.Game.Control;
+using FFXIVClientStructs.FFXIV.Client.Game.Object;
 using FFXIVClientStructs.FFXIV.Client.UI;
 using FFXIVClientStructs.FFXIV.Component.GUI;
 using Lumina.Excel.Sheets;
@@ -30,6 +32,32 @@ public sealed unsafe class RetainerListingService : IRetainerListingService
     }
 
     public bool IsRetainerListOpen => IsAddonVisible("RetainerList");
+    public bool IsRetainerListReady
+    {
+        get
+        {
+            var addon = GetAddon("RetainerList");
+            return addon != null && addon->IsReady && AvailableRetainerIndices.Count > 0;
+        }
+    }
+
+    public bool TryReopenRetainerList()
+    {
+        if (IsRetainerListOpen || IsRetainerMenuOpen || IsSellListOpen || IsTalkOpen ||
+            IsPriceEditorOpen || IsContextMenuOpen || IsBankOpen || !clientState.IsLoggedIn ||
+            objectTable.LocalPlayer is not { } player) return false;
+        var bell = objectTable.Where(x => x.Name.TextValue.Equals("Summoning Bell", StringComparison.OrdinalIgnoreCase))
+            .OrderBy(x => Vector3.DistanceSquared(x.Position, player.Position)).FirstOrDefault();
+        var target = TargetSystem.Instance();
+        return bell is not null && target != null && Vector3.DistanceSquared(bell.Position, player.Position) <= 25f &&
+            target->InteractWithObject((GameObject*)bell.Address, false) != 0;
+    }
+
+    public void CloseRetainerList()
+    {
+        var addon = GetAddon("RetainerList");
+        if (addon != null) addon->Close(true);
+    }
     public bool IsRetainerMenuOpen => IsAddonVisible("SelectString");
     public bool IsSellListOpen => IsAddonVisible("RetainerSellList");
     public bool IsContextMenuOpen => IsAddonVisible("ContextMenu");
@@ -218,7 +246,7 @@ public sealed unsafe class RetainerListingService : IRetainerListingService
     public bool SelectRetainer(int index)
     {
         var addon = GetAddon("RetainerList");
-        if (addon == null || index < 0 || index >= 10 || !AvailableRetainerIndices.Contains(index))
+        if (addon == null || !addon->IsReady || index < 0 || index >= 10 || !AvailableRetainerIndices.Contains(index))
             return false;
         FireCallback(addon, 2, index);
         return true;

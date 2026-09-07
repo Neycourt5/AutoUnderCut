@@ -1,3 +1,20 @@
+# Completed: v1.0.0.55 retainer handoff and automatic menu recovery
+
+Screenshot: retainer recovery latched after a shopping return. Latest native log
+session-20260907-100244 confirms successful cross-DC scouting, purchased items,
+and Sky Blue Dye repricing. At 11:05:53 return-to-bell began a retainer pass;
+11:06:04 selection timed out; 11:07:04 recovery halted. No unverified write was
+logged for that failure. Exact addon state at the timeout was not recorded.
+
+- [x] Inspect current source, screenshot, and native shopping/retainer log.
+- [x] Wait for usable, settled retainer list after travel; retry missed selection.
+- [x] Reopen a nearby bell during menu-only recovery; bounded attempts and
+      increasing cooldowns, retaining manual stops and uncertain-write holds.
+- [x] Report recovery accurately instead of implying an unknown purchase.
+- [x] Regressions for dropped selections, closed bell recovery, long outages,
+      disabled automation and unverified writes; build/test and publish.
+- [x] Commit/main/tag push, Actions and public installer/ZIP verification.
+
 # Completed: v1.0.0.54 faster scouting and compared purchases
 
 Latest user steering: proceed as soon as real prices arrive; retry an unanswered
