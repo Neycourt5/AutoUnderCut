@@ -56,6 +56,7 @@ public sealed class MarketDataService : IMarketDataService, IDisposable
         }
         finally
         {
+            LastRequestSawAnyPacket = request.OfferingPackets > 0 || request.HistorySeen;
             LastRequestSummary =
                 $"item {itemId}: {request.OfferingPackets} offering packet(s), {request.RowsSeen} row(s), " +
                 $"history {(request.HistorySeen ? "received" : "not received")}, " +
@@ -71,6 +72,7 @@ public sealed class MarketDataService : IMarketDataService, IDisposable
     }
 
     public string LastRequestSummary { get; private set; } = string.Empty;
+    public bool LastRequestSawAnyPacket { get; private set; } = true;
 
     public void ClearCache()
     {

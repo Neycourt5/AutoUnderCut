@@ -91,6 +91,10 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
     private readonly HashSet<(ulong Retainer, short Slot)> skippedProblemListings = [];
     private int consecutiveRecoveries;
     private string? lastWriteFailure;
+    // The game silently drops market-board queries that come too fast, and a dropped
+    // query is indistinguishable from a slow one except that nothing ever arrives.
+    // Back off hard on those and recover once data flows again.
+    private int marketThrottleLevel;
     private readonly List<int> retainerRows = [];
     private readonly Dictionary<(ulong RetainerId, short Slot), PortfolioListingEstimate> portfolioListings = [];
     private readonly Dictionary<ulong, PortfolioRetainerBalance> portfolioRetainers = [];
@@ -836,8 +840,7 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
         if (TryReuseCurrentMarket(entry))
             return;
 
-        var cooldown = TimeSpan.FromMilliseconds(configuration.Current.MarketRequestCooldownMs);
-        var earliestRequestAt = lastMarketRequestAt + cooldown;
+        var earliestRequestAt = lastMarketRequestAt + CurrentMarketCooldown();
         if (timeProvider.GetUtcNow() < earliestRequestAt)
         {
             ReplaceCurrent(queue[currentIndex] with { Status = "Waiting for market cooldown" });
@@ -848,6 +851,15 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
         }
 
         RequestCurrentMarket();
+    }
+
+    // Doubling per dropped request, capped, so a throttled session slows down until
+    // the game answers again instead of burning three attempts a row forever.
+    private TimeSpan CurrentMarketCooldown()
+    {
+        var baseMs = (double)configuration.Current.MarketRequestCooldownMs;
+        var scaled = baseMs * Math.Pow(2, Math.Min(marketThrottleLevel, 5));
+        return TimeSpan.FromMilliseconds(Math.Min(scaled, 45_000));
     }
 
     private void CaptureSellerFee()
@@ -903,6 +915,14 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
         {
             var message = marketTask.Exception?.GetBaseException().Message ?? "Live market request timed out.";
             var failedEntry = queue[currentIndex];
+            if (!marketData.LastRequestSawAnyPacket && marketThrottleLevel < 5)
+            {
+                marketThrottleLevel++;
+                log.Add(AutomationLogLevel.Warning,
+                    $"The game sent no market data at all for {failedEntry.Listing.ItemName}, which is what a " +
+                    $"throttled market-board query looks like. Slowing requests to " +
+                    $"{CurrentMarketCooldown().TotalSeconds:N0}s apart.");
+            }
 
             if (marketRequestAttempts <= configuration.Current.MarketRequestRetryCount &&
                 retainerListings.IsPriceEditorOpen)
@@ -910,7 +930,7 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
                 TryMapCurrentPriceEditor(0);
                 var totalAttempts = configuration.Current.MarketRequestRetryCount + 1;
                 var retryDelay = configuration.Current.MarketRetryBackoffMs * marketRequestAttempts;
-                var cooldownAt = lastMarketRequestAt.AddMilliseconds(configuration.Current.MarketRequestCooldownMs);
+                var cooldownAt = lastMarketRequestAt + CurrentMarketCooldown();
                 nextActionAt = timeProvider.GetUtcNow().AddMilliseconds(retryDelay);
                 if (cooldownAt > nextActionAt)
                     nextActionAt = cooldownAt;
@@ -950,6 +970,12 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
         }
 
         currentMarket = marketTask.Result;
+        if (marketThrottleLevel > 0)
+        {
+            marketThrottleLevel = 0;
+            log.Add(AutomationLogLevel.Information,
+                "Live market data is flowing again; returning to the normal request cadence.");
+        }
         var entry = queue[currentIndex];
         if (currentMarket.ItemId != 0 && currentMarket.ItemId != entry.Listing.ItemId)
         {

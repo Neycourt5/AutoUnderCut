@@ -7,7 +7,7 @@ namespace SmartUndercutBot;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 27;
+    public int Version { get; set; } = 28;
     public bool AutomationEnabled { get; set; }
     public bool ProcessAllRetainers { get; set; } = true;
     public bool RepeatBellRuns { get; set; }
@@ -18,7 +18,7 @@ public sealed class Configuration : IPluginConfiguration
     public int MinimumDelayMs { get; set; } = 250;
     public int MaximumDelayMs { get; set; } = 450;
     public int MarketRequestTimeoutSeconds { get; set; } = 10;
-    public int MarketRequestCooldownMs { get; set; } = 1600;
+    public int MarketRequestCooldownMs { get; set; } = 3000;
     public int MarketRequestRetryCount { get; set; } = 2;
     public int MarketRetryBackoffMs { get; set; } = 2000;
     public int MaximumUpdatesPerSession { get; set; } = 200;
@@ -323,7 +323,15 @@ public sealed class Configuration : IPluginConfiguration
             TomeMaterialRulesSeeded = false;
             Version = 27;
         }
-        Version = Math.Max(Version, 27);
+        if (Version < 28)
+        {
+            // 1.6s between market-board queries is fast enough that the game starts
+            // dropping them silently a few rows into a pass.
+            if (MarketRequestCooldownMs < 3000)
+                MarketRequestCooldownMs = 3000;
+            Version = 28;
+        }
+        Version = Math.Max(Version, 28);
         LiveWorldStockHuntMaximumItems = Math.Clamp(LiveWorldStockHuntMaximumItems, 1, 40);
         ProcurementBufferGilPercent = Math.Clamp(ProcurementBufferGilPercent, 0m, 100m);
         ProcurementBagBufferStacks = Math.Clamp(ProcurementBagBufferStacks, 0, 50);

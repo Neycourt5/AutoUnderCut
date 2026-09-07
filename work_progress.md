@@ -11,6 +11,37 @@ Build: use `C:/Users/Acour/.dotnet/dotnet.exe` (SDK 10.0.301), **not** the PATH
 
 ---
 
+## v1.0.0.44 - the market board is throttling us
+
+The v1.0.0.43 diagnostics answered it on the first run:
+
+    Quickarm Materia XII ... [item 41781: 0 offering packet(s), 0 row(s),
+                              history not received, request id none]
+    Savage Might Materia XI ... [item 41760: 0 offering packet(s), ... id none]
+    General-purpose Pastel Purple Dye ... [item 13715: 0 offering packet(s), ...]
+
+**Nothing arrives at all** - no offerings, no history, no request id. The query is
+not slow, it is dropped. Two facts confirm the cause is rate limiting rather than
+anything item-specific:
+
+- Pastel Purple Dye *succeeded* at 23:43:01 and *failed three times* at 23:44:33-59.
+  Same item, same session. Not an item property.
+- The first three rows of every pass succeed, then everything fails. That is a
+  burst allowance followed by a throttle.
+
+`RequestComparePrices` fires callback 4 and returns true unconditionally, so a
+dropped query is invisible to the caller; the code then waited out the full 10s
+timeout and retried twice more at 1.6s cadence, which kept it throttled.
+
+Fix: `MarketDataService.LastRequestSawAnyPacket` distinguishes "nothing arrived"
+from a genuine failure. On that, `marketThrottleLevel` doubles the request cooldown
+(capped at 45s) and resets the moment data flows again. Base cooldown 1.6s -> 3s,
+migrated in config version 28.
+
+Note: the "N copied to clipboard" chat spam is **not this plugin**. 6,598 is the
+undercut target and Penny Pincher copies it when the Adjust Price window opens; we
+open that window a lot, so it copies a lot. Red herring.
+
 ## v1.0.0.43 - session log files, and the real cause found in dalamud.log
 
 ### Read the user's log directly - do this first, always
