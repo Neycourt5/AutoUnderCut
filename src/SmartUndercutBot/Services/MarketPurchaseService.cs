@@ -114,36 +114,71 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService
 
     private sealed class SearchUi(MarketPurchaseService owner) : IMarketSearchUi
     {
+        public string? LastBlocker { get; private set; }
+
         public bool PrepareSearch(string name)
         {
             var addon = owner.gameGui.GetAddonByName<AddonItemSearch>("ItemSearch");
             if (!CanUseInput(addon)) return false;
             addon->SetModeFilter(AddonItemSearch.SearchMode.Normal, 0);
-            return FocusSearchInput(addon);
+            if (FocusSearchInput(addon)) return true;
+            LastBlocker = "the search box has no focusable node";
+            return false;
         }
 
         public bool SubmitSearch(string name)
         {
             var addon = owner.gameGui.GetAddonByName<AddonItemSearch>("ItemSearch");
+            if (!CanUseInput(addon)) return false;
+
+            // End a stale listing request rather than waiting on it. Gating the name
+            // search on WaitingForListings deadlocks: that flag describes an in-flight
+            // request for one item's listings, nothing clears it on its own, and the
+            // search box then sits focused and empty for the rest of the route.
             var proxy = InfoProxyItemSearch.Instance();
-            if (!CanUseInput(addon) || proxy == null || proxy->WaitingForListings || !FocusSearchInput(addon))
+            if (proxy != null && proxy->WaitingForListings)
+            {
+                proxy->EndRequest();
+                owner.log.Add(AutomationLogLevel.Information,
+                    "MARKET SEARCH ended a stale listing request before searching again.");
+            }
+            if (!FocusSearchInput(addon))
+            {
+                LastBlocker = "the search box has no focusable node";
                 return false;
-            // Drive the input's own callbacks, which update the game's search
-            // state. Mirroring text into the addon's cached strings or calling
-            // RunSearch directly can leave a typed query with no submitted search.
+            }
+
+            // Drive the input's own callbacks, which update the game's search state.
+            // Mirroring text into the addon's cached strings can leave a typed query
+            // with no submitted search.
             SetSearchInput(addon, string.Empty);
             SetSearchInput(addon, name);
             var input = &addon->SearchTextInput->AtkComponentInputBase;
-            var result = input->Callback(&addon->AtkUnitBase, InputCallbackType.Enter,
-                input->RawString.StringPtr, input->EvaluatedString.StringPtr, input->CallbackEventKind);
+            var callback = "RunSearch fallback";
+            if (input->Callback != null)
+                callback = input->Callback(&addon->AtkUnitBase, InputCallbackType.Enter,
+                    input->RawString.StringPtr, input->EvaluatedString.StringPtr,
+                    input->CallbackEventKind).ToString();
+            else
+                // No input callback to drive: use the addon's own entry point rather
+                // than stalling the whole route.
+                addon->RunSearch(true);
             owner.log.Add(AutomationLogLevel.Information,
-                $"MARKET SEARCH Enter submitted '{name}'; mode={addon->Mode}, filter={addon->SelectedFilter}, callback={result}.");
+                $"MARKET SEARCH submitted '{name}'; mode={addon->Mode}, " +
+                $"filter={addon->SelectedFilter}, callback={callback}.");
             return true;
         }
 
-        private static bool CanUseInput(AddonItemSearch* addon) =>
-            addon != null && addon->IsReady && addon->IsVisible && addon->ResultsList != null &&
-            addon->SearchTextInput != null && addon->SearchTextInput->AtkComponentInputBase.Callback != null;
+        private bool CanUseInput(AddonItemSearch* addon)
+        {
+            LastBlocker = addon == null ? "the Item Search window is not loaded"
+                : !addon->IsVisible ? "the Item Search window is not visible"
+                : !addon->IsReady ? "the Item Search window is still initialising"
+                : addon->SearchTextInput == null ? "the search box is missing"
+                : addon->ResultsList == null ? "the results list is missing"
+                : null;
+            return LastBlocker is null;
+        }
 
         private static bool FocusSearchInput(AddonItemSearch* addon)
         {

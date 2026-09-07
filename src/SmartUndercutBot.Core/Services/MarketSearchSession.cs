@@ -5,6 +5,9 @@ public sealed record MarketSearchResult(bool Visible, uint ItemId, bool Waiting)
 
 public interface IMarketSearchUi
 {
+    // Names the exact precondition that refused the last call, so a stalled search
+    // reports why on screen instead of leaving the route to guess.
+    string? LastBlocker => null;
     bool PrepareSearch(string itemName);
     bool SubmitSearch(string itemName);
     IReadOnlyList<MarketSearchRow> ReadRows();
@@ -33,7 +36,9 @@ public sealed class MarketSearchSession(IMarketSearchUi ui, TimeProvider? clock 
         Reset();
         if (!ui.PrepareSearch(name))
         {
-            Status = "Waiting for the market-board search controls.";
+            Status = ui.LastBlocker is { } blocked
+                ? $"Waiting for the market-board search controls: {blocked}."
+                : "Waiting for the market-board search controls.";
             return false;
         }
         itemId = id;
@@ -51,7 +56,9 @@ public sealed class MarketSearchSession(IMarketSearchUi ui, TimeProvider? clock 
             if (time.GetUtcNow() < nextActionAt) return false;
             if (!ui.SubmitSearch(itemName))
             {
-                Status = $"Waiting to submit the item search for {itemName}.";
+                Status = ui.LastBlocker is { } blocked
+                    ? $"Waiting to submit the item search for {itemName}: {blocked}."
+                    : $"Waiting to submit the item search for {itemName}.";
                 return false;
             }
             submitted = true;

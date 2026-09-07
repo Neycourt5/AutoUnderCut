@@ -140,6 +140,26 @@ public sealed class MarketSearchSessionTests
         Assert.Equal(1, ui.ClosedResults);
     }
 
+    [Fact]
+    public void ABlockedSubmissionKeepsRetryingAndNamesWhatIsBlockingIt()
+    {
+        var ui = new SearchUi { CanSubmit = false, LastBlocker = "the search box is missing" };
+        var clock = new Clock();
+        var session = new MarketSearchSession(ui, clock);
+        Assert.True(session.Request(42, "Dye"));
+        clock.Advance(400);
+
+        Assert.False(session.Poll(42));
+        Assert.Contains("the search box is missing", session.Status);
+        Assert.Equal(0, ui.Submissions);
+
+        // It must keep trying rather than latching, and succeed once unblocked.
+        ui.CanSubmit = true;
+        Assert.False(session.Poll(42));
+        Assert.Equal(1, ui.Submissions);
+        Assert.DoesNotContain("the search box is missing", session.Status);
+    }
+
     private static MarketSearchSession Started(SearchUi ui, Clock clock)
     {
         var session = new MarketSearchSession(ui, clock);
@@ -166,7 +186,15 @@ public sealed class MarketSearchSessionTests
         public int ClosedResults;
         public bool AcceptRow = true;
         public bool PrepareSearch(string name) { Calls.Add("prepare"); return true; }
-        public bool SubmitSearch(string name) { Calls.Add("submit"); Submissions++; return true; }
+        public string? LastBlocker { get; set; }
+        public bool CanSubmit = true;
+        public bool SubmitSearch(string name)
+        {
+            Calls.Add("submit");
+            if (!CanSubmit) return false;
+            Submissions++;
+            return true;
+        }
         public IReadOnlyList<MarketSearchRow> ReadRows() => Rows;
         public bool ActivateRow(int index, uint id) { Activations.Add((index, id)); return AcceptRow; }
         public MarketSearchResult ReadResult() => Result;

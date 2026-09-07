@@ -11,6 +11,32 @@ Build: use `C:/Users/Acour/.dotnet/dotnet.exe` (SDK 10.0.301), **not** the PATH
 
 ---
 
+## v1.0.0.37 - the search deadlock v1.0.0.36 introduced
+Screenshot after .36: the Item Search box is focused and **empty**, the board shows
+the category pane, and Home reads "Waiting to submit the item search for
+General-purpose Pastel Purple Dye". That status is .36's own message, so
+PrepareSearch succeeded (the box is focused) and SubmitSearch was refusing.
+
+The only preconditions in SubmitSearch that are not also in PrepareSearch were
+`proxy == null` and `proxy->WaitingForListings`. **Self-inflicted deadlock:**
+`WaitingForListings` describes an in-flight request for one item's listings, has
+nothing to do with typing a name, and nothing clears it on its own - so once set,
+the search box sat focused and empty for the rest of the route.
+
+- SubmitSearch now calls `EndRequest()` on a stale listing request instead of
+  waiting on it.
+- `CanUseInput` no longer requires a non-null input callback; a missing callback
+  falls back to `RunSearch` rather than stalling the route.
+- `IMarketSearchUi.LastBlocker` names the exact failing precondition, and the
+  session puts it in the on-screen status: "Waiting to submit ...: the Item Search
+  window is still initialising", etc. No more guessing which check refused.
+- The submit log line records `mode` and `filter`, which will show whether the
+  addon is still in category mode when a search runs.
+
+Still unverified in game. If it stalls again the status now names the blocker; if
+the search submits but no rows match, compare the logged `mode`/`filter` against a
+manual name search.
+
 ## v1.0.0.36 - submit the market search before waiting for prices
 User screenshot: General-purpose Pastel Pink Dye appears in the input box, but
 ItemSearch still shows the empty wishlist while Home says revalidating prices.
