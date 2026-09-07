@@ -79,7 +79,11 @@ public sealed class MarketSearchSession(IMarketSearchUi ui, TimeProvider? clock 
             Status = $"Closing old item results before opening {itemName}.";
             return false;
         }
-        if (result.Waiting || time.GetUtcNow() < nextActionAt) return false;
+        // Only the wait for the results window itself belongs above. "Waiting" here
+        // means an in-flight *listing* request, which says nothing about whether the
+        // name-search rows have populated - gating on it left the search sitting at
+        // "waiting for the matching item row" until it timed out, every time.
+        if (time.GetUtcNow() < nextActionAt) return false;
 
         selected = false;
         var rows = ui.ReadRows();

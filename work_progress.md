@@ -11,6 +11,38 @@ Build: use `C:/Users/Acour/.dotnet/dotnet.exe` (SDK 10.0.301), **not** the PATH
 
 ---
 
+## v1.0.0.47 - shopping search never read its results
+
+Session log, shopping on another world:
+
+    00:09:45.035 MARKET SEARCH submitted 'Grade 4 Gemdraught of Strength';
+                 mode=Normal, filter=-1, callback=None.
+    00:09:45.035 MARKET SEARCH Search submitted ...; waiting for the matching item row.
+    00:10:14.682 MARKET SEARCH No item search is active.        <- 30s timeout, reset
+
+The status **never advanced** past the line set immediately after submission. It
+never reached either row-reading status ("no results are visible yet" / "N
+other/disabled row(s) are visible"), which proves `Poll` returned early every tick
+before `ReadRows`.
+
+The guard was `if (result.Waiting || now < nextActionAt) return false;`.
+`result.Waiting` is `InfoProxyItemSearch.WaitingForListings`, which describes an
+in-flight **listing** request and says nothing about whether the name-search rows
+have populated. With that flag set - and `SubmitSearch` logs "ended a stale
+listing request", so it was set - the rows were never read at all. This is the
+same confusion fixed for *submission* in v1.0.0.37, left behind in the read path.
+
+Removed from that guard; the flag still governs the results window after a row is
+opened. `SearchRowsAreReadEvenWhileAListingRequestIsInFlight` covers it and fails
+against the old guard.
+
+### Still to establish
+`callback=None` from the Enter callback means the submission may not be running
+the search at all. Until now that was invisible behind the read block. If the next
+log shows "Waiting for search rows ...; no results are visible yet" then the
+search genuinely is not running and the fallback belongs in `SubmitSearch`
+(`RunSearch` after Enter). Deliberately not layered in speculatively.
+
 ## v1.0.0.46 - the blue dye, the throttle theory retracted, wealth graph
 
 ### v1.0.0.44's throttle theory was wrong - retracted

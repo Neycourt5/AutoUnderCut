@@ -75,6 +75,23 @@ public sealed class MarketSearchSessionTests
     }
 
     [Fact]
+    public void SearchRowsAreReadEvenWhileAListingRequestIsInFlight()
+    {
+        var ui = new SearchUi();
+        var clock = new Clock();
+        var session = Started(ui, clock);
+        // The results window is closed but a listing request is still marked in
+        // flight. That flag describes listings, not the name search, so the matching
+        // row must still be found and opened.
+        ui.Result = new(false, 0, true);
+        ui.Rows = [new(0, 42, true)];
+        clock.Advance(600);
+
+        Assert.False(session.Poll(42));
+        Assert.Equal([(0, 42u)], ui.Activations);
+    }
+
+    [Fact]
     public void InFlightStaleResultsAreNotClosedOrAccepted()
     {
         var ui = new SearchUi();
