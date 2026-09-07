@@ -11,6 +11,35 @@ Build: use `C:/Users/Acour/.dotnet/dotnet.exe` (SDK 10.0.301), **not** the PATH
 
 ---
 
+## v1.0.0.42 - the price write is refused, and now says why
+Screenshot evidence: General-purpose Metallic Sky Blue Dye, own listing 6,699 x5,
+lowest competitor 6,599. Chat shows "6,598 copied to clipboard" four times. So the
+undercut target is computed **correctly** (6,599 - 1) and the write is what fails;
+the pricing logic is fine.
+
+Ruled out on the evidence: the 1,000,000 curated ceiling. At 6,699 the listing is
+nowhere near it, so `IsUnresolvedCuratedPrice` is false and the placeholder-repair
+branch is not involved. (That ceiling **is** still applied to every item rather
+than only curated consumables, which is a latent bug for anything trading above 1M
+- worth fixing separately, but it is not this.)
+
+`CommitPrice` can refuse for three reasons and all three were reported as bare
+sentences with no observed values. They now include them: the value the field
+actually holds versus the target, the addon value slot, whether the confirm button
+exists, and for a changed listing, what was expected versus what was found.
+
+A refused write also left the price unchanged, so the next pass evaluated the same
+listing and was refused identically - reopening the price page every pass forever.
+`NoteListingWriteFailure` drops the row after a second rejection for the rest of
+the run, and `LastWriteFailure` puts the reason on the Home screen instead of only
+in the log.
+
+### Still open
+The commit path has no test coverage: the fake would need the price editor,
+compare-prices, market snapshot, `TryReadListing` and `CommitPrice`. That is the
+next thing to build, and it is where the remaining diagnosis has to happen - the
+in-game reason string is needed to know which of the three refusals it is.
+
 ## v1.0.0.41 - the actual reopen loop, reproduced in a test
 v1.0.0.40 did not fix it. That change addressed the fill-only safety-seed path;
 the real loop was `RecoverInterface`, and it is reached from ten call sites

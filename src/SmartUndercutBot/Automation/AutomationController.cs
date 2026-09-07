@@ -90,6 +90,7 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
     private readonly Dictionary<(ulong Retainer, short Slot), int> listingFailureCounts = [];
     private readonly HashSet<(ulong Retainer, short Slot)> skippedProblemListings = [];
     private int consecutiveRecoveries;
+    private string? lastWriteFailure;
     private readonly List<int> retainerRows = [];
     private readonly Dictionary<(ulong RetainerId, short Slot), PortfolioListingEstimate> portfolioListings = [];
     private readonly Dictionary<ulong, PortfolioRetainerBalance> portfolioRetainers = [];
@@ -161,6 +162,7 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
     public AutomationState State { get; private set; } = AutomationState.Idle;
     public int? LastKnownFreeSaleSlots { get; private set; }
     public bool RequiresManualRestart { get; private set; }
+    public string? LastWriteFailure => lastWriteFailure;
     public IReadOnlyList<StockExposure> ListedStock { get; private set; } = [];
     public bool IsActive => State is not (AutomationState.Idle or AutomationState.Completed or AutomationState.Halted or AutomationState.Faulted or AutomationState.WaitingForScheduledRun);
 
@@ -1168,6 +1170,7 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
             ReplaceCurrent(entry with { Status = "Commit rejected" });
             log.Add(AutomationLogLevel.Error,
                 $"{entry.Listing.ItemName}: update was skipped because the Adjust Price commit failed. {result.Message}");
+            NoteListingWriteFailure(entry.Listing, result.Message);
             if (retainerListings.IsPriceEditorOpen)
                 retainerListings.CancelPriceEditor();
             if (returnToAutoListingAfterCurrent)
@@ -1590,6 +1593,7 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
         listingFailureCounts.Clear();
         skippedProblemListings.Clear();
         consecutiveRecoveries = 0;
+        lastWriteFailure = null;
     }
 
     // Recovery returns to the bell and replays the pass, so without this a listing
@@ -1609,6 +1613,22 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
         log.Add(AutomationLogLevel.Error,
             $"SKIPPING {listing.ItemName} on {listing.RetainerName}: {reason} It failed {failures} times; " +
             "the rest of the run continues without it.");
+    }
+
+    // A rejected write leaves the price unchanged, so the next pass evaluates the
+    // same listing and is rejected identically - reopening the price page forever
+    // without ever updating it. Drop the row after a second rejection and say so.
+    private void NoteListingWriteFailure(RetainerListing listing, string reason)
+    {
+        var key = (listing.RetainerId, listing.Slot);
+        var failures = listingFailureCounts.GetValueOrDefault(key) + 1;
+        listingFailureCounts[key] = failures;
+        if (failures < 2 || !skippedProblemListings.Add(key))
+            return;
+        lastWriteFailure = $"{listing.ItemName} on {listing.RetainerName}: {reason}";
+        log.Add(AutomationLogLevel.Error,
+            $"SKIPPING {listing.ItemName} on {listing.RetainerName} for the rest of this run: the Adjust Price " +
+            $"write was rejected {failures} times. {reason}");
     }
 
     private void PollInterfaceRecovery()

@@ -332,7 +332,11 @@ public sealed unsafe class RetainerListingService : IRetainerListingService
             current.RetainerId != expected.RetainerId || current.ItemId != expected.ItemId ||
             current.Quantity != expected.Quantity || current.CurrentPrice != expected.CurrentPrice ||
             current.IsHighQuality != expected.IsHighQuality)
-            return new(false, "The underlying listing changed after evaluation; update was cancelled.");
+            return new(false, current is null
+                ? $"Slot {expected.Slot} could not be re-read before the write; update was cancelled."
+                : $"The listing changed after evaluation; update was cancelled. Expected {expected.ItemName} " +
+                  $"x{expected.Quantity} at {expected.CurrentPrice:N0} in slot {expected.Slot}, " +
+                  $"found {current.ItemName} x{current.Quantity} at {current.CurrentPrice:N0}.");
 
         // SetValue is the same safe component path used by established repricers. It
         // overwrites any Penny Pincher prefill and dispatches the numeric-input change.
@@ -346,9 +350,15 @@ public sealed unsafe class RetainerListingService : IRetainerListingService
             FireCallback(&addon->AtkUnitBase, 2, (int)targetPrice);
         if (addon->AskingPrice->Value != targetPrice || addon->AtkUnitBase.AtkValues == null ||
             addon->AtkUnitBase.AtkValuesCount <= 5 || addon->AtkUnitBase.AtkValues[5].Int != targetPrice)
-            return new(false, "The Adjust Price input did not accept the target value.");
+            return new(false,
+                $"The Adjust Price input did not accept {targetPrice:N0}. The field reads " +
+                $"{addon->AskingPrice->Value:N0} and the addon value reads " +
+                $"{(addon->AtkUnitBase.AtkValues != null && addon->AtkUnitBase.AtkValuesCount > 5 ? addon->AtkUnitBase.AtkValues[5].Int : -1)}.");
         if (addon->Confirm == null || !addon->Confirm->IsEnabled)
-            return new(false, "The Adjust Price confirmation button is unavailable.");
+            return new(false,
+                $"The Adjust Price confirm button is unavailable with {targetPrice:N0} entered " +
+                $"(button present: {addon->Confirm != null}). The game usually disables it when it has not " +
+                "registered a changed price.");
 
         // Callback 0 is RetainerSell's native Confirm action. Do not synthesize a raw
         // ReceiveEvent here: the event object requires game-owned data and caused an

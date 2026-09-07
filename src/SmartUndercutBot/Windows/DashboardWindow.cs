@@ -128,6 +128,8 @@ public sealed class DashboardWindow : Window
             : procurement.ShoppingWaitReason is { } waitReason ? $"Shopping: {waitReason}. Retainer checks continue."
             : procurement.Status.Detail;
         ImGui.TextWrapped(detail);
+        if (automation.LastWriteFailure is { } writeFailure)
+            ImGui.TextWrapped($"A price update was refused by the game and that listing is being left alone: {writeFailure}");
         if (stockAutomation.NeedsAttention)
             ImGui.TextWrapped("Check the last purchase or listing in the game before restarting. Activity has been held to avoid repeating an unverified action.");
 
