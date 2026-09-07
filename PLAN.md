@@ -1,3 +1,26 @@
+# Active: v1.0.0.57 sales-per-day priority and cached-loop validation
+
+The .55 recovery changes and .56 cached-price/top-up changes were committed by
+another active workspace session while this task was running. Preserve them.
+Latest user screenshots request actual sales/day as a higher shopping priority.
+
+- [x] Confirm .54 native purchases, all-four-DC travel and Sky Blue repricing.
+- [x] Confirm .55 contains this task's tested retainer recovery fixes.
+- [x] Parse home-world HQ/NQ sales velocity and preserve it through data merges;
+      use actual demand before category priority in scouting and purchase plans.
+- [x] Show the sales/day number used in shopping comparisons and logs.
+- [x] Correct Universalis statsWithin from 604800ms to 604800000ms (seven days).
+- [x] Skip fully known worlds before travel; refresh repriced/sold offers during
+      buying revisits, invalidate failed reads, and count reused home evidence.
+- [x] Apply the fill margin through live tax checks and resale cost protection;
+      reserve normal-plan fees and inventory, and allow fill buys only for actual
+      uncovered retainer slots (not the spare bag buffer).
+- [x] 236 tests pass, including repeated cached circuits, cache expiry, changed
+      winners, quality-specific demand, live fill buying and stock changes.
+- [x] Final 1.0.0.57 release build passes without warnings/errors; diff check clean.
+- [x] Remote main matches f1ffee7; v1.0.0.57 is unused; increment version.
+- [ ] Commit/push/tag and public installer verification.
+
 # Completed: v1.0.0.55 retainer handoff and automatic menu recovery
 
 Screenshot: retainer recovery latched after a shopping return. Latest native log

@@ -185,7 +185,9 @@ public sealed class UniversalisService : IUniversalisService, IDisposable
                     .ToArray(),
                 group.SelectMany(x => x.RecentSales)
                     .DistinctBy(x => (x.SoldAt, x.PricePerUnit, x.Quantity, x.IsHighQuality))
-                    .ToArray()))
+                    .ToArray(),
+                group.Select(x => x.NqSalesPerDay).Max(),
+                group.Select(x => x.HqSalesPerDay).Max()))
             .ToArray();
     }
 
@@ -199,7 +201,7 @@ public sealed class UniversalisService : IUniversalisService, IDisposable
     {
         var itemIds = string.Join(',', enabled.Select(x => x.ItemId));
         var endpoint = $"https://universalis.app/api/v2/{Uri.EscapeDataString(scope)}/{itemIds}" +
-                       "?listings=100&entries=100&statsWithin=604800";
+                       "?listings=100&entries=100&statsWithin=604800000";
         for (var attempt = 1; attempt <= MaximumAttempts; attempt++)
         {
             if (attempt > 1)

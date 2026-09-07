@@ -118,7 +118,7 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
                         targetSalePrice,
                         ceiling,
                         (uint)expectedProfit,
-                        1));
+                        1, SalesPerDay: SalesVelocityPolicy.DailyUnits(market, quality)));
                 }
             }
         }
@@ -224,9 +224,8 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
         // profitable combinations with a small wallet. Compare complete feasible
         // plans instead of letting one expensive stack consume the whole budget.
         ulong Cost(ProcurementOrder x) => PurchaseCost(x.PricePerUnit, x.Quantity, buyerFee);
-        // Lower tour priority means higher-volume stock: raid food and potions before
-        // dyes before materia. Keeping retainers stocked is the goal, so a fast mover
-        // is worth more than a slightly richer margin on something that sits.
+        // Home-world sales velocity measures demand. Category preferences break
+        // ties instead of guessing that every potion outsells every dye.
         int Priority(ProcurementOrder x) => rules.TryGetValue(x.ItemId, out var rule) ? rule.TourPriority : int.MaxValue;
         var strategies = new[]
         {
@@ -234,6 +233,8 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
             candidates.OrderByDescending(x => (double)x.ExpectedProfit / Math.Max(1UL, Cost(x))).ThenBy(Cost),
             candidates.OrderByDescending(x => x.ExpectedProfit / Math.Sqrt(Math.Max(1UL, Cost(x)))).ThenBy(Cost),
             candidates.OrderBy(Priority).ThenByDescending(x => (double)x.ExpectedProfit / Math.Max(1UL, Cost(x))).ThenBy(Cost),
+            candidates.OrderByDescending(x => x.SalesPerDay).ThenBy(Priority)
+                .ThenByDescending(x => (double)x.ExpectedProfit / Math.Max(1UL, Cost(x))).ThenBy(Cost),
         };
         var plans = new List<ProcurementPlan>();
         foreach (var strategy in strategies)
@@ -263,6 +264,7 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
         // Filling more sale slots beats a marginally richer plan that leaves them
         // empty, and among equal fills the higher-volume stock wins.
         return plans.OrderByDescending(x => x.Orders.Count)
+            .ThenByDescending(x => x.Orders.Sum(o => o.SalesPerDay))
             .ThenBy(x => x.Orders.Sum(Priority))
             .ThenByDescending(x => x.Orders.Sum(y => (long)y.ExpectedProfit))
             .ThenByDescending(x => x.Orders.Select(y => y.ItemId).Distinct().Count())

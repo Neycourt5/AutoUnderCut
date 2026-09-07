@@ -17,8 +17,8 @@ public sealed partial class ProcurementController
     private DateTimeOffset priorityDepartedAt;
     private int priorityWorldsCompleted;
     private readonly List<ProcurementMarketListing> scoutListings = [];
-    // What was seen where, and when. Prices barely move within a day, so knowledge
-    // is kept between trips and a world/item pair is only re-read once it goes stale.
+    // Remember routing hints between trips. Prices can change within this window;
+    // every selected purchase still needs a fresh live price and tax check.
     private readonly Dictionary<(string World, uint Item), DateTimeOffset> scoutObservedAt = new();
     private readonly Dictionary<string, HashSet<uint>> scoutItems = new(StringComparer.OrdinalIgnoreCase);
     private DateTimeOffset? comparisonBuyingStarted;
@@ -38,6 +38,13 @@ public sealed partial class ProcurementController
 
     public DateTimeOffset? HomePricesUpdatedAt =>
         homePriceTimes.Count == 0 ? null : homePriceTimes.Values.Max();
+
+    public decimal HomeSalesPerDay(uint itemId, bool highQuality) => SalesVelocityPolicy.DailyUnits(
+        priorityDemand.FirstOrDefault(m => m.ItemId == itemId), highQuality, timeProvider.GetUtcNow());
+
+    private decimal RuleSalesPerDay(ProcurementRule rule) => new[] { false, true }
+        .Where(q => ResaleStockPolicy.BuyableQuality(rule, q, configuration.Current.BuyHighQualityOnly))
+        .Select(q => HomeSalesPerDay(rule.ItemId, q)).DefaultIfEmpty().Max();
 
     private async Task<IReadOnlyList<ProcurementMarketItem>> ScanPriorityRegionAsync(
         IReadOnlyList<ProcurementRule> rules, string home, CancellationToken token)
@@ -89,13 +96,18 @@ public sealed partial class ProcurementController
             // Reserve half the quick scan for rotating high-volume flips, so
             // stale or missing regional hints cannot hide new bargains forever.
             var hinted = hints.Where(x => x.Listing.WorldName.Equals(world, StringComparison.OrdinalIgnoreCase) && x.Score > 0)
-                .OrderByDescending(x => x.Score).Select(x => x.Listing.ItemId).Distinct().Take(Math.Max(1, limit / 2));
+                .OrderByDescending(x => HomeSalesPerDay(x.Listing.ItemId, x.Listing.IsHighQuality))
+                .ThenByDescending(x => x.Score).Select(x => x.Listing.ItemId).Distinct().Take(Math.Max(1, limit / 2));
             var offset = i * Math.Max(1, limit / 2) % stockHuntRules.Count;
             var rotated = stockHuntRules.Skip(offset).Concat(stockHuntRules.Take(offset)).Select(r => r.ItemId);
             var resumed = world.Equals(config.PriorityNextWorld, StringComparison.OrdinalIgnoreCase) && config.PriorityNextItem != 0
                 ? new[] { config.PriorityNextItem } : [];
             scoutItems[world] = resumed.Concat(hinted).Concat(rotated).Distinct().Take(limit).ToHashSet();
         }
+        // A fresh cached world needs no physical visit. Without this, "skip known
+        // prices" travelled to empty scans and then treated them as server failures.
+        stockHuntWorlds = new[] { homeWorld }.Concat(stockHuntWorlds.Skip(1)
+            .Where(w => scoutItems[w].Any(item => !ScoutKnowledgeIsFresh(w, item)))).ToList();
         log.Add(AutomationLogLevel.Information,
             $"REGIONAL SCOUT: compared {hints.Length} cached offers; first stops " +
             $"{string.Join(" > ", stockHuntWorlds.Skip(1).Take(config.PriorityWorldsPerTrip))}. " +
@@ -182,12 +194,12 @@ public sealed partial class ProcurementController
     private ProcurementPlan TopUpEmptySaleSlots(ProcurementPlan compared, IReadOnlyList<ProcurementMarketItem> markets)
     {
         var config = configuration.Current;
-        var free = AvailablePurchaseSlots() - compared.Orders.Count;
+        var uncovered = Math.Max(0, Math.Min(repricing.LastKnownFreeSaleSlots ?? 0, config.ProcurementTargetSaleSlots) - ResaleBagSlots);
+        var free = Math.Min(AvailablePurchaseSlots(), uncovered) - compared.Orders.Count;
         if (free <= 0 || config.ProcurementFillRoiPercent >= config.ProcurementMinimumRoiPercent)
             return compared;
 
-        var spent = (ulong)compared.Orders.Sum(x => (long)x.PricePerUnit * x.Quantity);
-        var budget = (uint)Math.Max(0, (long)SpendableGil() - (long)spent);
+        var budget = (uint)Math.Max(0, (long)SpendableGil() - compared.TotalCost);
         if (budget == 0) return compared;
 
         var taken = compared.Orders.Select(x => (x.WorldName, x.ListingId)).ToHashSet();
@@ -199,7 +211,7 @@ public sealed partial class ProcurementController
             .Concat(compared.Orders.Select(o => new StockExposure(o.ItemId, o.IsHighQuality, o.Quantity, 1)))
             .ToArray();
         var fill = planner.BuildPlan(new(remaining, ShoppingRules(stockHuntRules), budget, free,
-            Math.Max(0, (int)market.FreeInventorySlots - config.ProcurementInventoryReserve),
+            Math.Max(0, (int)market.FreeInventorySlots - config.ProcurementInventoryReserve - compared.SaleSlots),
             config.ProcurementFillRoiPercent, config.ProcurementMinimumProfitPerUnit,
             HomeWorld: homeWorld, OwnedRetainerIds: retainerListings.OwnedRetainerIds,
             OwnedStock: owned, MaximumWeeklySalesSharePercent: config.ProcurementWeeklySalesSharePercent,
@@ -211,7 +223,7 @@ public sealed partial class ProcurementController
             $"at the {config.ProcurementFillRoiPercent:N0}% fill margin, preferring the highest-volume stock.");
         return compared with
         {
-            Orders = compared.Orders.Concat(fill.Orders).ToArray(),
+            Orders = compared.Orders.Concat(fill.Orders.Select(o => o with { IsFillOrder = true })).ToArray(),
             TotalCost = (uint)Math.Min(uint.MaxValue, (ulong)compared.TotalCost + fill.TotalCost),
             ExpectedProfit = (uint)Math.Min(uint.MaxValue, (ulong)compared.ExpectedProfit + fill.ExpectedProfit),
             SaleSlots = compared.SaleSlots + fill.SaleSlots,
@@ -230,10 +242,8 @@ public sealed partial class ProcurementController
                     .Where(s => s.IsHighQuality == quality && s.PricePerUnit > 0 &&
                         s.SoldAt >= timeProvider.GetUtcNow().AddDays(-7) && s.SoldAt <= timeProvider.GetUtcNow())
                     .Sum(s => (long)s.Quantity) >= Math.Max(1, rule.MinimumWeeklyUnitsSold)))
-            .OrderBy(x => x.TourPriority)
-            .ThenByDescending(rule => markets.Where(m => m.ItemId == rule.ItemId)
-                .SelectMany(m => m.RecentSales).Where(s => s.SoldAt >= timeProvider.GetUtcNow().AddDays(-7))
-                .Sum(s => (long)s.Quantity))
+            .OrderByDescending(RuleSalesPerDay)
+            .ThenBy(x => x.TourPriority)
             .ThenBy(x => x.ItemName, StringComparer.OrdinalIgnoreCase).ToList();
         if (stockHuntRules.Count == 0 || ShoppingWaitReason is not null)
         {
@@ -251,8 +261,8 @@ public sealed partial class ProcurementController
         }
 
         SeedHomePricesFromRepricing();
-        PrepareScoutRoute();
         PruneStaleScoutKnowledge();
+        PrepareScoutRoute();
         comparisonBuyingStarted = null;
         purchasedSlotsByItem.Clear();
         stockHuntWorldIndex = stockHuntRuleIndex = 0;
@@ -449,7 +459,8 @@ public sealed partial class ProcurementController
             var observed = observations[^1];
             log.Add(AutomationLogLevel.Information,
                 $"PRICE CHECK {observed.At:O} {WorldName}: {rule.ItemName} {(quality ? "HQ" : "NQ")}: " +
-                $"{observed.Listings} listings / {observed.Units} units, lowest {observed.Lowest:N0}. {decision}");
+                $"{observed.Listings} listings / {observed.Units} units, lowest {observed.Lowest:N0}. " +
+                $"Home sales {HomeSalesPerDay(rule.ItemId, quality):N1} units/day. {decision}");
         }
         if (!exceptional || order is null) { AdvanceStockHuntRule(); return; }
         Plan = new(timeProvider.GetUtcNow(), Plan.Orders.Append(order).ToArray(),

@@ -890,12 +890,13 @@ public sealed class DashboardWindow : Window
                 ImGui.TextDisabled($"Last read {updated.LocalDateTime:g}");
             if (reference.Count == 0)
                 ImGui.TextDisabled("No home prices yet. They are read at the start of each shopping route.");
-            else if (ImGui.BeginTable("home-reference", 6,
+            else if (ImGui.BeginTable("home-reference", 7,
                          ImGuiTableFlags.RowBg | ImGuiTableFlags.Borders | ImGuiTableFlags.ScrollY | ImGuiTableFlags.Resizable,
                          new Vector2(0, 260 * ImGuiHelpers.GlobalScale)))
             {
                 ImGui.TableSetupColumn("Item");
                 ImGui.TableSetupColumn("Q", ImGuiTableColumnFlags.WidthFixed, 30);
+                ImGui.TableSetupColumn("Units/day", ImGuiTableColumnFlags.WidthFixed, 80);
                 ImGui.TableSetupColumn("Listings", ImGuiTableColumnFlags.WidthFixed, 65);
                 ImGui.TableSetupColumn("Lowest", ImGuiTableColumnFlags.WidthFixed, 85);
                 ImGui.TableSetupColumn("Median", ImGuiTableColumnFlags.WidthFixed, 85);
@@ -906,6 +907,7 @@ public sealed class DashboardWindow : Window
                     ImGui.TableNextRow();
                     ImGui.TableNextColumn(); ImGui.TextUnformatted(row.ItemName);
                     ImGui.TableNextColumn(); ImGui.TextUnformatted(row.IsHighQuality ? "HQ" : "NQ");
+                    ImGui.TableNextColumn(); ImGui.TextUnformatted(procurement.HomeSalesPerDay(row.ItemId, row.IsHighQuality).ToString("N1"));
                     ImGui.TableNextColumn(); ImGui.TextUnformatted(row.Listings.ToString("N0"));
                     ImGui.TableNextColumn(); ImGui.TextUnformatted(row.Lowest.ToString("N0"));
                     ImGui.TableNextColumn(); ImGui.TextUnformatted(row.Median.ToString("N0"));
@@ -918,6 +920,7 @@ public sealed class DashboardWindow : Window
                 }
                 ImGui.EndTable();
             }
+            ImGui.TextWrapped("Higher home-world sales/day gets shopping priority. Units/day counts quantities sold, with HQ and NQ separate. If Universalis has no rate, recent seven-day sales provide a conservative estimate. Profit and stock limits still apply.");
         }
         if (ImGui.CollapsingHeader("Recent live price comparisons"))
         {

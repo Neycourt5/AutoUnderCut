@@ -69,7 +69,18 @@ public static class UniversalisResponseParser
                 sales.Add(new(price, quantity, GetBoolean(sale, "hq"), DateTimeOffset.FromUnixTimeSeconds(timestamp)));
             }
         }
-        return new(itemId, itemName, listings, sales);
+        return new(itemId, itemName, listings, sales,
+            GetVelocity(item, "nqSaleVelocity"), GetVelocity(item, "hqSaleVelocity"));
+    }
+
+    private static decimal? GetVelocity(JsonElement element, string name)
+    {
+        if (!element.TryGetProperty(name, out var value)) return null;
+        decimal number;
+        var valid = value.ValueKind == JsonValueKind.Number ? value.TryGetDecimal(out number)
+            : decimal.TryParse(value.ValueKind == JsonValueKind.String ? value.GetString() : null,
+                NumberStyles.Float, CultureInfo.InvariantCulture, out number);
+        return valid && number is >= 0 and <= 1_000_000_000m ? number : null;
     }
 
     private static string GetString(JsonElement element, string name) =>

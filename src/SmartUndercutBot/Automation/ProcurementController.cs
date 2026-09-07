@@ -337,6 +337,8 @@ public sealed partial class ProcurementController : IDisposable
             return market with
             {
                 RecentSales = home?.RecentSales ?? [],
+                NqSalesPerDay = home?.NqSalesPerDay,
+                HqSalesPerDay = home?.HqSalesPerDay,
                 Listings = market.Listings
                     .Where(x => !string.Equals(x.WorldName, resaleWorld, StringComparison.OrdinalIgnoreCase))
                     .Concat(home?.Listings ?? []).Distinct().ToArray(),
@@ -848,6 +850,7 @@ public sealed partial class ProcurementController : IDisposable
         if (priorityShopping && stockHuntWorldIndex == 0 &&
             HomePriceIsFresh(stockHuntRules[stockHuntRuleIndex].ItemId))
         {
+            worldSuccessfulScans++; // Reused evidence is not a failed server read.
             stockHuntRuleIndex++;
             nextActionAt = timeProvider.GetUtcNow();
             State = ProcurementState.WaitingForStockHuntListings;
@@ -1120,6 +1123,12 @@ public sealed partial class ProcurementController : IDisposable
             BeginCurrentOrder();
             return;
         }
+        if (currentOrder.IsFillOrder && ResaleBagSlots >= Math.Min(repricing.LastKnownFreeSaleSlots ?? 0,
+            configuration.Current.ProcurementTargetSaleSlots))
+        {
+            SkipCurrentOrder($"SKIPPED BUY {currentOrder.ItemName}: empty retainer slots are already covered; the lower fill margin no longer applies.");
+            return;
+        }
         var rule = ShoppingRules(configuration.Current.ProcurementRules).FirstOrDefault(x => x.ItemId == currentOrder.ItemId);
         if (rule is null || !rule.Enabled || rule.LiquidateOnly ||
             !ResaleStockPolicy.BuyableQuality(rule, currentOrder.IsHighQuality, configuration.Current.BuyHighQualityOnly) ||
@@ -1143,6 +1152,11 @@ public sealed partial class ProcurementController : IDisposable
                 if (RetryListingRequest(currentOrder.ItemName))
                     return;
                 market.ResetListingRequest();
+                if (priorityShopping)
+                {
+                    scoutObservedAt.Remove((WorldName, currentOrder.ItemId));
+                    scoutListings.RemoveAll(x => x.WorldName == WorldName && x.ItemId == currentOrder.ItemId);
+                }
                 SkipCurrentOrder($"SKIPPED BUY {currentOrder.ItemName}: the live market request timed out.");
                 return;
             }
@@ -1152,6 +1166,15 @@ public sealed partial class ProcurementController : IDisposable
                 nextActionAt = timeProvider.GetUtcNow().AddMilliseconds(1_200);
             }
             return;
+        }
+        if (priorityShopping && !stockHuntScanning)
+        {
+            // Refresh remembered offers on a buying revisit too. A sold or repriced
+            // winner must not keep winning the next trip from yesterday's cache.
+            scoutListings.RemoveAll(x => x.WorldName == WorldName && x.ItemId == currentOrder.ItemId);
+            scoutListings.AddRange(market.ReadLiveListings(currentOrder.ItemId).Select(x => new ProcurementMarketListing(
+                x.ItemId, x.ListingId, x.RetainerId, WorldName, 0, x.PricePerUnit, x.Quantity, x.IsHighQuality)));
+            scoutObservedAt[(WorldName, currentOrder.ItemId)] = timeProvider.GetUtcNow();
         }
         if (!market.TrySelectLiveListing(currentOrder, retainerListings.OwnedRetainerIds, out var live) || live is null)
         {
@@ -1182,7 +1205,7 @@ public sealed partial class ProcurementController : IDisposable
             return;
         }
         var expectedNetProceeds = decimal.Floor(currentOrder.TargetSalePrice * 0.95m) * live.Quantity;
-        if (expectedNetProceeds < totalCost * (1m + configuration.Current.ProcurementMinimumRoiPercent / 100m) ||
+        if (expectedNetProceeds < totalCost * (1m + RequiredPurchaseRoi(currentOrder) / 100m) ||
             expectedNetProceeds - totalCost < (decimal)configuration.Current.ProcurementMinimumProfitPerUnit * live.Quantity)
         {
             SkipCurrentOrder($"SKIPPED BUY {currentOrder.ItemName}: the live buyer tax no longer meets the profit guards.");
@@ -1269,7 +1292,7 @@ public sealed partial class ProcurementController : IDisposable
             (purchaseCost + actual.Quantity - 1) / actual.Quantity);
         pricingRule.CostBasis = Math.Max(pricingRule.CostBasis, landedCostPerUnit);
         pricingRule.MinimumMarginPercent = Math.Max(
-            pricingRule.MinimumMarginPercent, configuration.Current.ProcurementMinimumRoiPercent);
+            pricingRule.MinimumMarginPercent, RequiredPurchaseRoi(actual));
         pricingRule.MinimumPrice = Math.Max(pricingRule.MinimumPrice,
             ProcurementPriceSafety.MinimumResalePrice(pricingRule.CostBasis,
                 pricingRule.MinimumMarginPercent, configuration.Current.ProcurementMinimumProfitPerUnit));
@@ -1295,6 +1318,9 @@ public sealed partial class ProcurementController : IDisposable
         log.Add(AutomationLogLevel.Warning, message);
         AdvanceOrder();
     }
+
+    private decimal RequiredPurchaseRoi(ProcurementOrder order) => order.IsFillOrder
+        ? configuration.Current.ProcurementFillRoiPercent : configuration.Current.ProcurementMinimumRoiPercent;
 
     private bool RetryListingRequest(string itemName)
     {

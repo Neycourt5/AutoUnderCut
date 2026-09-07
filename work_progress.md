@@ -11,6 +11,50 @@ Build: use `C:/Users/Acour/.dotnet/dotnet.exe` (SDK 10.0.301), **not** the PATH
 
 ---
 
+## v1.0.0.57 - actual sales/day priority and cached shopping recovery
+
+User screenshots ask to prioritize the sales/day information seen in other
+Universalis-backed plugins. Preserve .55 menu recovery and .56 price-memory and
+stock-fill changes, which another workspace session committed during this task.
+
+- Parse Universalis `nqSaleVelocity` and `hqSaleVelocity` separately. Preserve
+  home-world rates when merging regional price hints; regional demand must not
+  inflate the home resale market. Rank home checks and hinted away items by
+  eligible-quality daily units before category preferences. Purchase allocation
+  prefers higher total sales/day among equally full feasible plans. Existing
+  history, budget, quantity, exposure, fees and profit checks remain mandatory.
+- Missing rates conservatively use valid same-quality units sold in the last
+  seven days divided by seven; a reported zero stays zero. Ignore invalid values
+  and never substitute combined or NQ volume for HQ demand. Shopping's home price
+  table and PRICE CHECK logs show the daily-unit figure used.
+- Correct `statsWithin=604800` to `604800000`: this API parameter is milliseconds,
+  so the old request covered about ten minutes rather than seven days. Confirmed
+  against the primary source's V2 controller and velocity calculation:
+  [request window](https://github.com/Universalis-FFXIV/Universalis/blob/v2/src/Universalis.Application/Controllers/V2/CurrentlyShownController.cs),
+  [units/day calculation](https://github.com/Universalis-FFXIV/Universalis/blob/v2/src/Universalis.Application/Controllers/CurrentlyShownControllerBase.cs).
+- Keep .56's default 24-hour away-world observations across trips in this plugin
+  session. Filter fully known planned stops before travelling, instead of arriving
+  only to skip every item and count the stop as a failed read. Reused home prices
+  count as evidence; home quote freshness stays at the existing shorter limit.
+  Buying revisits replace remembered offers with current results, and a timed-out
+  buying read invalidates that item/world. Sold or repriced old winners cannot
+  keep winning against an obsolete snapshot. Purchases always need fresh reads.
+- Repair .56's lower-margin refill path: its 10% plans were still rejected by the
+  normal 20% live-purchase check. Mark fill orders and use their threshold through
+  live tax validation and acquisition cost protection. Only actual empty slots
+  not already covered by bags qualify; spare bag stock still needs normal ROI.
+  Reserve the normal plan's complete cost including fees and inventory slots
+  before planning a fill, and recheck uncovered slots before submitting it.
+
+Validation: 236 tests pass. Regressions cover reported/fallback quality rates,
+demand ahead of categories, unchanged money/profit guards, 31-world cached circuit
+with no repeat travel until expiry, repriced winner reconsideration, a real
+simulated 13% fill purchase, full retainers rejecting that buy, and bags becoming
+sufficient before submission. Final 1.0.0.57 plugin build passed with zero
+warnings/errors; diff check is clean. GitHub installer publication is pending.
+Native .54 logs confirm four-DC travel, purchases, and Sky Blue Dye repricing.
+This update's new behavior has not yet been exercised overnight in the live game.
+
 ## v1.0.0.54 - faster regional scouting and compare before buying (published)
 
 Latest request: reach other data centers sooner, skim quickly, compare normal

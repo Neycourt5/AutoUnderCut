@@ -42,7 +42,9 @@ public sealed record ProcurementMarketItem(
     uint ItemId,
     string ItemName,
     IReadOnlyList<ProcurementMarketListing> Listings,
-    IReadOnlyList<ProcurementSale> RecentSales);
+    IReadOnlyList<ProcurementSale> RecentSales,
+    decimal? NqSalesPerDay = null,
+    decimal? HqSalesPerDay = null);
 
 public sealed record ProcurementPlanRequest(
     IReadOnlyList<ProcurementMarketItem> Markets,
@@ -89,7 +91,9 @@ public sealed record ProcurementOrder(
     uint TargetSalePrice,
     uint MaximumAcceptableUnitPrice,
     uint ExpectedProfit,
-    int SaleSlots);
+    int SaleSlots,
+    decimal SalesPerDay = 0m,
+    bool IsFillOrder = false);
 
 public sealed record ProcurementPlan(
     DateTimeOffset CreatedAt,

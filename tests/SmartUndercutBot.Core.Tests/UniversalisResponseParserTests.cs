@@ -9,6 +9,44 @@ public sealed class UniversalisResponseParserTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public void DailyVelocityPreservesQualityAndFractionalUnits(bool multipleItems)
+    {
+        const string item = """{"itemID":1,"regularSaleVelocity":99999,"nqSaleVelocity":12.75,"hqSaleVelocity":"4.25"}""";
+        using var document = JsonDocument.Parse(multipleItems ? "{\"items\":{\"1\":" + item + "}}" : item);
+        var market = Assert.Single(UniversalisResponseParser.Parse(document.RootElement,
+            new Dictionary<uint, string> { [1] = "Food" }));
+        Assert.Equal(12.75m, market.NqSalesPerDay);
+        Assert.Equal(4.25m, market.HqSalesPerDay);
+    }
+
+    [Theory]
+    [InlineData("null")]
+    [InlineData("-1")]
+    [InlineData("\"NaN\"")]
+    [InlineData("1e99")]
+    [InlineData("true")]
+    public void InvalidVelocityIsMissingWhileZeroRemainsKnown(string invalid)
+    {
+        using var document = JsonDocument.Parse("{\"itemID\":1,\"nqSaleVelocity\":0,\"hqSaleVelocity\":" + invalid + "}");
+        var market = Assert.Single(UniversalisResponseParser.Parse(document.RootElement,
+            new Dictionary<uint, string> { [1] = "Food" }));
+        Assert.Equal(0m, market.NqSalesPerDay);
+        Assert.Null(market.HqSalesPerDay);
+    }
+
+    [Fact]
+    public void CombinedVelocityDoesNotStandInForAnAbsentQualityRate()
+    {
+        using var document = JsonDocument.Parse("""{"itemID":1,"regularSaleVelocity":500}""");
+        var market = Assert.Single(UniversalisResponseParser.Parse(document.RootElement,
+            new Dictionary<uint, string> { [1] = "Food" }));
+        Assert.Null(market.NqSalesPerDay);
+        Assert.Null(market.HqSalesPerDay);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public void WorldScopedResponsesSupplyWorldForListings(bool multipleItems)
     {
         const string item = """

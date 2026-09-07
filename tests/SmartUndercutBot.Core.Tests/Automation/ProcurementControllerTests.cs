@@ -876,7 +876,7 @@ public sealed class ProcurementControllerTests
     }
 
     [Fact]
-    public void PriorityChecksAllFlipsInConfiguredPriorityThenSalesVolumeOrder()
+    public void PriorityChecksAllFlipsByDailySalesBeforeCategoryPreference()
     {
         using var run = new Route(priority: true);
         run.Config.Current.ProcurementRules.Clear();
@@ -891,8 +891,140 @@ public sealed class ProcurementControllerTests
         run.Game.LiveProvider = (world, item) => [new(0, item, 10, 20, 2000, 99, false, 0)];
         run.Controller.RunNow();
         for (var i = 0; i < 100 && run.Game.Commands.Count == 0; i++) run.Tick(2);
-        Assert.Equal(new[] { 2u, 3u, 1u }, run.Game.Searches.Select(x => x.Item));
+        Assert.Equal(new[] { 3u, 2u, 1u }, run.Game.Searches.Select(x => x.Item));
         Assert.DoesNotContain(4u, run.Game.ScannedItemIds);
+    }
+
+    [Fact]
+    public void HomeSearchPriorityUsesReportedVelocityForTheBuyableQuality()
+    {
+        using var run = new Route(priority: true);
+        run.Config.Current.ProcurementRules.Add(new() { ItemId = 2, ItemName = "Fast NQ dye", TourPriority = 5 });
+        run.Game.DemandMarkets = [
+            new(1, "Popcorn", [], [new(2000, 700, true, DateTimeOffset.UtcNow)], NqSalesPerDay: 9000, HqSalesPerDay: 2),
+            new(2, "Fast NQ dye", [], [new(2000, 70, false, DateTimeOffset.UtcNow)], NqSalesPerDay: 500),
+        ];
+        run.Game.LiveProvider = (_, item) => [new(0, item, 10, 20, 2000, 99, item == 1, 0)];
+        run.Controller.RunNow();
+        for (var i = 0; i < 100 && run.Game.Commands.Count == 0; i++) run.Tick(2);
+        Assert.Equal(new[] { 2u, 1u }, run.Game.Searches.Select(x => x.Item));
+        Assert.Equal(2m, run.Controller.HomeSalesPerDay(1, true));
+        Assert.Equal(500m, run.Controller.HomeSalesPerDay(2, false));
+        Assert.Contains(run.Log.Messages, m => m.Contains("Home sales 500.0 units/day"));
+    }
+
+    [Theory]
+    [InlineData(5, true)]
+    [InlineData(0, false)]
+    public void LowerFillMarginCanPurchaseOnlyForUncoveredRetainerSlots(int emptySlots, bool shouldBuy)
+    {
+        using var run = new Route(priority: true);
+        run.Repricing.LastKnownFreeSaleSlots = emptySlots;
+        run.Config.Current.ProcurementMinimumRoiPercent = 20;
+        run.Config.Current.ProcurementFillRoiPercent = 10;
+        run.Game.AutomaticWorldArrival = run.Game.AutomaticPurchaseConfirmation = true;
+        run.Game.LiveProvider = (world, item) => world switch
+        {
+            "Siren" => [new(0, item, 11, 21, 2000, 99, true, 0)],
+            "Cactuar" => [new(0, item, 10, 20, 1600, 99, true, 7920)], // ~13% net ROI
+            _ => [],
+        };
+        run.Controller.RunNow();
+        for (var i = 0; i < 600 && run.Controller.IsActive; i++) run.Tick(2);
+        Assert.Equal(ProcurementState.Completed, run.Controller.State);
+        Assert.Equal(shouldBuy ? 1 : 0, run.Game.Purchases);
+        if (shouldBuy)
+        {
+            Assert.Equal(166_320u, run.Controller.Status.GilSpent);
+            Assert.Single(run.Ledger.Snapshot());
+            Assert.Equal(10m, run.Config.Current.PerItemRules[1].MinimumMarginPercent);
+            Assert.Contains(("Golem", 1u), run.Game.Searches);
+        }
+        else Assert.Empty(run.Ledger.Snapshot());
+    }
+
+    [Fact]
+    public void AFullCachedCircuitSkipsTravelAndRereadsAfterKnowledgeExpires()
+    {
+        using var run = new Route(priority: true);
+        run.Config.Current.PriorityWorldsPerTrip = 4;
+        run.Game.AutomaticWorldArrival = true;
+        run.Game.LiveProvider = (_, item) => [new(0, item, 10, 20, 2000, 99, true, 0)];
+        for (var trip = 0; trip < 8; trip++)
+        {
+            run.Repricing.IsActive = false;
+            run.Controller.RunNow();
+            for (var i = 0; i < 500 && run.Controller.IsActive; i++) run.Tick(2);
+            Assert.Equal(ProcurementState.Completed, run.Controller.State);
+        }
+        Assert.Equal(31, run.Controller.ScoutKnowledgeCoverage.Known);
+        run.Game.Commands.Clear();
+        run.Game.Searches.Clear();
+        run.Repricing.IsActive = false;
+        run.Controller.RunNow();
+        for (var i = 0; i < 500 && run.Controller.IsActive; i++) run.Tick(2);
+        Assert.Equal(ProcurementState.Completed, run.Controller.State);
+        Assert.Empty(run.Game.Commands);
+        Assert.DoesNotContain(run.Game.Searches, s => s.World != "Siren");
+        Assert.DoesNotContain(run.Log.Messages, m => m.Contains("consecutive worlds"));
+        run.Tick(25 * 3600);
+        run.Repricing.IsActive = false;
+        run.Controller.RunNow();
+        for (var i = 0; i < 500 && run.Controller.IsActive; i++) run.Tick(2);
+        Assert.Equal(ProcurementState.Completed, run.Controller.State);
+        Assert.Equal(4, run.Game.Commands.Count(c => c != "/li Siren"));
+        Assert.Contains(("Siren", 1u), run.Game.Searches);
+        Assert.Contains(("Cactuar", 1u), run.Game.Searches);
+    }
+
+    [Fact]
+    public void AChangedWinnerUpdatesRememberedPricesBeforeTheNextComparison()
+    {
+        using var run = new Route(priority: true);
+        run.Game.AutomaticWorldArrival = run.Game.AutomaticPurchaseConfirmation = true;
+        run.Game.LiveProvider = (world, item) => world switch
+        {
+            "Siren" => [new(0, item, 11, 21, 2000, 99, true, 0)],
+            "Cactuar" when run.Game.Commands.Count(c => c == "/li Cactuar") == 1 =>
+                [new(0, item, 10, 20, 1000, 99, true, 4950)],
+            "Cactuar" => [new(0, item, 10, 20, 1200, 99, true, 5940)],
+            _ => [],
+        };
+        run.Controller.RunNow();
+        for (var i = 0; i < 600 && run.Controller.IsActive; i++) run.Tick(2);
+        Assert.Equal(ProcurementState.Completed, run.Controller.State);
+        Assert.Empty(run.Game.Bought); // Respect the first comparison's 1000 ceiling.
+        run.Repricing.IsActive = false;
+        run.Controller.RunNow();
+        for (var i = 0; i < 600 && run.Controller.IsActive; i++) run.Tick(2);
+        Assert.Equal(ProcurementState.Completed, run.Controller.State);
+        Assert.Equal(("Cactuar", 1u, 99u), Assert.Single(run.Game.Bought));
+        Assert.Equal(124_740u, run.Controller.Status.GilSpent);
+        Assert.Equal(3, run.Game.Commands.Count(c => c == "/li Cactuar")); // Scout, first check, updated winner.
+    }
+
+    [Fact]
+    public void FillPurchaseIsCancelledIfExistingBagsCoverTheEmptySlots()
+    {
+        using var run = new Route(priority: true);
+        run.Repricing.LastKnownFreeSaleSlots = 1;
+        run.Config.Current.ProcurementMinimumRoiPercent = 20;
+        run.Config.Current.ProcurementFillRoiPercent = 10;
+        run.Game.AutomaticWorldArrival = run.Game.AutomaticPurchaseConfirmation = true;
+        run.Game.LiveProvider = (world, item) => world switch
+        {
+            "Siren" => [new(0, item, 11, 21, 2000, 99, true, 0)],
+            "Cactuar" => [new(0, item, 10, 20, 1600, 99, true, 7920)],
+            _ => [],
+        };
+        run.Controller.RunNow();
+        for (var i = 0; i < 600 && !run.Controller.Plan.Orders.Any(o => o.IsFillOrder); i++) run.Tick(2);
+        Assert.Contains(run.Controller.Plan.Orders, o => o.IsFillOrder);
+        run.Game.Inventory = 99;
+        for (var i = 0; i < 300 && run.Controller.IsActive; i++) run.Tick(2);
+        Assert.Equal(ProcurementState.Completed, run.Controller.State);
+        Assert.Empty(run.Game.Bought);
+        Assert.Contains(run.Log.Messages, m => m.Contains("lower fill margin no longer applies"));
     }
 
     [Fact]
