@@ -44,13 +44,24 @@ qualities, only the high-quality form is bought. Categories that have no
 high-quality form at all, such as dyes, stay tradeable. This applies to buying only
 - sell-only stock is still listed from the bags whatever its quality.
 
-**Spare resale stacks to keep in bags** (5 by default) are bought after stock covers
-real vacancies. Buffer purchases are limited to 20% of available capital by default,
-including the saved acquisition cost of resale stock already in the bags. Repeated
-trips do not reset that allowance. The four main bags are scanned even after a
-plugin reload; queued purchases and their matching inventory are counted once.
-Personal reserves do not use resale capacity. Set the spare-stack limit to 0 to
-buy only for slots that are already free.
+**Keep a comfortable stock in bags** is on by default. It targets about 20% of
+checked retainer capacity, bounded between 5 and 20 spare sale stacks: 60 sale
+slots means a target of 12. Per-item targets range from 1 to 3 spare sale stacks,
+based on how many of that item are listed. Stock gets topped up as it moves onto
+retainers. Sales-volume, profit and budget checks can leave the target partly empty.
+
+Spare purchases use up to 20% of available capital by default, counting the saved
+acquisition cost of trading stock already in bags. Repeated trips do not reset
+that allowance. Sale-only backlog and personal reserves do not count as trading
+stock. Real free bag space is always required. Periodic searches continue even
+when stocked; purchases and travel resume when suitable restock deals fit the
+limits. Disable comfortable-stock mode to use the older fixed spare-stack target.
+
+**Bag slots** means actual occupied inventory slots. **Units** means individual
+items. **Sale stacks** means future listings at each rule's selling quantity:
+397 HQ potions in one inventory slot, with 100 reserved, make three sale stacks
+of 99. Home and Stock show these separately instead of calling every small
+future sale lot a physical bag stack.
 
 Configure additional buying rules in **Shopping**. Dyes, materia and ethers are
 seeded as **sell-only**: everything held is listed from the bags with nothing kept

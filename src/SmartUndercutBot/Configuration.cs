@@ -7,7 +7,7 @@ namespace SmartUndercutBot;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 24;
+    public int Version { get; set; } = 25;
     public bool AutomationEnabled { get; set; }
     public bool ProcessAllRetainers { get; set; } = true;
     public bool RepeatBellRuns { get; set; }
@@ -33,6 +33,7 @@ public sealed class Configuration : IPluginConfiguration
     public bool ReinvestAvailableGil { get; set; } = true;
     public bool BuyHighQualityOnly { get; set; } = true;
     public int ProcurementBagBufferStacks { get; set; } = 5;
+    public bool ContinueShoppingWhenStocked { get; set; } = true;
     public decimal ProcurementBufferGilPercent { get; set; } = 20m;
     public uint ProcurementTravelReserve { get; set; } = 5_000;
     public decimal ProcurementWeeklySalesSharePercent { get; set; } = 25m;
@@ -302,7 +303,7 @@ public sealed class Configuration : IPluginConfiguration
                  x.ItemName.StartsWith("Wide-Spectrum ", StringComparison.OrdinalIgnoreCase)));
             Version = 23;
         }
-        Version = Math.Max(Version, 24);
+        Version = Math.Max(Version, 25);
         ProcurementBufferGilPercent = Math.Clamp(ProcurementBufferGilPercent, 0m, 100m);
         ProcurementBagBufferStacks = Math.Clamp(ProcurementBagBufferStacks, 0, 50);
         ProcurementTravelReserve = Math.Min(ProcurementTravelReserve, 100_000_000u);

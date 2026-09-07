@@ -16,6 +16,7 @@ public sealed class ProcurementRule
     // Sell what is already held, never buy more. Used for stock the player wants
     // cleared out rather than traded.
     public bool LiquidateOnly { get; set; }
+    public ProcurementRule Clone() => (ProcurementRule)MemberwiseClone();
 }
 
 public sealed record StockExposure(uint ItemId, bool IsHighQuality, uint Quantity, int SaleSlots);

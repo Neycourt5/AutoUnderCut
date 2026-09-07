@@ -30,7 +30,8 @@ public sealed record CuratedBagStock(
     uint? SuggestedPrice,
     bool IsHighQuality,
     int TargetStackSize,
-    bool Eligible);
+    bool Eligible,
+    int PhysicalBagSlots);
 
 public sealed class BagListingController : IDisposable
 {
@@ -442,7 +443,7 @@ public sealed class BagListingController : IDisposable
                     stackCount,
                     CalculateFloor(pricingRule),
                     plannedPrices.GetValueOrDefault((group.Key.ItemId, group.Key.IsHighQuality)) is var price && price > 0 ? price : null,
-                    group.Key.IsHighQuality, stackSize, eligible);
+                    group.Key.IsHighQuality, stackSize, eligible, group.Count());
             })
             .OrderBy(x => x.ItemName, StringComparer.OrdinalIgnoreCase)
             .ToArray();

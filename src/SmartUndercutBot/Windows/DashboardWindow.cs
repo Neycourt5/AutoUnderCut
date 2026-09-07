@@ -140,7 +140,7 @@ public sealed class DashboardWindow : Window
                 ImGui.Spacing();
                 ImGui.ProgressBar((float)(totalSlots - free) / totalSlots, new Vector2(-1, 0),
                     $"Last completed check: {totalSlots - free} / {totalSlots} sale slots filled");
-                ImGui.Text($"{free} empty slots   |   {procurement.ResaleBagSlots} resale stack(s) in bags   |   {procurementLedger.PendingSaleSlots} queued");
+                ImGui.Text($"{free} empty sale slots   |   {procurement.MarketableBagSlots} bag slots holding marketable items   |   {procurementLedger.PendingSaleSlots} queued to list");
             }
         }
         else
@@ -148,12 +148,14 @@ public sealed class DashboardWindow : Window
 
         if (status.State == AutomationState.WaitingForScheduledRun && status.NextActionAt is { } next)
             ImGui.Text($"Next retainer check: {next.LocalDateTime:t}");
-        if (!procurement.IsActive && procurement.Status.NextAutomaticScan is { } scan &&
-            procurement.ShoppingWaitReason is null)
+        if (!procurement.IsActive && procurement.Status.NextAutomaticScan is { } scan)
             ImGui.Text(scan <= DateTimeOffset.UtcNow
                 ? "Deal search: ready after the retainer check and bag refill."
                 : $"Next deal search / retry: {scan.LocalDateTime:t}");
         ImGui.TextWrapped("Sold slots are detected on the next retainer check. When no deal meets your limits, empty slots stay open and shopping retries later.");
+        if (config.ContinueShoppingWhenStocked)
+            ImGui.TextWrapped($"Trading stock in bags: {procurement.ResaleBagSlots} planned sale stack(s), aiming for {procurement.ComfortableStockTarget}. " +
+                "One sale stack uses that item's selling quantity, such as 99 potions or 20 dyes. Personal reserves and sale-only items are excluded.");
         ImGui.Spacing();
         DrawLoopStages();
         ImGui.Separator();
@@ -219,12 +221,12 @@ public sealed class DashboardWindow : Window
                 : automation.Status.NextActionAt is { } next ? $"next at {next.LocalDateTime:t}"
                 : "ready");
 
-        var bagStock = procurement.ResaleBagSlots;
+        var bagStock = procurement.MarketableBagSlots;
         Stage("2. List stock from your bags",
             bagListing.IsBusy ? running : waiting,
             bagListing.IsBusy ? "running now"
                 : bagListing.Status.State == BagListingState.Failed ? bagListing.Status.Detail
-                : free is 0 && bagStock > 0 ? $"{bagStock} stack(s) ready for future sales"
+                : free is 0 && bagStock > 0 ? $"{bagStock} bag stack(s) to check as sale slots open"
                 : pending > 0 ? $"{pending} stack(s) queued"
                 : bagStock > 0 ? $"{bagStock} resale stack(s) to check"
                 : "no spare resale stock found");
@@ -235,7 +237,7 @@ public sealed class DashboardWindow : Window
                 : procurement.RequiresManualRestart ? "stopped - check the last purchase in game"
                 : procurement.IsWaitingToReturnHome ? "waiting to retry the return home"
                 : !armed ? "press Start to enable the loop"
-                : procurement.ShoppingWaitReason is { } reason ? reason
+                : procurement.ShoppingWaitReason is { } reason ? $"Buying: {reason}"
                 : procurement.Status.NextAutomaticScan is { } scan
                     ? scan <= DateTimeOffset.UtcNow ? "ready after retainers and bags" : $"next deal search at {scan.LocalDateTime:t}"
                     : "ready");
@@ -244,8 +246,9 @@ public sealed class DashboardWindow : Window
         ImGui.EndTable();
 
         if (free is 0)
-            ImGui.TextColored(goal, $"Retainers are full. Spare stock is limited to {config.ProcurementBagBufferStacks} stacks and " +
-                $"{config.ProcurementBufferGilPercent:0}% of available capital. Sale checks continue.");
+            ImGui.TextWrapped(config.ContinueShoppingWhenStocked
+                ? $"Retainers are full. Shopping tops up toward {procurement.ComfortableStockTarget} spare sale stacks using the {config.ProcurementBufferGilPercent:0}% budget. Deal searches continue between restocks."
+                : $"Retainers are full. Spare stock is limited to {config.ProcurementBagBufferStacks} sale stacks and {config.ProcurementBufferGilPercent:0}% of available capital.");
     }
 
     private void DrawSpendingLimits()
@@ -275,12 +278,21 @@ public sealed class DashboardWindow : Window
             config.ProcurementTravelReserve = reserve;
             configurationDirty = true;
         }
-        var buffer = config.ProcurementBagBufferStacks;
-        ImGui.SetNextItemWidth(170 * ImGuiHelpers.GlobalScale);
-        if (InputInt("Spare resale stacks to keep in bags", ref buffer, 0, 50))
+        var continuedBuying = config.ContinueShoppingWhenStocked;
+        if (ImGui.Checkbox("Keep a comfortable stock in bags", ref continuedBuying))
         {
-            config.ProcurementBagBufferStacks = buffer;
+            config.ContinueShoppingWhenStocked = continuedBuying;
             configurationDirty = true;
+        }
+        if (!continuedBuying)
+        {
+            var buffer = config.ProcurementBagBufferStacks;
+            ImGui.SetNextItemWidth(170 * ImGuiHelpers.GlobalScale);
+            if (InputInt("Spare resale stacks to keep in bags", ref buffer, 0, 50))
+            {
+                config.ProcurementBagBufferStacks = buffer;
+                configurationDirty = true;
+            }
         }
         var bufferPercent = (float)config.ProcurementBufferGilPercent;
         ImGui.SetNextItemWidth(170 * ImGuiHelpers.GlobalScale);
@@ -290,7 +302,9 @@ public sealed class DashboardWindow : Window
             configurationDirty = true;
         }
         ImGui.TextWrapped("Fill empty sale slots first, using existing stock before buying. Spare stock has a smaller budget, " +
-            "including the saved purchase cost of items already in your bags. At 0 spendable gil, checks continue and shopping waits for income.");
+            "including the saved purchase cost of trading stock already in your bags. Sale-only stock does not consume that budget. " +
+            "Comfortable stock targets about 20% of retainer capacity, with 1-3 spare sale stacks per item to spread your stock. " +
+            "Purchases still need profit, demand, gil and bag space.");
         ImGui.Text($"Available for the next trip: {procurement.ShoppingBudget:N0} gil   |   room for {procurement.PurchaseCapacity} stack(s)");
     }
 
@@ -679,9 +693,9 @@ public sealed class DashboardWindow : Window
         ImGui.TextWrapped(status.Detail);
 
         ImGui.TextWrapped(
-            "Every bag item is listed here. \"Sell\" rows are listed automatically: HQ Grade 4 gemdraughts and " +
-            "HQ Caramel Popcorn in 99-stacks, plus dyes and materia, which are sold off rather than kept in stock. " +
-            "\"Ignored\" rows are left alone - gear and anything without a rule is never listed.");
+            "Marketable bag items are shown below. Bag slots are physical inventory stacks; units are individual items. " +
+            "Sell as shows the planned listing quantities. Enabled trading stock and sell-off items can refill retainers; " +
+            "ignored items are left alone.");
 
         var automatic = configuration.Current.AutomaticCuratedBagListingEnabled;
         if (ImGui.Checkbox("Automatically refill empty retainer slots during idle bell runs", ref automatic))
@@ -697,14 +711,14 @@ public sealed class DashboardWindow : Window
             configurationDirty = true;
             bagListing.Refresh();
         }
-        ImGui.TextDisabled("Default: keep 100 of each item for personal use. The reserve is checked again before every listing.");
+        ImGui.TextDisabled("Default: keep 100 of each curated food/potion. Dye and sell-off rules have their own reserves.");
 
-        if (ImGui.Button("Refresh curated stock"))
+        if (ImGui.Button("Refresh bags"))
             bagListing.Refresh();
         ImGui.SameLine();
         var cannotRun = bagListing.IsBusy || automation.IsActive || procurement.IsActive || !bagListing.IsRetainerListOpen;
         ImGui.BeginDisabled(cannotRun);
-        if (ImGui.Button("Auto-price and list all eligible 99-stacks"))
+        if (ImGui.Button("Price and list eligible stock"))
             bagListing.PrepareAutomaticRun();
         ImGui.EndDisabled();
 
@@ -716,16 +730,17 @@ public sealed class DashboardWindow : Window
                 "The current retainer/procurement operation must finish first.");
 
         var stock = bagListing.Stock;
-        if (ImGui.BeginTable("CuratedBagStock", 8,
+        if (ImGui.BeginTable("CuratedBagStock", 9,
                 ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.ScrollY | ImGuiTableFlags.Resizable,
                 new Vector2(0, 220 * ImGuiHelpers.GlobalScale)))
         {
             ImGui.TableSetupColumn("Item");
             ImGui.TableSetupColumn("Auto", ImGuiTableColumnFlags.WidthFixed, 65);
             ImGui.TableSetupColumn("Quality", ImGuiTableColumnFlags.WidthFixed, 60);
-            ImGui.TableSetupColumn("Bag total", ImGuiTableColumnFlags.WidthFixed, 80);
+            ImGui.TableSetupColumn("Bag slots", ImGuiTableColumnFlags.WidthFixed, 70);
+            ImGui.TableSetupColumn("Units", ImGuiTableColumnFlags.WidthFixed, 80);
             ImGui.TableSetupColumn("Keep", ImGuiTableColumnFlags.WidthFixed, 70);
-            ImGui.TableSetupColumn("List", ImGuiTableColumnFlags.WidthFixed, 85);
+            ImGui.TableSetupColumn("Sell as", ImGuiTableColumnFlags.WidthFixed, 85);
             ImGui.TableSetupColumn("Price floor", ImGuiTableColumnFlags.WidthFixed, 85);
             ImGui.TableSetupColumn("Auto price", ImGuiTableColumnFlags.WidthFixed, 90);
             ImGui.TableHeadersRow();
@@ -739,6 +754,7 @@ public sealed class DashboardWindow : Window
                 else
                     ImGui.TextDisabled("Ignored");
                 ImGui.TableNextColumn(); ImGui.TextUnformatted(item.IsHighQuality ? "HQ" : "NQ");
+                ImGui.TableNextColumn(); ImGui.TextUnformatted(item.PhysicalBagSlots.ToString("N0"));
                 ImGui.TableNextColumn(); ImGui.TextUnformatted(item.TotalQuantity.ToString("N0"));
                 ImGui.TableNextColumn(); ImGui.TextUnformatted(item.ReservedQuantity.ToString("N0"));
                 ImGui.TableNextColumn();

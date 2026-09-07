@@ -11,6 +11,36 @@ Build: use `C:/Users/Acour/.dotnet/dotnet.exe` (SDK 10.0.301), **not** the PATH
 
 ---
 
+## v1.0.0.35 - comfortable bag stock and accurate stack labels
+User: keep visiting servers and buying until there is comfortable bag stock; the
+Home display of 932 stacks looked wrong.
+
+- Root cause: .34 added sale-only stock to the trading buffer using each rule's
+  sale lot size. Thousands of ethers/materia/dyes divided into lots of 5 became
+  hundreds of "stacks", exhausting the 5-stack shopping quota.
+- Separate physical bag slots from quantities and planned sale stacks. Home shows
+  physical marketable bag slots plus trading sale lots/target; Stock shows each
+  item's physical slots, units, personal reserve and intended sale quantities.
+- Sale-only stock and its pending queue do not consume trading buffer capacity or
+  budget. It still occupies real bag space and remains eligible for automatic listing.
+- New default: comfortable stock = 20% of checked retainer capacity, bounded 5-20
+  planned sale stacks (60 slots -> 12 spares). Refill after stock moves onto retainers.
+- Per-item spare targets = 25% of listed slots, bounded 1-3. Permit those bag
+  replacements alongside existing listings even when old listed-slot caps are full;
+  preserve original configured rules and apply total owned-quantity weekly demand
+  limits. This prevents one cheap item taking the entire spare-stock allocation.
+- Existing 20% acquisition-cost budget remains when sale slots are covered, plus
+  travel reserve, ROI, live revalidation and real free-bag-slot checks. The fixed
+  five-stack mode remains available by disabling comfortable-stock mode.
+- Periodic Universalis searches continue at the bell when stocked. A full buffer
+  prevents unnecessary purchases/travel, but does not switch off future searches.
+  Income/new capacity can trigger an earlier search; zero wallet avoids trips.
+- Config 25 enables comfortable stock for existing installations. Oceania excluded.
+- 136 tests pass. Includes a fixture with 4,660 sale-only units in 5 physical slots
+  (932 future lots), unaffected automatic buying/return, one physical pile vs sale
+  lots, three spare buys beside full retainer exposure, scout cadence and migration.
+- Publication and final artifact verification pending.
+
 ## v1.0.0.34 - continuous loop and North America shopping
 User reported travel to Oceania and a false "No retainers were available" stop
 while the screenshot showed three active retainers. User asked to finish and publish.

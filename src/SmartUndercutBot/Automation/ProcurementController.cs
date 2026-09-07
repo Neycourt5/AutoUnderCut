@@ -162,12 +162,17 @@ public sealed class ProcurementController : IDisposable
         resumeStoppedRouteAt == DateTimeOffset.MaxValue;
     public bool IsWaitingToReturnHome => retryReturnHome && !RequiresManualRestart;
     public int ResaleBagSlots => CollectBagStock().Sum(x => x.SaleSlots);
+    public int MarketableBagSlots => retainerListings.ReadBagListingCandidates().Count;
+    public int ComfortableStockTarget => ResaleStockPolicy.ComfortableBagTarget(
+        (repricing.LastKnownFreeSaleSlots ?? 0) + repricing.ListedStock.Sum(x => x.SaleSlots));
     public int PurchaseCapacity => AvailablePurchaseSlots();
     public uint ShoppingBudget => SpendableGil(newTrip: true);
     public string? ShoppingWaitReason => repricing.LastKnownFreeSaleSlots is null
         ? "waiting for the first complete retainer check"
-        : AvailablePurchaseSlots() == 0 ? "stock is ready for the available slots and bag buffer"
         : market.FreeInventorySlots <= configuration.Current.ProcurementInventoryReserve ? "waiting for free bag space"
+        : AvailablePurchaseSlots() == 0 ? configuration.Current.ContinueShoppingWhenStocked
+            ? $"comfortable trading stock is ready ({ResaleBagSlots}/{ComfortableStockTarget} sale stacks); watching for restocks"
+            : "the fixed spare-stock target is reached"
         : ShoppingBudget == 0 ? "waiting for sale income or room in the buffer budget" : null;
     public string? TravelReadinessIssue => !lifestream.IsAvailable
         ? "Enable Lifestream to travel and return home."
@@ -515,7 +520,7 @@ public sealed class ProcurementController : IDisposable
         var freeInventorySlots = Math.Max(0, (int)market.FreeInventorySlots - config.ProcurementInventoryReserve);
         Plan = planner.BuildPlan(new(
             ShoppingMarkets(scanTask.Result),
-            config.ProcurementRules,
+            ShoppingRules(config.ProcurementRules),
             SpendableGil(),
             plannedSaleSlots,
             freeInventorySlots,
@@ -534,7 +539,9 @@ public sealed class ProcurementController : IDisposable
         detail = Plan.Orders.Count == 0
             ? !hasHomeResaleData
                 ? $"No usable sale history and competing prices were found for {planningHomeWorld}. Waiting for home-world resale data before buying."
-                : "No deals passed the volume, margin, budget, bag-slot, and sale-slot guards."
+                : ShoppingWaitReason is { } reason
+                    ? $"Deal search finished; buying is {reason}. Searches and retainer checks will repeat."
+                    : "No deals passed the volume, margin, budget, bag-slot, and sale-slot guards. The next search will retry."
             : $"Plan ready: {Plan.Orders.Count} stack(s), {Plan.TotalCost:N0} gil, about {Plan.ExpectedProfit:N0} gil expected profit.";
         log.Add(AutomationLogLevel.Information, detail);
         if (runAfterScan != ProcurementRunMode.None && Plan.Orders.Count > 0)
@@ -923,7 +930,7 @@ public sealed class ProcurementController : IDisposable
         var freeSaleSlots = repricing.LastKnownFreeSaleSlots ?? 0;
         Plan = planner.BuildLiveMarketPlan(new(
             ShoppingMarkets(markets),
-            stockHuntRules,
+            ShoppingRules(stockHuntRules),
             homeWorld,
             retainerListings.OwnedRetainerIds,
             SpendableGil(),
@@ -1007,7 +1014,7 @@ public sealed class ProcurementController : IDisposable
             BeginCurrentOrder();
             return;
         }
-        var rule = configuration.Current.ProcurementRules.FirstOrDefault(x => x.ItemId == currentOrder.ItemId);
+        var rule = ShoppingRules(configuration.Current.ProcurementRules).FirstOrDefault(x => x.ItemId == currentOrder.ItemId);
         if (rule is null || !rule.Enabled || rule.LiquidateOnly ||
             !ResaleStockPolicy.BuyableQuality(rule, currentOrder.IsHighQuality, configuration.Current.BuyHighQualityOnly) ||
             CollectOwnedStock().Where(x => x.ItemId == currentOrder.ItemId).Sum(x => x.SaleSlots) >= rule.MaximumSaleSlots)
@@ -1371,8 +1378,11 @@ public sealed class ProcurementController : IDisposable
         // reported real capacity - but a completed pass reporting zero free slots is
         // still real. AvailablePurchaseSlots decides from there, and it allows a bag
         // buffer, so full retainers keep stocking up for the next sale.
-        if (repricing.LastKnownFreeSaleSlots is null || AvailablePurchaseSlots() <= 0 ||
-            market.FreeInventorySlots <= configuration.Current.ProcurementInventoryReserve || ShoppingBudget == 0)
+        if (repricing.LastKnownFreeSaleSlots is null ||
+            ResaleStockPolicy.SpendableGil(market.Gil, configuration.Current.ProcurementTravelReserve, true, 0) == 0)
+            return;
+        if (!configuration.Current.ContinueShoppingWhenStocked &&
+            (AvailablePurchaseSlots() <= 0 || market.FreeInventorySlots <= configuration.Current.ProcurementInventoryReserve || ShoppingBudget == 0))
             return;
 
         if (configuration.Current.LiveWorldStockHuntEnabled)
@@ -1526,16 +1536,19 @@ public sealed class ProcurementController : IDisposable
     private IReadOnlyList<StockExposure> CollectBagStock()
     {
         var config = configuration.Current;
-        var pending = ledger.Snapshot().Where(x => x.PendingQuantity > 0)
-            .ToDictionary(x => (x.ItemId, x.IsHighQuality));
-        var rules = config.ProcurementRules.Where(x => x.Enabled && x.ItemId != 0)
+        // Sale-only dyes, materia and ethers can produce hundreds of small future
+        // listings. They occupy real inventory slots but are not the trading
+        // buffer and must not reserve every investment opportunity.
+        var rules = config.ProcurementRules.Where(x => x.Enabled && x.ItemId != 0 && !x.LiquidateOnly)
             .DistinctBy(x => x.ItemId).ToDictionary(x => x.ItemId);
+        var pending = ledger.Snapshot().Where(x => x.PendingQuantity > 0 &&
+            (rules.ContainsKey(x.ItemId) || (!x.IsBagStock && !config.ProcurementRules.Any(r => r.ItemId == x.ItemId && r.LiquidateOnly))))
+            .ToDictionary(x => (x.ItemId, x.IsHighQuality));
         // Scan the four bags once, instead of searching the whole inventory for
         // every seeded dye/materia rule on every controller tick.
         var holdings = retainerListings.ReadBagListingCandidates()
             .Where(x => rules.TryGetValue(x.ItemId, out var rule) &&
-                (ResaleStockPolicy.CanListFromBags(rule, x.ItemName, x.IsHighQuality) ||
-                 (!rule.LiquidateOnly && ResaleStockPolicy.BuyableQuality(rule, x.IsHighQuality, config.BuyHighQualityOnly))))
+                ResaleStockPolicy.BuyableQuality(rule, x.IsHighQuality, config.BuyHighQualityOnly))
             .GroupBy(x => (x.ItemId, x.IsHighQuality))
             .ToDictionary(x => x.Key, x => x.Sum(y => (long)y.Quantity));
         var keys = holdings.Keys.Concat(pending.Keys).Distinct();
@@ -1572,7 +1585,29 @@ public sealed class ProcurementController : IDisposable
         var held = ResaleBagSlots;
         // Fill real vacancies first. Buffer shopping gets a separate, smaller
         // budget once bags can cover those vacancies.
-        return free > held ? free - held : Math.Max(0, free + configuration.Current.ProcurementBagBufferStacks - held);
+        if (free > held)
+            return free - held;
+        if (configuration.Current.ContinueShoppingWhenStocked)
+            return Math.Min(Math.Max(0, free + ComfortableStockTarget - held),
+                Math.Max(0, (int)market.FreeInventorySlots - configuration.Current.ProcurementInventoryReserve));
+        return Math.Max(0, free + configuration.Current.ProcurementBagBufferStacks - held);
+    }
+
+    private IReadOnlyList<ProcurementRule> ShoppingRules(IReadOnlyList<ProcurementRule> source)
+    {
+        if (!configuration.Current.ContinueShoppingWhenStocked ||
+            Math.Min(repricing.LastKnownFreeSaleSlots ?? 0, configuration.Current.ProcurementTargetSaleSlots) > ResaleBagSlots)
+            return source;
+        // A fully listed item still needs a few bag replacements. Limit spare
+        // stock to 1-3 sale stacks per item instead of letting one cheap item fill
+        // the entire buffer. Quantity/weekly-demand limits still count all stock.
+        return source.Select(rule =>
+        {
+            var listed = repricing.ListedStock.Where(x => x.ItemId == rule.ItemId).Sum(x => x.SaleSlots);
+            var copy = rule.Clone();
+            copy.MaximumSaleSlots = listed + Math.Min(rule.MaximumSaleSlots, ResaleStockPolicy.ComfortableItemTarget(listed));
+            return copy;
+        }).ToArray();
     }
 
     private static IReadOnlyList<ProcurementMarketItem> ShoppingMarkets(IReadOnlyList<ProcurementMarketItem> items) =>

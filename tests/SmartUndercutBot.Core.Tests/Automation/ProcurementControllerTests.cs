@@ -11,6 +11,90 @@ namespace SmartUndercutBot.Core.Tests.Automation;
 public sealed class ProcurementControllerTests
 {
     [Fact]
+    public void SaleOnlyBacklogCannotBlockComfortableStockShoppingOnFullRetainers()
+    {
+        using var run = new Route();
+        run.Config.Current.EnableStockAutomation();
+        run.Config.Current.ContinueShoppingWhenStocked = true;
+        run.Repricing.LastKnownFreeSaleSlots = 0;
+        run.Repricing.ListedStock = [new(999, false, 60, 60)];
+        run.Config.Current.ProcurementRules.Add(new() { ItemId = 5000, ItemName = "Ether", LiquidateOnly = true,
+            ListFromBags = true, TargetStackSize = 5, BagReserveQuantity = 0 });
+        // 4,660 units across five actual slots, previously displayed as 932 stacks.
+        for (ushort slot = 0; slot < 5; slot++)
+            run.Game.OtherBagItems.Add(new(FFXIVClientStructs.FFXIV.Client.Game.InventoryType.Inventory1,
+                slot, 5000, "Ether", slot < 4 ? 999u : 664u, false, 999));
+        run.Ledger.QueueExistingStock(5000, "Ether", 4660, 1000, 5, false, 0, maximumListingSlots: 2);
+        Assert.Equal(5, run.Controller.MarketableBagSlots);
+        Assert.Equal(0, run.Controller.ResaleBagSlots);
+        Assert.Equal(12, run.Controller.ComfortableStockTarget);
+        Assert.Equal(12, run.Controller.PurchaseCapacity);
+        run.Game.AutomaticWorldArrival = run.Game.AutomaticPurchaseConfirmation = true;
+        run.Tick();
+        for (var i = 0; i < 200 && run.Controller.IsActive; i++) run.Tick(2);
+        Assert.Equal(1, run.Game.Purchases);
+        Assert.Contains("/li Cactuar", run.Game.Commands);
+        Assert.Equal("Siren", run.Game.World);
+        Assert.DoesNotContain(5000u, run.Game.ScannedItemIds);
+    }
+
+    [Fact]
+    public void PackedBagStackIsDisplayedOnceAndTradingLotsUseTheSaleQuantity()
+    {
+        using var run = new Route();
+        run.Config.Current.ProcurementRules[0].ItemName = "Caramel Popcorn";
+        run.Game.Inventory = 397; // 100 personal + three sale stacks of 99, in one physical slot.
+        Assert.Equal(1, run.Controller.MarketableBagSlots);
+        Assert.Equal(3, run.Controller.ResaleBagSlots);
+    }
+
+    [Fact]
+    public void FullRetainersSearchOnScheduleEvenWhenComfortableStockIsReady()
+    {
+        using var run = new Route();
+        run.Config.Current.EnableStockAutomation();
+        run.Config.Current.ContinueShoppingWhenStocked = true;
+        run.Repricing.LastKnownFreeSaleSlots = 0;
+        run.Repricing.ListedStock = [new(999, false, 60, 60)];
+        run.Game.Inventory = 12 * 99;
+        Assert.Equal(0, run.Controller.PurchaseCapacity);
+        run.Tick(); run.Tick();
+        Assert.Equal(2, run.Game.Scans);
+        Assert.Equal(0, run.Game.Purchases);
+        for (var i = 0; i < 50; i++) run.Tick();
+        Assert.Equal(2, run.Game.Scans);
+        run.Tick(601); run.Tick();
+        Assert.Equal(4, run.Game.Scans);
+        Assert.Equal(0, run.Game.Purchases);
+        Assert.Contains("comfortable trading stock", run.Controller.Status.Detail);
+    }
+
+    [Fact]
+    public void AutomaticRestockTargetsPermitSpareStockBesideFullListedItemExposure()
+    {
+        using var run = new Route();
+        run.Config.Current.EnableStockAutomation();
+        run.Config.Current.ContinueShoppingWhenStocked = true;
+        run.Repricing.LastKnownFreeSaleSlots = 0;
+        run.Repricing.ListedStock = [new(1, true, 990, 10), new(999, false, 50, 50)];
+        run.Game.Gil = 10_000_000;
+        run.Game.WeeklySalesQuantity = 9_900;
+        run.Game.ExtraBuyListings = 10;
+        run.Game.AutomaticWorldArrival = run.Game.AutomaticPurchaseConfirmation = true;
+        run.Tick();
+        for (var i = 0; i < 300 && run.Controller.IsActive; i++) run.Tick(2);
+        // Three replacements (25% of the item's listed slots, capped at three),
+        // even though the already-listed count exceeds the old maximum of eight.
+        Assert.Equal(3, run.Game.Purchases);
+        Assert.Equal(297, run.Game.Inventory);
+        Assert.Equal(8, run.Config.Current.ProcurementRules[0].MaximumSaleSlots);
+        run.Repricing.IsActive = false;
+        run.Tick(601); run.Tick();
+        Assert.Equal(3, run.Game.Purchases);
+        Assert.Empty(run.Controller.Plan.Orders);
+    }
+
+    [Fact]
     public void ZeroGilWaitsWithoutTripsAndWakesAsSoonAsIncomeArrives()
     {
         using var run = new Route();
@@ -688,6 +772,8 @@ public sealed class ProcurementControllerTests
         public Route()
         {
             Config.Current.AllowAutomaticPurchases = true;
+            // Older regression cases exercise the optional fixed-buffer mode.
+            Config.Current.ContinueShoppingWhenStocked = false;
             Config.Current.ProcurementRules.Add(new() { ItemId = 1, AllowHighQuality = true, RequireHighQuality = true });
             Controller = new(Game, Game, Game, Game, Game, new ProcurementPlannerService(),
                 Game, Game, Game, Game, Ledger, Repricing, Config, Log, clock);
@@ -743,6 +829,9 @@ public sealed class ProcurementControllerTests
         public bool CheapOversizedHomeStack { get; set; }
         public bool MissingHomeListings { get; set; }
         public string BuyingWorld { get; set; } = "Cactuar";
+        public uint WeeklySalesQuantity { get; set; } = 99;
+        public int ExtraBuyListings { get; set; }
+        public List<BagListingCandidate> OtherBagItems { get; } = [];
         public override bool IsRetainerListOpen => BellOpen;
         public override IReadOnlySet<ulong> OwnedRetainerIds { get; } = new HashSet<ulong>();
         public uint FreeInventorySlots { get; set; } = 50;
@@ -779,12 +868,13 @@ public sealed class ProcurementControllerTests
             return Task.FromResult<IReadOnlyList<ProcurementMarketItem>>(
                 [new(1, "Popcorn", dataCenter == "Siren"
                         ? [new(1, 11, 21, "Siren", 2, 2_000, 99, true)]
-                        : [new(1, 10, 20, BuyingWorld, 1, 1_000, 99, true)],
-                    [new(2_000, 99, true, DateTimeOffset.UtcNow)])]);
+                        : Enumerable.Range(0, 1 + ExtraBuyListings)
+                            .Select(i => new ProcurementMarketListing(1, (ulong)(10 + i), (ulong)(20 + i), BuyingWorld, 1, 1_000, 99, true)).ToArray(),
+                    [new(2_000, WeeklySalesQuantity, true, DateTimeOffset.UtcNow)])]);
         }
         public int GetInventoryCount(uint itemId, bool highQuality) => itemId == 1 && highQuality ? Inventory : 0;
-        public override IReadOnlyList<BagListingCandidate> ReadBagListingCandidates() => Inventory <= 0 ? [] :
-            [new(FFXIVClientStructs.FFXIV.Client.Game.InventoryType.Inventory1, 0, 1, "Popcorn", (uint)Inventory, true, 999)];
+        public override IReadOnlyList<BagListingCandidate> ReadBagListingCandidates() => Inventory <= 0 ? OtherBagItems :
+            [..OtherBagItems, new(FFXIVClientStructs.FFXIV.Client.Game.InventoryType.Inventory1, 10, 1, "Popcorn", (uint)Inventory, true, 999)];
         public Vector3? FindNearest(string objectName) => Vector3.Zero;
         public float DistanceTo(Vector3 position) => 1;
         public bool InteractNearest(string objectName, float maximumDistance = 5)
@@ -808,7 +898,7 @@ public sealed class ProcurementControllerTests
         public bool TrySelectLiveListing(ProcurementOrder expected, IReadOnlySet<ulong> excludedRetainerIds,
             out LivePurchaseListing? listing)
         {
-            listing = new(0, 1, 10, 20, 1_000, 99, true, BuyerTax);
+            listing = new(0, 1, expected.ListingId, expected.RetainerId, 1_000, 99, true, BuyerTax);
             return true;
         }
         public bool SubmitPurchase(LivePurchaseListing listing)

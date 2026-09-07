@@ -1,5 +1,22 @@
 # Retainer automation and UI plan
 
+## Active release: v1.0.0.35 comfortable bag stock
+User wants a comfortable bag reserve and says the 932-stack count is wrong.
+- [x] Exclude sale-only backlog from trading buffer capacity and acquisition cost.
+- [x] Default to comfortable stock: 20% of checked sale capacity (5-20 sale stacks),
+  so 60 retainer slots target 12 spares; cap each item's bag target at 1-3 stacks.
+- [x] Permit spare replacements beside already-full listed item exposure while
+  keeping total-quantity sales-volume limits, ROI, budget and bag space checks.
+- [x] Keep periodic searches running when stocked, without repeated immediate scans.
+- [x] Distinguish physical bag slots, units, personal reserves and planned sale lots.
+- [x] 136 tests pass, including the 932-sale-lot regression, automatic trip/return,
+  reserve buying beside full listings, periodic scouting, and config migration.
+- [ ] Publish v1.0.0.35 and verify public installer JSON and ZIP.
+
+No in-game bag contents or native actions were directly read/exercised here.
+The screenshot's count was theoretical sale lots and included sell-off stock;
+regression fixtures demonstrate the corrected distinction, not actual bag contents.
+
 ## Current release: v1.0.0.34 continuous-loop fixes
 - [x] Count existing resale bags plus pending purchases without counting them twice.
 - [x] Limit buffer acquisition cost to 20% of available capital when sale slots are

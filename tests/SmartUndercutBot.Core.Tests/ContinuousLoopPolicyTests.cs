@@ -6,6 +6,29 @@ namespace SmartUndercutBot.Core.Tests;
 public sealed class ContinuousLoopPolicyTests
 {
     [Theory]
+    [InlineData(20, 5)]
+    [InlineData(60, 12)]
+    [InlineData(200, 20)]
+    public void ComfortableTargetScalesWithRetainersWithinBounds(int capacity, int expected)
+        => Assert.Equal(expected, ResaleStockPolicy.ComfortableBagTarget(capacity));
+
+    [Theory]
+    [InlineData(0, 1)]
+    [InlineData(8, 2)]
+    [InlineData(20, 3)]
+    public void PerItemSpareTargetsLeaveRoomForDiversification(int listed, int expected)
+        => Assert.Equal(expected, ResaleStockPolicy.ComfortableItemTarget(listed));
+
+    [Fact]
+    public void ExistingSettingsEnableComfortableStockOnUpgrade()
+    {
+        var config = System.Text.Json.JsonSerializer.Deserialize<Configuration>("{\"Version\":24,\"ProcurementBagBufferStacks\":5}")!;
+        config.Normalize();
+        Assert.True(config.ContinueShoppingWhenStocked);
+        Assert.Equal(25, config.Version);
+    }
+
+    [Theory]
     [InlineData("North-America,Oceania", "North-America")]
     [InlineData("Oceania,Materia,Ravana", "North-America")]
     [InlineData("Aether, Sophia ,Primal", "Aether,Primal")]

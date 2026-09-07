@@ -4,6 +4,13 @@ namespace SmartUndercutBot.Core.Services;
 
 public static class ResaleStockPolicy
 {
+    // Roughly one fifth of a full retainer portfolio ready to replace sales.
+    public static int ComfortableBagTarget(int totalSaleSlots) =>
+        Math.Clamp((Math.Max(0, totalSaleSlots) + 4) / 5, 5, 20);
+
+    public static int ComfortableItemTarget(int listedSlots) =>
+        Math.Clamp((Math.Max(0, listedSlots) + 3) / 4, 1, 3);
+
     public static bool IsCuratedConsumable(string name) => name is
         "Grade 4 Gemdraught of Strength" or "Grade 4 Gemdraught of Dexterity" or
         "Grade 4 Gemdraught of Intelligence" or "Grade 4 Gemdraught of Mind" or "Caramel Popcorn";
