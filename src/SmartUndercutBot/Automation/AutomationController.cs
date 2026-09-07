@@ -924,7 +924,8 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
                 log.Add(AutomationLogLevel.Warning,
                     $"{failedEntry.Listing.ItemName}: market prices did not load on attempt " +
                     $"{marketRequestAttempts}/{totalAttempts}; retrying this row in " +
-                    $"{Math.Ceiling((nextActionAt - timeProvider.GetUtcNow()).TotalSeconds):N0}s. {message}");
+                    $"{Math.Ceiling((nextActionAt - timeProvider.GetUtcNow()).TotalSeconds):N0}s. {message} " +
+                    $"[{marketData.LastRequestSummary}]");
                 Transition(AutomationState.WaitingBeforeMarketRequest,
                     $"Waiting to retry live prices for {failedEntry.Listing.ItemName}.");
                 return;
@@ -934,7 +935,8 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
             failedEntry = queue[currentIndex];
             ReplaceCurrent(failedEntry with { Status = "Market data failed" });
             log.Add(AutomationLogLevel.Error,
-                $"{failedEntry.Listing.ItemName}: market prices failed after {marketRequestAttempts} attempt(s); skipped. {message}");
+                $"{failedEntry.Listing.ItemName}: market prices failed after {marketRequestAttempts} attempt(s); " +
+                $"skipped. {message} [{marketData.LastRequestSummary}]");
             retainerListings.CancelPriceEditor();
             if (returnToAutoListingAfterCurrent)
             {

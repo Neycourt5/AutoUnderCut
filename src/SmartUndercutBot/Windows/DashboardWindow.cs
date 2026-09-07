@@ -1137,6 +1137,15 @@ public sealed class DashboardWindow : Window
             var text = string.Join(Environment.NewLine, log.Snapshot().Select(FormatLogEntry));
             ImGui.SetClipboardText(text);
         }
+        if (log.SessionFilePath is { } sessionFile)
+        {
+            ImGui.SameLine();
+            if (ImGui.Button("Copy log file path"))
+                ImGui.SetClipboardText(sessionFile);
+            ImGui.TextWrapped("This view keeps only the most recent entries. The complete run, "
+                              + "including debug detail, is written to this file:");
+            ImGui.TextWrapped(sessionFile);
+        }
         ImGui.Separator();
         ImGui.BeginChild("AuditLogScroll", Vector2.Zero, true);
         foreach (var entry in log.Snapshot())

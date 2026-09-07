@@ -56,6 +56,10 @@ public sealed class MarketDataService : IMarketDataService, IDisposable
         }
         finally
         {
+            LastRequestSummary =
+                $"item {itemId}: {request.OfferingPackets} offering packet(s), {request.RowsSeen} row(s), " +
+                $"history {(request.HistorySeen ? "received" : "not received")}, " +
+                $"request id {(request.RequestId?.ToString() ?? "none")}";
             lock (sync)
             {
                 if (request.RequestId is { } requestId)
@@ -65,6 +69,8 @@ public sealed class MarketDataService : IMarketDataService, IDisposable
             }
         }
     }
+
+    public string LastRequestSummary { get; private set; } = string.Empty;
 
     public void ClearCache()
     {
@@ -116,6 +122,7 @@ public sealed class MarketDataService : IMarketDataService, IDisposable
             return;
 
         request.ResolveItem(history.ItemId);
+        request.MarkHistorySeen();
         request.History.TrySetResult(history.HistoryListings
             .Where(x => x.SalePrice > 0)
             .Select(x => x.SalePrice)
@@ -145,6 +152,9 @@ public sealed class MarketDataService : IMarketDataService, IDisposable
         private readonly HashSet<MarketListing> accumulatedListings = [];
         private int packetGeneration;
 
+        public int OfferingPackets { get; private set; }
+        public int RowsSeen { get; private set; }
+        public bool HistorySeen { get; private set; }
         public uint RequestedItemId { get; } = itemId;
         public uint ResolvedItemId { get; private set; } = itemId;
         public int? RequestId { get; private set; }
@@ -152,6 +162,8 @@ public sealed class MarketDataService : IMarketDataService, IDisposable
             new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource<uint[]> History { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public void MarkHistorySeen() => HistorySeen = true;
 
         public void ResolveItem(uint resolvedItemId)
         {
@@ -169,6 +181,8 @@ public sealed class MarketDataService : IMarketDataService, IDisposable
                 if (RequestId.HasValue && RequestId.Value != requestId)
                     return;
                 RequestId = requestId;
+                OfferingPackets++;
+                RowsSeen += listings.Count;
                 foreach (var listing in listings)
                     accumulatedListings.Add(listing);
                 generation = ++packetGeneration;

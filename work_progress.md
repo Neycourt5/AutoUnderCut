@@ -11,6 +11,48 @@ Build: use `C:/Users/Acour/.dotnet/dotnet.exe` (SDK 10.0.301), **not** the PATH
 
 ---
 
+## v1.0.0.43 - session log files, and the real cause found in dalamud.log
+
+### Read the user's log directly - do this first, always
+`%AppData%\XIVLauncher\dalamud.log` is readable from this workspace and contains
+every `[SmartUndercutBot]` line. Four releases were spent guessing at symptoms that
+this file answers in one grep:
+
+    grep -a "SmartUndercutBot\]" "$APPDATA/XIVLauncher/dalamud.log" | tail -40
+
+### What it actually showed
+Not a commit failure, and not a loop. **133 live market-request timeouts**, spread
+across many items:
+
+    61 Savage Might Materia XI      27 General-purpose Pastel Purple Dye
+    15 Wide Spectrum #1 Dye         15 Quickarm Materia XII       (and others)
+
+Each row costs three attempts with backoff, so the pass crawls and never reaches
+the listing the user was watching. The dyes it *did* reach were priced correctly:
+"kept 6,999 gil; live lowest 7,000" - already undercutting. The "opening the price
+page over and over and never doing anything" is this: opening a row, waiting out
+the Compare Prices timeout, retrying, moving on.
+
+Everything blamed in v1.0.0.40-42 (the seed-repair path, recovery replays, the
+commit refusal) was real hardening but not the cause of the reported symptom.
+
+### Session log files (user request)
+`AutomationLog` now writes every entry, Debug included, to
+`<plugin config>/logs/session-yyyyMMdd-HHmmss.log`, keeping the last 10. The path
+is shown on the Activity log tab with a copy button. The in-game view holds 500
+entries, which is far too few for a run of this length.
+
+Market timeouts now log what the request actually observed - offering packet
+count, row count, whether history arrived, request id - so the next log says
+whether the packet never arrived or arrived and was rejected.
+
+### Next
+Find why Compare Prices requests time out. `OnOfferingsReceived` drops packets
+whose first row's item id differs from the request, and completes only after a
+350 ms quiet period following at least one packet; an item with **no offerings at
+all** may produce no event, which would time out exactly like this. That is the
+leading hypothesis and the new diagnostics will confirm or kill it.
+
 ## v1.0.0.42 - the price write is refused, and now says why
 Screenshot evidence: General-purpose Metallic Sky Blue Dye, own listing 6,699 x5,
 lowest competitor 6,599. Chat shows "6,598 copied to clipboard" four times. So the

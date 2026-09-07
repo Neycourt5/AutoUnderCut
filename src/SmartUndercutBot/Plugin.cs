@@ -40,7 +40,10 @@ public sealed class Plugin : IDalamudPlugin
     public Plugin()
     {
         configuration = new ConfigurationService(PluginInterface);
-        var automationLog = new AutomationLog(PluginLog);
+        var automationLog = new AutomationLog(PluginLog,
+            Path.Combine(PluginInterface.ConfigDirectory.FullName, "logs"));
+        automationLog.Add(AutomationLogLevel.Information,
+            $"Session log: {automationLog.SessionFilePath ?? "disabled"}");
         var procurementLedger = new ProcurementLedger();
         marketData = new MarketDataService(MarketBoard, configuration);
         var retainerListings = new RetainerListingService(ClientState, ObjectTable, GameGui, DataManager);
