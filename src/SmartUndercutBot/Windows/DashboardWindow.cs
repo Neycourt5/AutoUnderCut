@@ -1004,6 +1004,20 @@ public sealed class DashboardWindow : Window
                 configurationDirty = true;
             }
             ImGui.TextDisabled("Shopping keeps going while the bag buffer is worth less than this, even once the stack count is met - a bag of cheap dye is not a trading position. Set 0 to judge on stack count alone.");
+            var fillRoi = (float)config.ProcurementFillRoiPercent;
+            if (ImGui.DragFloat("Fill-up ROI % for empty slots", ref fillRoi, 0.5f, 0, 1_000, "%.1f%%"))
+            {
+                config.ProcurementFillRoiPercent = (decimal)Math.Max(0, fillRoi);
+                configurationDirty = true;
+            }
+            ImGui.TextDisabled("When the compared plan still leaves sale slots empty, the best remaining deals are taken at this lower margin rather than coming home with slots open. It is still a profit after fees, and the highest-volume stock is preferred.");
+            var scoutAge = config.ScoutKnowledgeMaxAgeHours;
+            if (InputInt("Remember away-world prices for (hours)", ref scoutAge, 1, 168))
+            {
+                config.ScoutKnowledgeMaxAgeHours = scoutAge;
+                configurationDirty = true;
+            }
+            ImGui.TextDisabled("A world/item pair already seen this recently is not searched again, so trips skim only what is not already known.");
             var worldsPerTrip = config.PriorityWorldsPerTrip;
             if (InputInt("Worlds to scout before comparing", ref worldsPerTrip, 1, 40))
             {

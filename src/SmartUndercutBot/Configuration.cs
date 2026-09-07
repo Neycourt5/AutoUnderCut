@@ -7,7 +7,7 @@ namespace SmartUndercutBot;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 33;
+    public int Version { get; set; } = 35;
     public bool AutomationEnabled { get; set; }
     public bool ProcessAllRetainers { get; set; } = true;
     public bool RepeatBellRuns { get; set; }
@@ -36,10 +36,17 @@ public sealed class Configuration : IPluginConfiguration
     // Stock health is value as well as spread: a bag full of cheap dye meets the
     // stack target without being worth anything to sell.
     public uint ProcurementBufferValueTarget { get; set; } = 1_000_000;
+    // Keeping the retainers stocked is the point. When the compared plan leaves sale
+    // slots empty, a smaller but still real margin beats an empty slot.
+    public decimal ProcurementFillRoiPercent { get; set; } = 10m;
     public int PriorityWorldsPerTrip { get; set; } = 8;
     public int PriorityMinutesPerTrip { get; set; } = 45;
     // The same freshness limit applies to reusing a quote and approving a buy.
     public int HomePriceMaxAgeMinutes { get; set; } = 30;
+    // The home price is the resale anchor, so it is kept fresh - and a retainer pass
+    // re-reads it for free anyway. Away-world observations only decide where to look
+    // and what to compare, and those barely move within a day.
+    public int ScoutKnowledgeMaxAgeHours { get; set; } = 24;
     public bool ContinueShoppingWhenStocked { get; set; } = true;
     public decimal ProcurementBufferGilPercent { get; set; } = 20m;
     public uint ProcurementTravelReserve { get; set; } = 5_000;
@@ -394,7 +401,19 @@ public sealed class Configuration : IPluginConfiguration
             PriorityMinutesPerTrip = 45;
             Version = 32;
         }
-        Version = Math.Max(Version, 33);
+        if (Version < 34)
+        {
+            ProcurementFillRoiPercent = 10m;
+            Version = 34;
+        }
+        if (Version < 35)
+        {
+            ScoutKnowledgeMaxAgeHours = 24;
+            Version = 35;
+        }
+        Version = Math.Max(Version, 35);
+        ScoutKnowledgeMaxAgeHours = Math.Clamp(ScoutKnowledgeMaxAgeHours, 1, 168);
+        ProcurementFillRoiPercent = Math.Clamp(ProcurementFillRoiPercent, 0m, 1_000m);
         PriorityScoutRoute ??= [];
         PriorityItemsPerWorld = Math.Clamp(PriorityItemsPerWorld, 1, 40);
         ProcurementBufferValueTarget = Math.Min(ProcurementBufferValueTarget, 999_999_999u);

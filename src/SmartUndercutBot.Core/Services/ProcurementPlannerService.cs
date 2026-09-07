@@ -224,11 +224,16 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
         // profitable combinations with a small wallet. Compare complete feasible
         // plans instead of letting one expensive stack consume the whole budget.
         ulong Cost(ProcurementOrder x) => PurchaseCost(x.PricePerUnit, x.Quantity, buyerFee);
+        // Lower tour priority means higher-volume stock: raid food and potions before
+        // dyes before materia. Keeping retainers stocked is the goal, so a fast mover
+        // is worth more than a slightly richer margin on something that sits.
+        int Priority(ProcurementOrder x) => rules.TryGetValue(x.ItemId, out var rule) ? rule.TourPriority : int.MaxValue;
         var strategies = new[]
         {
             candidates.OrderByDescending(x => (double)x.ExpectedProfit).ThenBy(Cost),
             candidates.OrderByDescending(x => (double)x.ExpectedProfit / Math.Max(1UL, Cost(x))).ThenBy(Cost),
             candidates.OrderByDescending(x => x.ExpectedProfit / Math.Sqrt(Math.Max(1UL, Cost(x)))).ThenBy(Cost),
+            candidates.OrderBy(Priority).ThenByDescending(x => (double)x.ExpectedProfit / Math.Max(1UL, Cost(x))).ThenBy(Cost),
         };
         var plans = new List<ProcurementPlan>();
         foreach (var strategy in strategies)
@@ -255,7 +260,11 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
             plans.Add(new(DateTimeOffset.UtcNow, orders, (uint)spent,
                 (uint)Math.Min(profit, uint.MaxValue), orders.Count));
         }
-        return plans.OrderByDescending(x => x.Orders.Sum(y => (long)y.ExpectedProfit))
+        // Filling more sale slots beats a marginally richer plan that leaves them
+        // empty, and among equal fills the higher-volume stock wins.
+        return plans.OrderByDescending(x => x.Orders.Count)
+            .ThenBy(x => x.Orders.Sum(Priority))
+            .ThenByDescending(x => x.Orders.Sum(y => (long)y.ExpectedProfit))
             .ThenByDescending(x => x.Orders.Select(y => y.ItemId).Distinct().Count())
             .ThenBy(x => x.Orders.Select(y => y.WorldName).Distinct(StringComparer.OrdinalIgnoreCase).Count())
             .ThenBy(x => x.TotalCost).First();

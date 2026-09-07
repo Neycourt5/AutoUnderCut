@@ -114,6 +114,34 @@ Primary source checks: [FFXIVClientStructs market proxy](https://github.com/aers
 [Lifestream market shortcut](https://github.com/NightmareXIV/Lifestream/blob/main/Lifestream/Tasks/Shortcuts/TaskMBShortcut.cs),
 [Lifestream public IPC](https://github.com/NightmareXIV/Lifestream/blob/main/Lifestream/IPC/IPCProvider.cs).
 
+## v1.0.0.56 - full retainers are the objective, and price knowledge persists
+
+User: keeping retainers stocked is the priority. After scanning all servers, if
+the slots are not filled, go buy the best-ROI item available, preferring Caramel
+Popcorn and potions since they are the highest volume. Also: hold scanned price
+knowledge for about a day and only shop when it is fuzzy.
+
+**Volume beats margin.** `Allocate` gained a strategy ordered by `TourPriority`
+(raid food/potions 0, dyes 1, materia 2), and plan selection now prefers, in
+order: more slots filled, then lower total priority, then profit. A dye with a
+slightly richer margin no longer outranks the popcorn that actually turns over.
+
+**Empty slots get topped up.** `TopUpEmptySaleSlots` runs after the scout
+comparison: if slots remain, it re-plans the leftover listings at
+`ProcurementFillRoiPercent` (10% default, must be below the normal bar) and
+appends. Still a real profit after fees - never a loss - and it excludes listings
+already taken and counts the pending buys as owned stock so limits still hold.
+
+**Knowledge persists.** `scoutObservedAt` timestamps every world/item observation.
+`scoutListings` is no longer cleared per trip; stale entries are pruned against
+`ScoutKnowledgeMaxAgeHours` (24), and `ShouldScoutItem` skips a pair already seen
+inside that window. `ScoutKnowledgeCoverage` reports how much is already known.
+
+Note this is a **separate** knob from `HomePriceMaxAgeMinutes` (30). The home
+price is the resale anchor that decides whether a deal is profitable, and a
+retainer pass re-reads it for free, so it stays tight. Away-world observations
+only decide where to look, so a day is fine.
+
 ## v1.0.0.55 - retainer recovery no longer latches after a shopping return
 
 The screenshot's "could not recover the retainer interface" was terminal: after a

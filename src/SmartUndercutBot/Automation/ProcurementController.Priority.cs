@@ -17,6 +17,9 @@ public sealed partial class ProcurementController
     private DateTimeOffset priorityDepartedAt;
     private int priorityWorldsCompleted;
     private readonly List<ProcurementMarketListing> scoutListings = [];
+    // What was seen where, and when. Prices barely move within a day, so knowledge
+    // is kept between trips and a world/item pair is only re-read once it goes stale.
+    private readonly Dictionary<(string World, uint Item), DateTimeOffset> scoutObservedAt = new();
     private readonly Dictionary<string, HashSet<uint>> scoutItems = new(StringComparer.OrdinalIgnoreCase);
     private DateTimeOffset? comparisonBuyingStarted;
     public IReadOnlyList<ShoppingObservation> RecentPrices => observations;
@@ -100,7 +103,47 @@ public sealed partial class ProcurementController
         configuration.Save();
     }
 
-    private bool ShouldScoutItem(uint item) => scoutItems.GetValueOrDefault(WorldName)?.Contains(item) == true;
+    private bool ShouldScoutItem(uint item) =>
+        scoutItems.GetValueOrDefault(WorldName)?.Contains(item) == true && !ScoutKnowledgeIsFresh(WorldName, item);
+
+    private TimeSpan ScoutKnowledgeLife =>
+        TimeSpan.FromHours(Math.Max(1, configuration.Current.ScoutKnowledgeMaxAgeHours));
+
+    private bool ScoutKnowledgeIsFresh(string world, uint item) =>
+        scoutObservedAt.TryGetValue((world, item), out var at) &&
+        timeProvider.GetUtcNow() - at <= ScoutKnowledgeLife;
+
+    private void PruneStaleScoutKnowledge()
+    {
+        var now = timeProvider.GetUtcNow();
+        var stale = scoutObservedAt.Where(x => now - x.Value > ScoutKnowledgeLife).Select(x => x.Key).ToArray();
+        foreach (var key in stale)
+        {
+            scoutObservedAt.Remove(key);
+            scoutListings.RemoveAll(l => l.ItemId == key.Item &&
+                string.Equals(l.WorldName, key.World, StringComparison.OrdinalIgnoreCase));
+        }
+        if (stale.Length > 0)
+            log.Add(AutomationLogLevel.Information,
+                $"Dropped {stale.Length} price observation(s) older than {ScoutKnowledgeLife.TotalHours:N0}h; " +
+                $"{scoutObservedAt.Count} still current and will not be re-read.");
+    }
+
+    /// <summary>How much of the planned scouting is already known and need not be re-read.</summary>
+    public (int Known, int Total) ScoutKnowledgeCoverage
+    {
+        get
+        {
+            int known = 0, total = 0;
+            foreach (var (world, items) in scoutItems)
+                foreach (var item in items)
+                {
+                    total++;
+                    if (ScoutKnowledgeIsFresh(world, item)) known++;
+                }
+            return (known, total);
+        }
+    }
 
     private void FinishPriorityScouting(string reason)
     {
@@ -115,6 +158,7 @@ public sealed partial class ProcurementController
             HomeWorld: homeWorld, OwnedRetainerIds: retainerListings.OwnedRetainerIds,
             OwnedStock: CollectOwnedStock(), MaximumWeeklySalesSharePercent: config.ProcurementWeeklySalesSharePercent,
             HighQualityOnly: config.BuyHighQualityOnly, ResaleListings: homePrices.Values.SelectMany(x => x).ToArray()));
+        compared = TopUpEmptySaleSlots(compared, markets);
         if (compared.Orders.Count == 0) { FinishShopping(reason + " No remaining compared deals fit the current limits; returning to retainers."); return; }
         // A more expensive replacement may still pass ROI, but was not the deal
         // that won this comparison. Allow the observed price or better only.
@@ -127,6 +171,51 @@ public sealed partial class ProcurementController
             $"SCOUT COMPARISON: {priorityWorldsCompleted} away world(s), {scoutListings.Count} observed listing(s); " +
             $"selected {Plan.Orders.Count} buy(s), expected profit {Plan.ExpectedProfit:N0}. Revisiting selected deals for fresh price and tax checks.");
         BeginExecution(ProcurementRunMode.AutomaticPurchase, preserveTrip: true);
+    }
+
+    /// <summary>
+    /// Full retainers are the objective, so an empty sale slot is a worse outcome
+    /// than a thinner margin. If the compared plan does not fill the slots, run the
+    /// comparison again at a lower ROI bar and take the best of what is left. The
+    /// fill bar is still a real profit after fees, never a loss.
+    /// </summary>
+    private ProcurementPlan TopUpEmptySaleSlots(ProcurementPlan compared, IReadOnlyList<ProcurementMarketItem> markets)
+    {
+        var config = configuration.Current;
+        var free = AvailablePurchaseSlots() - compared.Orders.Count;
+        if (free <= 0 || config.ProcurementFillRoiPercent >= config.ProcurementMinimumRoiPercent)
+            return compared;
+
+        var spent = (ulong)compared.Orders.Sum(x => (long)x.PricePerUnit * x.Quantity);
+        var budget = (uint)Math.Max(0, (long)SpendableGil() - (long)spent);
+        if (budget == 0) return compared;
+
+        var taken = compared.Orders.Select(x => (x.WorldName, x.ListingId)).ToHashSet();
+        var remaining = markets.Select(m => m with
+        {
+            Listings = m.Listings.Where(l => !taken.Contains((l.WorldName, l.ListingId))).ToArray(),
+        }).ToArray();
+        var owned = CollectOwnedStock()
+            .Concat(compared.Orders.Select(o => new StockExposure(o.ItemId, o.IsHighQuality, o.Quantity, 1)))
+            .ToArray();
+        var fill = planner.BuildPlan(new(remaining, ShoppingRules(stockHuntRules), budget, free,
+            Math.Max(0, (int)market.FreeInventorySlots - config.ProcurementInventoryReserve),
+            config.ProcurementFillRoiPercent, config.ProcurementMinimumProfitPerUnit,
+            HomeWorld: homeWorld, OwnedRetainerIds: retainerListings.OwnedRetainerIds,
+            OwnedStock: owned, MaximumWeeklySalesSharePercent: config.ProcurementWeeklySalesSharePercent,
+            HighQualityOnly: config.BuyHighQualityOnly, ResaleListings: homePrices.Values.SelectMany(x => x).ToArray()));
+        if (fill.Orders.Count == 0) return compared;
+
+        log.Add(AutomationLogLevel.Information,
+            $"STOCK TOP-UP: {free} sale slot(s) would have been left empty; added {fill.Orders.Count} deal(s) " +
+            $"at the {config.ProcurementFillRoiPercent:N0}% fill margin, preferring the highest-volume stock.");
+        return compared with
+        {
+            Orders = compared.Orders.Concat(fill.Orders).ToArray(),
+            TotalCost = (uint)Math.Min(uint.MaxValue, (ulong)compared.TotalCost + fill.TotalCost),
+            ExpectedProfit = (uint)Math.Min(uint.MaxValue, (ulong)compared.ExpectedProfit + fill.ExpectedProfit),
+            SaleSlots = compared.SaleSlots + fill.SaleSlots,
+        };
     }
 
     private void BeginPriorityShopping(IReadOnlyList<ProcurementMarketItem> markets)
@@ -163,7 +252,7 @@ public sealed partial class ProcurementController
 
         SeedHomePricesFromRepricing();
         PrepareScoutRoute();
-        scoutListings.Clear();
+        PruneStaleScoutKnowledge();
         comparisonBuyingStarted = null;
         purchasedSlotsByItem.Clear();
         stockHuntWorldIndex = stockHuntRuleIndex = 0;
@@ -344,6 +433,7 @@ public sealed partial class ProcurementController
         {
             scoutListings.RemoveAll(x => x.WorldName == WorldName && x.ItemId == rule.ItemId);
             scoutListings.AddRange(rows);
+            scoutObservedAt[(WorldName, rule.ItemId)] = timeProvider.GetUtcNow();
         }
         foreach (var quality in new[] { false, true })
         {
