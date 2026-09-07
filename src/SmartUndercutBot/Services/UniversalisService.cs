@@ -14,6 +14,7 @@ public interface IUniversalisService
     IReadOnlyList<ProcurementRule> CreateLiquidationRules();
     IReadOnlyList<ProcurementRule> CreateBuyableDyeRules();
     IReadOnlyList<ProcurementRule> CreateTradeableMateriaRules();
+    IReadOnlyList<ProcurementRule> CreateTomeMaterialRules();
     Task<IReadOnlyList<ProcurementMarketItem>> ScanAsync(
         IReadOnlyList<ProcurementRule> rules,
         string dataCenter,
@@ -103,6 +104,19 @@ public sealed class UniversalisService : IUniversalisService, IDisposable
             // "only buy high quality" preference from excluding them entirely.
             AllowHighQuality = x.Row.CanBeHq,
             HuntOnTour = true, TourPriority = 1,
+        }).OrderBy(x => x.ItemName).ToArray();
+
+    // Tomestone materials: list whatever is in the bags, keep none back, never buy.
+    // Matching is by exact sheet name, so the caller logs how many were found - a
+    // renamed or mistyped entry would otherwise seed nothing and look like a bug.
+    public IReadOnlyList<ProcurementRule> CreateTomeMaterialRules() => TradeableItems()
+        .Where(x => ResaleStockPolicy.IsTomeMaterial(x.Name))
+        .Select(x => new ProcurementRule
+        {
+            ItemId = x.Row.RowId, ItemName = x.Name, TargetStackSize = 20,
+            MaximumSaleSlots = 5, MinimumWeeklyUnitsSold = 0,
+            ListFromBags = true, BagReserveQuantity = 0, LiquidateOnly = true,
+            AllowHighQuality = x.Row.CanBeHq,
         }).OrderBy(x => x.ItemName).ToArray();
 
     // Grades XI and XII only. Everything older stays on the sell-off list, and this

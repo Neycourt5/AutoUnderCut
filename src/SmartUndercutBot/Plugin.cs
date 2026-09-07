@@ -82,6 +82,28 @@ public sealed class Plugin : IDalamudPlugin
             configuration.Current.MateriaRulesSeeded = true;
             configuration.Save();
         }
+        if (!configuration.Current.TomeMaterialRulesSeeded)
+        {
+            var tome = universalis.CreateTomeMaterialRules();
+            foreach (var rule in tome)
+            {
+                var existing = configuration.Current.ProcurementRules.FirstOrDefault(x => x.ItemId == rule.ItemId);
+                if (existing is null)
+                    configuration.Current.ProcurementRules.Add(rule);
+                else if (existing.LiquidateOnly)
+                {
+                    existing.ListFromBags = true;
+                    existing.BagReserveQuantity = 0;
+                    existing.TargetStackSize = rule.TargetStackSize;
+                    existing.MaximumSaleSlots = rule.MaximumSaleSlots;
+                }
+            }
+            automationLog.Add(AutomationLogLevel.Information,
+                $"SELL-OFF matched {tome.Count}/{ResaleStockPolicy.TomeMaterialNames.Length} tomestone material name(s) " +
+                "in the item sheet; any missing name is listed in the Shopping item table.");
+            configuration.Current.TomeMaterialRulesSeeded = true;
+            configuration.Save();
+        }
         if (!configuration.Current.BuyableDyeRulesSeeded)
         {
             foreach (var rule in universalis.CreateBuyableDyeRules()

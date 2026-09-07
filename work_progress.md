@@ -11,6 +11,24 @@ Build: use `C:/Users/Acour/.dotnet/dotnet.exe` (SDK 10.0.301), **not** the PATH
 
 ---
 
+## v1.0.0.39 - tomestone materials are listed from the bags
+User pasted a market analysis of tome materials on Siren and asked to "include
+these if they are in my bag". These are bought with tomestones, not gil, so they
+are sell-only: listed from the bags with nothing kept back, never purchased, and
+never walked on the tour.
+
+Seeded: Diatryma Pelt, Hydrophobic Preservative, Double Duracoat, Everkeep Resin,
+Turali Pigment, Mastodon Pelt, Shaaloani Coke, Yollal Extract. Stack 20, up to 5
+sale slots each, `AllowHighQuality` read from the sheet's `CanBeHq`.
+
+Matching is by **exact sheet name**, so a rename or typo would silently seed
+nothing. Startup logs how many of the eight names matched; check the Shopping item
+table if one is missing. Config version 27.
+
+Also made `ExistingSettingsEnableComfortableStockOnUpgrade` compare against a fresh
+`Configuration().Version` instead of a literal, so it stops breaking on every
+migration.
+
 ## v1.0.0.38 - the all-world tour becomes an explicit allowlist
 User: limit the tour to current materia (XI and XII, low priority), Caramel
 Popcorn and other raid food such as Popoto Potage, Wide-Spectrum dyes,

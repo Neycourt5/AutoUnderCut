@@ -16,6 +16,17 @@ public static class ResaleStockPolicy
         "Grade 4 Gemdraught of Intelligence" or "Grade 4 Gemdraught of Mind" or
         "Caramel Popcorn" or "Popoto Potage";
 
+    // Materials bought with tomestones. They are acquired for gil, never traded for,
+    // so they are listed from the bags with nothing held back and never purchased.
+    public static readonly string[] TomeMaterialNames =
+    [
+        "Diatryma Pelt", "Hydrophobic Preservative", "Double Duracoat", "Everkeep Resin",
+        "Turali Pigment", "Mastodon Pelt", "Shaaloani Coke", "Yollal Extract",
+    ];
+
+    public static bool IsTomeMaterial(string name) =>
+        TomeMaterialNames.Contains(name, StringComparer.OrdinalIgnoreCase);
+
     // Only grades XI and XII are current enough to be worth trading; every other
     // grade stays on the sell-off list.
     public static bool IsTradeableMateria(string name) =>

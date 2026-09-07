@@ -7,7 +7,7 @@ namespace SmartUndercutBot;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 26;
+    public int Version { get; set; } = 27;
     public bool AutomationEnabled { get; set; }
     public bool ProcessAllRetainers { get; set; } = true;
     public bool RepeatBellRuns { get; set; }
@@ -40,6 +40,7 @@ public sealed class Configuration : IPluginConfiguration
     public bool DyeRulesSeeded { get; set; }
     public bool MateriaRulesSeeded { get; set; }
     public bool BuyableDyeRulesSeeded { get; set; }
+    public bool TomeMaterialRulesSeeded { get; set; }
     public int ProcurementTargetSaleSlots { get; set; } = 60;
     public int ProcurementInventoryReserve { get; set; } = 10;
     public decimal ProcurementMinimumRoiPercent { get; set; } = 20m;
@@ -316,7 +317,13 @@ public sealed class Configuration : IPluginConfiguration
                 ResaleStockPolicy.IsTradeableMateria(x.ItemName));
             Version = 26;
         }
-        Version = Math.Max(Version, 26);
+        if (Version < 27)
+        {
+            // Tomestone materials are listed from the bags, never bought.
+            TomeMaterialRulesSeeded = false;
+            Version = 27;
+        }
+        Version = Math.Max(Version, 27);
         LiveWorldStockHuntMaximumItems = Math.Clamp(LiveWorldStockHuntMaximumItems, 1, 40);
         ProcurementBufferGilPercent = Math.Clamp(ProcurementBufferGilPercent, 0m, 100m);
         ProcurementBagBufferStacks = Math.Clamp(ProcurementBagBufferStacks, 0, 50);

@@ -17,6 +17,28 @@ public sealed class ReinvestmentAndStockPolicyTests
     };
 
     [Fact]
+    public void TomestoneMaterialsAreListedFromBagsButNeverBought()
+    {
+        var pelt = new ProcurementRule
+        {
+            ItemId = 1, ItemName = "Diatryma Pelt", LiquidateOnly = true,
+            ListFromBags = true, BagReserveQuantity = 0,
+        };
+        Assert.True(ResaleStockPolicy.IsTomeMaterial("Diatryma Pelt"));
+        Assert.True(ResaleStockPolicy.IsTomeMaterial("yollal extract"));
+        Assert.False(ResaleStockPolicy.IsTomeMaterial("Diatryma Skin"));
+
+        // Listed with nothing held back...
+        Assert.True(ResaleStockPolicy.CanListFromBags(pelt, pelt.ItemName, false));
+        Assert.Equal(0u, ResaleStockPolicy.BagReserve(pelt, pelt.ItemName, 100));
+        // ...and never planned as a purchase, at either quality.
+        Assert.Empty(new ProcurementPlannerService()
+            .BuildPlan(new([Market(10, 200)], [pelt], 500_000, 5, 5, 20, 100)).Orders);
+        // Nor walked on the all-world tour.
+        Assert.Empty(ResaleStockPolicy.SelectTourRules([pelt], _ => true, 8));
+    }
+
+    [Fact]
     public void TheAllWorldTourOnlyWalksMarkedStockInPriorityOrder()
     {
         ProcurementRule Tour(string name, int priority) =>

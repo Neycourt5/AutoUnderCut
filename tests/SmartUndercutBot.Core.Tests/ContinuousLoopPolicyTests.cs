@@ -25,7 +25,9 @@ public sealed class ContinuousLoopPolicyTests
         var config = System.Text.Json.JsonSerializer.Deserialize<Configuration>("{\"Version\":24,\"ProcurementBagBufferStacks\":5}")!;
         config.Normalize();
         Assert.True(config.ContinueShoppingWhenStocked);
-        Assert.Equal(26, config.Version);
+        // Compare against a fresh config so this does not need editing every
+        // migration; the point is that an upgrade lands on the current version.
+        Assert.Equal(new Configuration().Version, config.Version);
     }
 
     [Theory]
