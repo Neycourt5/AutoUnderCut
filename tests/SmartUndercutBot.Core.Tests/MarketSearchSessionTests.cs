@@ -104,6 +104,41 @@ public sealed class MarketSearchSessionTests
     }
 
     [Fact]
+    public void ACompleteResponseIsAcceptedEvenWhileTheWaitingFlagIsStillSet()
+    {
+        var ui = new SearchUi();
+        var clock = new Clock();
+        var session = Started(ui, clock);
+        ui.Rows = [new(0, 42, true)];
+        clock.Advance(600);
+        session.Poll(42);            // opens the row
+        Assert.Single(ui.Activations);
+
+        // The server declared its rows and every one arrived, but the client's
+        // waiting flag is still set. Gating on it stalled the item until timeout.
+        ui.Result = new(true, 42, true, true);
+        clock.Advance(3_500);
+        Assert.True(session.Poll(42));
+        Assert.Contains("Live prices loaded", session.Status);
+    }
+
+    [Fact]
+    public void AnIncompleteResponseIsStillNotAccepted()
+    {
+        var ui = new SearchUi();
+        var clock = new Clock();
+        var session = Started(ui, clock);
+        ui.Rows = [new(0, 42, true)];
+        clock.Advance(600);
+        session.Poll(42);
+
+        ui.Result = new(true, 42, false, false);
+        clock.Advance(3_500);
+        Assert.False(session.Poll(42));
+        Assert.Contains("Waiting for live prices", session.Status);
+    }
+
+    [Fact]
     public void SearchRowsAreReadEvenWhileAListingRequestIsInFlight()
     {
         var ui = new SearchUi();

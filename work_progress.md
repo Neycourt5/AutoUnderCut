@@ -67,6 +67,35 @@ Primary source checks: [FFXIVClientStructs market proxy](https://github.com/aers
 [Lifestream market shortcut](https://github.com/NightmareXIV/Lifestream/blob/main/Lifestream/Tasks/Shortcuts/TaskMBShortcut.cs),
 [Lifestream public IPC](https://github.com/NightmareXIV/Lifestream/blob/main/Lifestream/IPC/IPCProvider.cs).
 
+## v1.0.0.51 - WaitingForListings stalls a response that already arrived
+
+Screenshot, Grade 4 Gemdraught of Intelligence, Search Results fully populated:
+
+    Waiting for live prices for Grade 4 Gemdraught of Intelligence.
+    (server rows 29, received 29, error 0)
+
+The server declared 29 rows, all 29 arrived, no error - and the plugin was still
+waiting. The readiness test was:
+
+    result.ResponseReceived && !result.Waiting && now >= nextActionAt
+
+`Waiting` is `InfoProxyItemSearch.WaitingForListings`, and on this client it stays
+set after a complete response. So every item sat until its route timeout with the
+data already in hand. That is the reported "hangs on this screen, very slow".
+
+This is the **third** stall caused by that flag: v1.0.0.36 gated submission on it,
+v1.0.0.47 gated reading search rows on it, and now readiness. Treat it as
+unreliable for "done" - it is only useful for "do not clobber something in
+flight", which is all it still guards (closing a stale results window, and the
+purchase-time check in `SubmitPurchase`).
+
+`MarketResponseTracker.IsReady` is strictly stronger and is now the sole readiness
+signal: right item, server row count declared, every row received, no error,
+visible count matching, and settled for 750ms.
+
+Two tests: a complete response is accepted while the flag is still set, and an
+incomplete one is still refused.
+
 ## v1.0.0.50 - the tour was walking only materia, and empty boards were written off
 
 ### The tour skipped every item being flipped

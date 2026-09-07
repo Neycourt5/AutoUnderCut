@@ -72,7 +72,12 @@ public sealed class MarketSearchSession(IMarketSearchUi ui, TimeProvider? clock 
         {
             if (selected && result.ItemId == itemId)
             {
-                var ready = result.ResponseReceived && !result.Waiting && time.GetUtcNow() >= nextActionAt;
+                // ResponseReceived is the authoritative signal: the server declared a
+                // row count, every row arrived, there was no error and it has settled.
+                // WaitingForListings is not - it stays set on this client after a
+                // complete response, which stalled every item until the route timed
+                // out even with all rows in hand.
+                var ready = result.ResponseReceived && time.GetUtcNow() >= nextActionAt;
                 Status = ready ? $"Live prices loaded for {itemName}." : $"Waiting for live prices for {itemName}.";
                 return ready;
             }
