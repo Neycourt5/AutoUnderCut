@@ -257,15 +257,11 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
             .ThenBy(x => x.TotalCost).First();
     }
 
-    // With highQualityOnly set, normal quality is never bought and an item that has
-    // no high-quality form yields nothing at all, so it is skipped rather than
-    // stocked in a quality that will not sell.
     private static IEnumerable<bool> EligibleQualities(ProcurementRule rule, bool highQualityOnly)
     {
-        if (!rule.RequireHighQuality && !highQualityOnly)
-            yield return false;
-        if (rule.AllowHighQuality || rule.RequireHighQuality)
-            yield return true;
+        foreach (var quality in new[] { false, true })
+            if (ResaleStockPolicy.BuyableQuality(rule, quality, highQualityOnly))
+                yield return quality;
     }
 
     private static uint Median(IEnumerable<uint> values)

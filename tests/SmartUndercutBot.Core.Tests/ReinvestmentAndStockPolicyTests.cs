@@ -58,14 +58,30 @@ public sealed class ReinvestmentAndStockPolicyTests
     }
 
     [Fact]
-    public void HighQualityOnlyRefusesStockThatWouldBeBoughtAtNormalQuality()
+    public void HighQualityOnlyRefusesTheNormalFormOfAnItemThatHasBoth()
     {
-        // Normal quality does not sell for this player, so a normal-quality-only
-        // item is skipped entirely rather than stocked in a quality that will sit.
+        // Food and potions exist at both qualities and only the HQ form sells, so a
+        // normal-quality listing must not be bought.
+        var rule = Rule();
+        rule.AllowHighQuality = true;
         Assert.Empty(new ProcurementPlannerService().BuildPlan(new(
-            [Market(10, 200)], [Rule()], 500_000, 5, 5, 20, 100, HighQualityOnly: true)).Orders);
+            [Market(10, 200)], [rule], 500_000, 5, 5, 20, 100, HighQualityOnly: true)).Orders);
         Assert.Single(new ProcurementPlannerService().BuildPlan(new(
-            [Market(10, 200)], [Rule()], 500_000, 5, 5, 20, 100)).Orders);
+            [Market(10, 200)], [rule], 500_000, 5, 5, 20, 100)).Orders);
+    }
+
+    [Fact]
+    public void HighQualityOnlyStillBuysItemsThatHaveNoHighQualityForm()
+    {
+        // Dyes only ever exist at normal quality. Excluding them would mean the
+        // preference silently removed a whole category of tradeable stock.
+        Assert.Single(new ProcurementPlannerService().BuildPlan(new(
+            [Market(10, 200)], [Rule()], 500_000, 5, 5, 20, 100, HighQualityOnly: true)).Orders);
+        Assert.True(ResaleStockPolicy.BuyableQuality(Rule(), false, true));
+        var both = Rule();
+        both.AllowHighQuality = true;
+        Assert.False(ResaleStockPolicy.BuyableQuality(both, false, true));
+        Assert.True(ResaleStockPolicy.BuyableQuality(both, true, true));
     }
 
     [Fact]

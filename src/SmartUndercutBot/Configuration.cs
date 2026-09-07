@@ -6,7 +6,7 @@ namespace SmartUndercutBot;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 21;
+    public int Version { get; set; } = 23;
     public bool AutomationEnabled { get; set; }
     public bool ProcessAllRetainers { get; set; } = true;
     public bool RepeatBellRuns { get; set; }
@@ -31,10 +31,12 @@ public sealed class Configuration : IPluginConfiguration
     public uint ProcurementBudget { get; set; } = 5_000_000;
     public bool ReinvestAvailableGil { get; set; } = true;
     public bool BuyHighQualityOnly { get; set; } = true;
+    public int ProcurementBagBufferStacks { get; set; } = 5;
     public uint ProcurementTravelReserve { get; set; } = 5_000;
     public decimal ProcurementWeeklySalesSharePercent { get; set; } = 25m;
     public bool DyeRulesSeeded { get; set; }
     public bool MateriaRulesSeeded { get; set; }
+    public bool BuyableDyeRulesSeeded { get; set; }
     public int ProcurementTargetSaleSlots { get; set; } = 60;
     public int ProcurementInventoryReserve { get; set; } = 10;
     public decimal ProcurementMinimumRoiPercent { get; set; } = 20m;
@@ -282,6 +284,23 @@ public sealed class Configuration : IPluginConfiguration
             BuyHighQualityOnly = true;
             Version = 21;
         }
+        if (Version < 22)
+        {
+            ProcurementBagBufferStacks = 5;
+            Version = 22;
+        }
+        if (Version < 23)
+        {
+            // High-volume dye lines move from the sell-off list to tradeable stock.
+            DyeRulesSeeded = false;
+            BuyableDyeRulesSeeded = false;
+            ProcurementRules.RemoveAll(x => x.LiquidateOnly &&
+                x.ItemName.EndsWith(" Dye", StringComparison.OrdinalIgnoreCase) &&
+                (x.ItemName.StartsWith("General-Purpose ", StringComparison.OrdinalIgnoreCase) ||
+                 x.ItemName.StartsWith("Wide-Spectrum ", StringComparison.OrdinalIgnoreCase)));
+            Version = 23;
+        }
+        ProcurementBagBufferStacks = Math.Clamp(ProcurementBagBufferStacks, 0, 50);
         ProcurementTravelReserve = Math.Min(ProcurementTravelReserve, 100_000_000u);
         ProcurementWeeklySalesSharePercent = Math.Clamp(ProcurementWeeklySalesSharePercent, 1m, 100m);
         MinimumDelayMs = Math.Clamp(MinimumDelayMs, 100, 60_000);

@@ -62,6 +62,12 @@ tour to both qualities, which was wrong for this account. Added
 - Selling is untouched: dyes, materia and ethers are normal quality and are still
   listed from the bags.
 
+### v1.0.0.33 - one button, bag buffer, buyable dyes
+See `work_progress.md` for the full trail. Shopping was always part of Start; it was
+idle only because retainers were full, and the UI never said so. Added the loop
+readout, the bag buffer, and buyable high-volume dyes, and corrected the HQ-only
+rule so it no longer excludes categories that have no HQ form.
+
 ### Deferred (user: low priority, do not break anything)
 - Quieter travel destinations. Only the safe half is in: the summoning-bell leg now
   has its own optional Lifestream command, defaulting to empty, which reuses the

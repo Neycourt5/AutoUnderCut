@@ -12,6 +12,7 @@ public interface IUniversalisService
     string ResolveDataCenter(string configuredDataCenter);
     IReadOnlyList<ProcurementRule> CreateFavoriteRules();
     IReadOnlyList<ProcurementRule> CreateLiquidationRules();
+    IReadOnlyList<ProcurementRule> CreateBuyableDyeRules();
     Task<IReadOnlyList<ProcurementMarketItem>> ScanAsync(
         IReadOnlyList<ProcurementRule> rules,
         string dataCenter,
@@ -73,12 +74,8 @@ public sealed class UniversalisService : IUniversalisService, IDisposable
 
     // Dyes, materia and ethers are stock the player wants cleared, not traded: list
     // everything held in the bags, keep nothing back, and never plan a purchase.
-    public IReadOnlyList<ProcurementRule> CreateLiquidationRules() => dataManager
-        .GetExcelSheet<Item>()
-        .Where(x => !x.IsUntradable && x.ItemSearchCategory.RowId != 0)
-        .Select(x => (Row: x, Name: x.Name.ToString()))
-        .Where(x => !string.IsNullOrWhiteSpace(x.Name) &&
-                    // Never sweep up the consumables the player actually trades.
+    public IReadOnlyList<ProcurementRule> CreateLiquidationRules() => TradeableItems()
+        .Where(x => // Never sweep up the consumables the player actually trades.
                     !ResaleStockPolicy.IsCuratedConsumable(x.Name) &&
                     (IsDye(x.Name) || IsEther(x.Name) || IsMateria(x.Row)))
         .Select(x => new ProcurementRule
@@ -88,7 +85,33 @@ public sealed class UniversalisService : IUniversalisService, IDisposable
             ListFromBags = true, BagReserveQuantity = 0, LiquidateOnly = true,
         }).OrderBy(x => x.ItemName).ToArray();
 
-    private static bool IsDye(string name) => name.EndsWith(" Dye", StringComparison.OrdinalIgnoreCase);
+    // The mass-market dye lines move real volume and are worth trading. Every other
+    // dye stays on the sell-off list.
+    public IReadOnlyList<ProcurementRule> CreateBuyableDyeRules() => TradeableItems()
+        .Where(x => IsBuyableDye(x.Name))
+        .Select(x => new ProcurementRule
+        {
+            ItemId = x.Row.RowId, ItemName = x.Name, TargetStackSize = 20,
+            MaximumSaleSlots = 2, MinimumWeeklyUnitsSold = 50,
+            ListFromBags = true, BagReserveQuantity = 0,
+            // Dyes have no high-quality form; reading this from the sheet keeps the
+            // "only buy high quality" preference from excluding them entirely.
+            AllowHighQuality = x.Row.CanBeHq,
+        }).OrderBy(x => x.ItemName).ToArray();
+
+    private IEnumerable<(Item Row, string Name)> TradeableItems() => dataManager.GetExcelSheet<Item>()
+        .Where(x => !x.IsUntradable && x.ItemSearchCategory.RowId != 0)
+        .Select(x => (Row: x, Name: x.Name.ToString()))
+        .Where(x => !string.IsNullOrWhiteSpace(x.Name));
+
+    private static readonly string[] BuyableDyePrefixes = ["General-Purpose ", "Wide-Spectrum "];
+
+    private static bool IsBuyableDye(string name) =>
+        name.EndsWith(" Dye", StringComparison.OrdinalIgnoreCase) &&
+        BuyableDyePrefixes.Any(prefix => name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
+
+    private static bool IsDye(string name) =>
+        name.EndsWith(" Dye", StringComparison.OrdinalIgnoreCase) && !IsBuyableDye(name);
 
     // "Ether", "Hi-Ether", "Mega-Ether", "X-Ether". Matching the whole word keeps
     // "Aethersand" and anything merely containing the letters out.

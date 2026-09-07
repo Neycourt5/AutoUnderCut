@@ -244,7 +244,7 @@ public sealed class ProcurementControllerTests
     public void RecoverableStopDoesNotDisableUnattendedProcurementForever()
     {
         using var run = new Route();
-        run.Repricing.LastKnownFreeSaleSlots = 0;
+        run.Repricing.LastKnownFreeSaleSlots = null;
         run.Controller.RunLiveStockHuntNow();
         Assert.Equal(ProcurementState.Halted, run.Controller.State);
 
@@ -271,7 +271,7 @@ public sealed class ProcurementControllerTests
     public void StoppedRouteDoesNotResumeAwayFromASummoningBell()
     {
         using var run = new Route();
-        run.Repricing.LastKnownFreeSaleSlots = 0;
+        run.Repricing.LastKnownFreeSaleSlots = null;
         run.Controller.RunLiveStockHuntNow();
         run.Game.BellOpen = false;
         run.Tick(100_000);
@@ -284,6 +284,7 @@ public sealed class ProcurementControllerTests
         using var run = new Route();
         run.Config.Current.AutomaticProcurementEnabled = true;
         run.Config.Current.LiveWorldStockHuntEnabled = false;
+        run.Config.Current.ProcurementBagBufferStacks = 0;
         run.Repricing.LastKnownFreeSaleSlots = 5;
         // Five bought-but-unlisted stacks reserve every free sale slot.
         run.Ledger.RecordPurchase(new(1, "Popcorn", 1, 1, "Siren", 1, 1_000, 5, true, 2_000, 1_500, 100, 1), 1);
@@ -314,6 +315,8 @@ public sealed class ProcurementControllerTests
     {
         using var run = new Route();
         run.Config.Current.EnableStockAutomation();
+        // No completed pass, or a completed pass with no capacity and no bag buffer.
+        run.Config.Current.ProcurementBagBufferStacks = 0;
         run.Repricing.LastKnownFreeSaleSlots = freeSlots;
         run.Tick(100_000);
         Assert.Equal(0, run.Game.Scans);
@@ -325,6 +328,7 @@ public sealed class ProcurementControllerTests
     {
         using var run = new Route();
         run.Config.Current.EnableStockAutomation();
+        run.Config.Current.ProcurementBagBufferStacks = 0;
         run.Repricing.LastKnownFreeSaleSlots = 0;
         run.Tick();
         Assert.Equal(0, run.Game.Scans);
@@ -349,6 +353,7 @@ public sealed class ProcurementControllerTests
     {
         using var run = new Route();
         run.Config.Current.EnableStockAutomation();
+        run.Config.Current.ProcurementBagBufferStacks = 0;
         run.Game.AutomaticWorldArrival = true;
         run.Game.AutomaticPurchaseConfirmation = true;
         run.Repricing.LastKnownFreeSaleSlots = 1;
@@ -518,6 +523,40 @@ public sealed class ProcurementControllerTests
         Assert.NotEmpty(run.Game.ScannedItemIds);
         Assert.Contains(1u, run.Game.ScannedItemIds);
         Assert.DoesNotContain(5_000u, run.Game.ScannedItemIds);
+    }
+
+    [Fact]
+    public void FullRetainersStillBuyABagBufferReadyForTheNextSale()
+    {
+        using var run = new Route();
+        run.Config.Current.EnableStockAutomation();
+        run.Config.Current.LiveWorldStockHuntEnabled = false;
+        run.Config.Current.ProcurementBagBufferStacks = 2;
+        run.Game.AutomaticWorldArrival = true;
+        run.Game.AutomaticPurchaseConfirmation = true;
+        // Every retainer slot is taken, which used to stop shopping completely.
+        run.Repricing.LastKnownFreeSaleSlots = 0;
+        run.Tick(601);
+        for (var tick = 0; tick < 400 && run.Game.Purchases == 0; tick++)
+            run.Tick(2);
+        Assert.Equal(1, run.Game.Purchases);
+    }
+
+    [Fact]
+    public void TheBagBufferStopsOnceEnoughStockIsWaiting()
+    {
+        using var run = new Route();
+        run.Config.Current.EnableStockAutomation();
+        run.Config.Current.LiveWorldStockHuntEnabled = false;
+        run.Config.Current.ProcurementBagBufferStacks = 2;
+        run.Repricing.LastKnownFreeSaleSlots = 0;
+        // Two stacks are already bought and waiting, which fills the buffer.
+        run.Ledger.RecordPurchase(new(1, "Popcorn", 1, 1, "Siren", 1, 1_000, 2, true, 2_000, 1_500, 100, 1), 1);
+        Assert.Equal(2, run.Ledger.PendingSaleSlots);
+        run.Tick(601);
+        for (var tick = 0; tick < 200 && run.Controller.IsActive; tick++)
+            run.Tick(2);
+        Assert.Equal(0, run.Game.Purchases);
     }
 
     private sealed class Clock : TimeProvider

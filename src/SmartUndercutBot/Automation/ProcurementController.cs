@@ -547,9 +547,9 @@ public sealed class ProcurementController : IDisposable
             HaltForRetry("Lifestream must be enabled and idle before starting a live tour.");
             return;
         }
-        if (repricing.LastKnownFreeSaleSlots is not > 0)
+        if (repricing.LastKnownFreeSaleSlots is null)
         {
-            HaltForRetry("The live all-world stock hunt needs at least one confirmed empty retainer sale slot. Run the all-retainer bell pass first.");
+            HaltForRetry("The live all-world stock hunt needs a completed all-retainer bell pass first.");
             return;
         }
         if (AvailablePurchaseSlots() == 0 || market.FreeInventorySlots <= configuration.Current.ProcurementInventoryReserve || SpendableGil() == 0)
@@ -564,7 +564,7 @@ public sealed class ProcurementController : IDisposable
             return;
         }
         stockHuntRules = configuration.Current.ProcurementRules
-            .Where(x => x.Enabled && x.ItemId != 0 && !x.LiquidateOnly && IsBuyableQuality(x))
+            .Where(x => x.Enabled && x.ItemId != 0 && !x.LiquidateOnly)
             .Where(IsBelowStockThreshold)
             .DistinctBy(x => x.ItemId)
             .ToList();
@@ -817,8 +817,8 @@ public sealed class ProcurementController : IDisposable
         }
 
         var live = market.ReadLiveListings(currentStockHuntRule.ItemId)
-            .Where(x => ResaleStockPolicy.QualityAllowed(currentStockHuntRule, x.IsHighQuality) &&
-                        (!configuration.Current.BuyHighQualityOnly || x.IsHighQuality))
+            .Where(x => ResaleStockPolicy.BuyableQuality(
+                currentStockHuntRule, x.IsHighQuality, configuration.Current.BuyHighQualityOnly))
             .ToArray();
         successfulLiveScans++;
         worldSuccessfulScans++;
@@ -1342,16 +1342,17 @@ public sealed class ProcurementController : IDisposable
             repricing.IsActive || repricing.RequiresManualRestart || !playerState.IsLoaded)
             return;
 
-        // Never buy against the fallback UI target before an actual retainer pass.
-        // Pending inventory already reserves sale capacity and must be listed first.
-        if (repricing.LastKnownFreeSaleSlots is not > 0 || AvailablePurchaseSlots() <= 0 ||
+        // Never buy against the fallback UI target before an actual retainer pass has
+        // reported real capacity - but a completed pass reporting zero free slots is
+        // still real. AvailablePurchaseSlots decides from there, and it allows a bag
+        // buffer, so full retainers keep stocking up for the next sale.
+        if (repricing.LastKnownFreeSaleSlots is null || AvailablePurchaseSlots() <= 0 ||
             market.FreeInventorySlots <= configuration.Current.ProcurementInventoryReserve)
             return;
 
         if (configuration.Current.LiveWorldStockHuntEnabled)
         {
             if (configuration.Current.AllowAutomaticPurchases &&
-                repricing.LastKnownFreeSaleSlots is > 0 &&
                 timeProvider.GetUtcNow() >= nextLiveStockHunt && HasLowCuratedStock())
                 StartLiveStockHunt();
 
@@ -1366,7 +1367,7 @@ public sealed class ProcurementController : IDisposable
         // immediately when that capacity changes (a listing sold), otherwise use the
         // configured periodic interval while the character remains idle at the bell.
         var freeSaleSlots = repricing.LastKnownFreeSaleSlots;
-        var newlyAvailableCapacity = freeSaleSlots is > 0 &&
+        var newlyAvailableCapacity = freeSaleSlots is not null &&
                                      PlannedSaleSlots(freeSaleSlots.Value) != lastScannedFreeSaleSlots;
         if (!newlyAvailableCapacity && timeProvider.GetUtcNow() < nextAutomaticScan)
             return;
@@ -1375,13 +1376,8 @@ public sealed class ProcurementController : IDisposable
     }
 
     private bool HasLowCuratedStock() => configuration.Current.ProcurementRules
-        .Where(x => x.Enabled && x.ItemId != 0 && !x.LiquidateOnly && IsBuyableQuality(x))
+        .Where(x => x.Enabled && x.ItemId != 0 && !x.LiquidateOnly)
         .Any(IsBelowStockThreshold);
-
-    // Normal-quality resale stock does not sell, so by default an item with no
-    // high-quality form is not worth a world visit at all.
-    private bool IsBuyableQuality(ProcurementRule rule) =>
-        !configuration.Current.BuyHighQualityOnly || rule.AllowHighQuality || rule.RequireHighQuality;
 
     // Count only the qualities a rule actually trades, so a normal-quality food or
     // potion is not judged by an HQ stock level it will never have.
@@ -1389,8 +1385,7 @@ public sealed class ProcurementController : IDisposable
     {
         var held = 0;
         foreach (var quality in new[] { false, true })
-            if (ResaleStockPolicy.QualityAllowed(rule, quality) &&
-                (!configuration.Current.BuyHighQualityOnly || quality))
+            if (ResaleStockPolicy.BuyableQuality(rule, quality, configuration.Current.BuyHighQualityOnly))
                 held += market.GetInventoryCount(rule.ItemId, quality);
         return held < configuration.Current.LiveWorldStockThresholdPerItem;
     }
@@ -1498,8 +1493,7 @@ public sealed class ProcurementController : IDisposable
             var stackSize = Math.Max(1, rule.TargetStackSize);
             foreach (var quality in new[] { false, true })
             {
-                if (!ResaleStockPolicy.QualityAllowed(rule, quality) ||
-                    configuration.Current.BuyHighQualityOnly && !quality)
+                if (!ResaleStockPolicy.BuyableQuality(rule, quality, configuration.Current.BuyHighQualityOnly))
                     continue;
                 var held = market.GetInventoryCount(rule.ItemId, quality);
                 if (held > 0)
@@ -1513,8 +1507,12 @@ public sealed class ProcurementController : IDisposable
     // scheduler's "capacity changed" trigger - must agree on this number.
     // Comparing two different definitions is what made the scheduler rescan
     // Universalis continuously whenever any purchased stock was still unlisted.
+    // Beyond the free retainer slots, keep buying a small buffer of stacks that sit
+    // in the bags ready to list the moment something sells. Without it, full
+    // retainers stop shopping entirely and every sale waits a whole trip to refill.
     private int PlannedSaleSlots(int freeSaleSlots) => Math.Max(0,
-        Math.Min(freeSaleSlots, configuration.Current.ProcurementTargetSaleSlots) - ledger.PendingSaleSlots);
+        Math.Min(freeSaleSlots, configuration.Current.ProcurementTargetSaleSlots) +
+        configuration.Current.ProcurementBagBufferStacks - ledger.PendingSaleSlots);
 
     private bool StopUnproductiveTour()
     {

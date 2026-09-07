@@ -82,6 +82,14 @@ public sealed class Plugin : IDalamudPlugin
             configuration.Current.MateriaRulesSeeded = true;
             configuration.Save();
         }
+        if (!configuration.Current.BuyableDyeRulesSeeded)
+        {
+            foreach (var rule in universalis.CreateBuyableDyeRules())
+                if (configuration.Current.ProcurementRules.All(x => x.ItemId != rule.ItemId))
+                    configuration.Current.ProcurementRules.Add(rule);
+            configuration.Current.BuyableDyeRulesSeeded = true;
+            configuration.Save();
+        }
         taskbarAttention = new TaskbarAttentionService();
         procurement = new ProcurementController(
             Framework,

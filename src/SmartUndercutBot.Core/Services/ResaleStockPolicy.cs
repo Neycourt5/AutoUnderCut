@@ -11,6 +11,14 @@ public static class ResaleStockPolicy
     public static bool QualityAllowed(ProcurementRule rule, bool hq) =>
         hq ? rule.AllowHighQuality || rule.RequireHighQuality : !rule.RequireHighQuality;
 
+    public static bool TradesHighQuality(ProcurementRule rule) =>
+        rule.AllowHighQuality || rule.RequireHighQuality;
+
+    // "Only buy high quality" means high quality wins wherever both forms exist.
+    // Items that only ever exist at normal quality, such as dyes, stay buyable.
+    public static bool BuyableQuality(ProcurementRule rule, bool hq, bool highQualityOnly) =>
+        QualityAllowed(rule, hq) && (hq || !highQualityOnly || !TradesHighQuality(rule));
+
     public static bool CanListFromBags(ProcurementRule? rule, string name, bool hq) =>
         rule?.Enabled != false && (rule is null || QualityAllowed(rule, hq)) &&
         (rule?.ListFromBags ?? (hq && IsCuratedConsumable(name)));

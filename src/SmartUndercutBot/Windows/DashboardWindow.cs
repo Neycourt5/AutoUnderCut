@@ -97,9 +97,9 @@ public sealed class DashboardWindow : Window
         ImGui.TextColored(attention ? new Vector4(1f, 0.72f, 0.2f, 1f)
             : running ? new Vector4(0.35f, 0.85f, 0.65f, 1f) : new Vector4(0.75f, 0.75f, 0.75f, 1f),
             attention ? "Paused - check the message below"
-                : running ? "Keep retainers stocked: ON" : "Keep retainers stocked: OFF");
+                : running ? "All automation: ON" : "All automation: OFF");
         ImGui.BeginDisabled(stockAutomation.StartIssue is not null);
-        if (ImGui.Button("Start keeping retainers stocked"))
+        if (ImGui.Button("Start all automation"))
             stockAutomation.Start();
         ImGui.EndDisabled();
         ImGui.SameLine();
@@ -154,6 +154,8 @@ public sealed class DashboardWindow : Window
                 ? "Deal search: ready after the retainer check and bag refill."
                 : $"Next deal search / retry: {scan.LocalDateTime:t}");
         ImGui.TextWrapped("Sold slots are detected on the next retainer check. When no deal meets your limits, empty slots stay open and shopping retries later.");
+        ImGui.Spacing();
+        DrawLoopStages();
         ImGui.Separator();
 
         ImGui.TextUnformatted("Your limits (saved automatically)");
@@ -179,10 +181,79 @@ public sealed class DashboardWindow : Window
             config.BagListingReservePerItem = reserve;
             configurationDirty = true;
         }
-        ImGui.TextWrapped($"Bag refills use HQ Grade 4 gemdraughts and HQ Caramel Popcorn in complete 99-stacks, keeping {reserve:N0} of each. " +
-                          "Purchased resale stock is queued separately. Shopping contains the item list and additional limits.");
+        ImGui.TextWrapped($"Bag refills list HQ Grade 4 gemdraughts and HQ Caramel Popcorn in complete 99-stacks, keeping {reserve:N0} of each, " +
+                          "plus high-volume dyes. Materia, ethers and the remaining dyes are sold off with nothing kept back. " +
+                          "See Stock for exactly what each bag item will do, and Shopping for the item list and limits.");
         ImGui.Text($"Check retainers every {config.RepeatMinimumMinutes}-{config.RepeatMaximumMinutes} minutes; retry deals every {config.ProcurementIntervalMinutes} minutes.");
         ImGui.TextWrapped("Travel requires Lifestream and vnavmesh. Live prices and inventory confirmation are checked before another purchase is attempted.");
+    }
+
+    // Start runs every stage, but when one is idle the reason is invisible - full
+    // retainers look identical to shopping being switched off. Show each stage and
+    // why it is waiting.
+    private void DrawLoopStages()
+    {
+        var config = configuration.Current;
+        var free = automation.LastKnownFreeSaleSlots;
+        var pending = procurementLedger.PendingSaleSlots;
+        var running = new Vector4(0.35f, 0.75f, 1f, 1f);
+        var waiting = new Vector4(0.75f, 0.75f, 0.75f, 1f);
+        var blocked = new Vector4(1f, 0.72f, 0.2f, 1f);
+        var goal = new Vector4(0.35f, 0.9f, 0.45f, 1f);
+
+        ImGui.TextUnformatted("Everything Start runs");
+        if (!ImGui.BeginTable("LoopStages", 2,
+                ImGuiTableFlags.RowBg | ImGuiTableFlags.SizingStretchProp))
+            return;
+        void Stage(string name, Vector4 color, string state)
+        {
+            ImGui.TableNextRow();
+            ImGui.TableNextColumn();
+            ImGui.TextUnformatted(name);
+            ImGui.TableNextColumn();
+            ImGui.TextColored(color, state);
+        }
+
+        Stage("1. Check retainers, reprice, collect gil",
+            automation.IsActive ? running : automation.RequiresManualRestart ? blocked : waiting,
+            automation.IsActive ? "running now"
+                : automation.RequiresManualRestart ? "stopped - check the last action in game"
+                : !bagListing.IsRetainerListOpen ? "waiting for the summoning-bell list"
+                : automation.Status.NextActionAt is { } next ? $"next at {next.LocalDateTime:t}"
+                : "ready");
+
+        Stage("2. List stock from your bags",
+            bagListing.IsBusy ? running : free is 0 && pending > 0 ? blocked : waiting,
+            bagListing.IsBusy ? "running now"
+                : free is 0 && pending > 0 ? $"{pending} stack(s) waiting for a free slot"
+                : pending > 0 ? $"{pending} stack(s) queued"
+                : "nothing waiting");
+
+        Stage("3. Travel to other worlds and buy deals",
+            procurement.IsActive ? running
+                : procurement.RequiresManualRestart ? blocked
+                : free is 0 ? goal : waiting,
+            procurement.IsActive ? "running now"
+                : procurement.RequiresManualRestart ? "stopped - check the last purchase in game"
+                : procurement.IsWaitingToReturnHome ? "returning home"
+                : free is 0 && config.ProcurementBagBufferStacks > 0
+                    ? $"stocking up to {config.ProcurementBagBufferStacks} spare stack(s) for the bags"
+                : free is 0 ? "paused - every sale slot is already full"
+                : procurement.Status.NextAutomaticScan is { } scan
+                    ? $"next deal search at {scan.LocalDateTime:t}"
+                    : "ready");
+
+        Stage("4. Return home and list what was bought",
+            procurement.IsActive || bagListing.IsBusy ? running : waiting,
+            "runs at the end of each trip");
+        ImGui.EndTable();
+
+        if (free is 0)
+            ImGui.TextColored(goal, config.ProcurementBagBufferStacks > 0
+                ? "Nothing is switched off. Every retainer slot is full, which is the goal, so shopping keeps a " +
+                  "small buffer of stacks in the bags instead - ready to list the moment something sells."
+                : "Nothing is switched off: shopping is included in Start and pauses only because there is " +
+                  "nowhere left to put stock. It resumes by itself as soon as something sells.");
     }
 
     private void DrawAdvanced()
@@ -757,6 +828,13 @@ public sealed class DashboardWindow : Window
                 configurationDirty = true;
             }
             ImGui.TextDisabled("Never spent, so a purchase cannot leave the character without teleport fare. Set 0 to spend everything.");
+            var buffer = config.ProcurementBagBufferStacks;
+            if (InputInt("Spare stacks to keep in bags", ref buffer, 0, 50))
+            {
+                config.ProcurementBagBufferStacks = buffer;
+                configurationDirty = true;
+            }
+            ImGui.TextDisabled("Bought beyond the free retainer slots and held ready to list the moment something sells, so full retainers do not stop shopping. Set 0 to buy only for slots that are already free.");
             var salesShare = (float)config.ProcurementWeeklySalesSharePercent;
             if (ImGui.DragFloat("Maximum stock to hold, as % of weekly sales", ref salesShare, 1f, 1, 100, "%.0f%%"))
             {
@@ -764,7 +842,7 @@ public sealed class DashboardWindow : Window
                 configurationDirty = true;
             }
             ImGui.TextDisabled("Counts stock already listed on retainers and held in bags, so a cheap item is not re-bought every trip. One full stack of an item is always allowed.");
-            ImGui.TextWrapped("Guided routes wait for manual buying. Keep retainers stocked uses automatic purchases.");
+            ImGui.TextWrapped("Guided routes wait for manual buying. Start all automation uses automatic purchases.");
             var interval = config.ProcurementIntervalMinutes;
             if (InputInt("Minutes between procurement scans", ref interval, 5, 1_440))
             {
@@ -808,7 +886,7 @@ public sealed class DashboardWindow : Window
                 config.LiveWorldStockHuntEnabled = liveHunt;
                 SaveConfiguration();
             }
-            ImGui.TextWrapped("Full live tours visit every NA and Oceania world before buying and use your home-world price as the resale anchor. Start keeping retainers stocked selects targeted Universalis routes instead.");
+            ImGui.TextWrapped("Full live tours visit every NA and Oceania world before buying and use your home-world price as the resale anchor. Start all automation selects targeted Universalis routes instead.");
             var lowStockThreshold = config.LiveWorldStockThresholdPerItem;
             if (InputInt("Live-tour low-stock threshold per item", ref lowStockThreshold, 1, 9999))
             {
