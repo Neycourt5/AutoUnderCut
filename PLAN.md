@@ -11,7 +11,10 @@
 - [x] Exclude Oceania from saved scopes, plans, guided routes and live shopping travel.
 - [x] Run 125 regression tests, including actual retainer-controller tests with a
   simulated three-day repeat run, and build Release with 0 warnings / errors.
-- [ ] Publish v1.0.0.34 and verify the public installer manifest and ZIP.
+- [x] Published v1.0.0.34 from f0c49f6. Release workflow 34069792116 succeeded.
+  Downloaded the public latest installer JSON and update ZIP: installer, ZIP
+  manifest and plugin DLL all report 1.0.0.34, API 15, with both DLLs included.
+  Release: https://github.com/Neycourt5/AutoUnderCut/releases/tag/v1.0.0.34
 
 Native game operations still require an in-game smoke test. Unknown purchase or
 listing outcomes and explicit Stop stay stopped. The screenshot proves the old

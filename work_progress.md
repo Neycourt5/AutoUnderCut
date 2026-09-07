@@ -45,7 +45,10 @@ while the screenshot showed three active retainers. User asked to finish and pub
 - Config version 24. 125 tests pass; Release plugin build has 0 warnings/errors.
   Tests include a simulated three-day retainer loop, late loading, recovery, Stop,
   unknown listing, zero-wallet/income, buffer bounds, and all five excluded worlds.
-- Publishing v1.0.0.34; final installer verification will be recorded after release.
+- Published v1.0.0.34 from f0c49f6; release workflow 34069792116 succeeded.
+  Downloaded latest repo.json and its ZIP (378,614 bytes): installer version, ZIP
+  manifest and DLL assembly version are all 1.0.0.34; API 15; both required DLLs
+  are at the ZIP root. https://github.com/Neycourt5/AutoUnderCut/releases/tag/v1.0.0.34
 
 ## v1.0.0.33 - one button, bag buffer, buyable dyes
 User asked why a shopping trip was not running while "Keep retainers stocked" was
