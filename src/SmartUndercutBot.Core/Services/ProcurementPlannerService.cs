@@ -56,11 +56,15 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
                 var targetSalePrice = Median(sales.Select(x => x.PricePerUnit));
                 if (!string.IsNullOrWhiteSpace(request.HomeWorld))
                 {
-                    var homeLowest = (request.ResaleListings ?? market.Listings)
+                    // One badly underpriced listing must not become the resale anchor,
+                    // or every away-world deal is judged against a mistake.
+                    var homeListings = (request.ResaleListings ?? market.Listings)
                         .Where(x => x.ItemId == market.ItemId && x.IsHighQuality == quality &&
                                     x.Quantity > 0 && x.PricePerUnit > 0 &&
                                     string.Equals(x.WorldName, request.HomeWorld, StringComparison.OrdinalIgnoreCase) &&
                                     request.OwnedRetainerIds?.Contains(x.RetainerId) != true)
+                        .ToArray();
+                    var homeLowest = HomePriceReference.WithoutOutliers(homeListings)
                         .Select(x => x.PricePerUnit).DefaultIfEmpty().Min();
                     // Home-world sales supply the median. Do not buy using a regional
                     // resale estimate or a higher price than local competition supports.

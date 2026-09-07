@@ -67,6 +67,43 @@ Primary source checks: [FFXIVClientStructs market proxy](https://github.com/aers
 [Lifestream market shortcut](https://github.com/NightmareXIV/Lifestream/blob/main/Lifestream/Tasks/Shortcuts/TaskMBShortcut.cs),
 [Lifestream public IPC](https://github.com/NightmareXIV/Lifestream/blob/main/Lifestream/IPC/IPCProvider.cs).
 
+## v1.0.0.52 - every live read returned empty, and the route never left home
+
+### WaitingForListings, a fourth and fifth time
+v1.0.0.51 fixed the readiness check but three *reads* still gated on the same
+flag. Log:
+
+    Live prices loaded for Craftsman's Cunning Materia XI
+    PRICE CHECK Siren: ... NQ: 0 listings / 0 units, lowest 0.
+                        No confirmed home resale listings; skip buying.
+
+Ready, then zero rows. `ReadLiveListings`, `TrySelectLiveListing` and
+`SubmitPurchase` all began with `proxy->WaitingForListings`, which stays set on
+this client, so every read returned empty with the rows in memory. That is why no
+home prices were ever recorded and nothing could qualify. All three now use
+`MarketResponseTracker.IsReady`, which is strictly stronger.
+
+Running total for this one flag: submission (.36), reading rows (.47), readiness
+(.51), and now the three live reads. **Do not gate anything on it.**
+
+### The route never travelled
+`PriorityTripShouldReturn` is called before every item, and its home branch used a
+flat 20-minute budget measured from the start of the home scan. With 51 flips at
+roughly ten seconds each the budget expired mid-scan, `FinishShopping` threw the
+gathered prices away, and the next pass started over and expired at the same
+point - "it just went back to refreshing stock prices".
+
+The home scan happens at home, so it is not time away from the retainers. It now
+gets a budget scaled to the list (30s per rule, floor 20 minutes), and on overrun
+it travels with the prices already gathered instead of discarding them.
+
+### Home reference prices (user request)
+`HomePriceReference` in Core, six tests. A listing below half the median is
+treated as someone's mistake and excluded from the resale anchor, but only with
+three or more listings, and never if it would empty the board. Shopping gains a
+"Home reference prices" table: item, quality, listings, lowest, median, and the
+reference actually used, flagging how many were ignored.
+
 ## v1.0.0.51 - WaitingForListings stalls a response that already arrived
 
 Screenshot, Grade 4 Gemdraught of Intelligence, Search Results fully populated:

@@ -308,7 +308,11 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService, IDisp
     public IReadOnlyList<LivePurchaseListing> ReadLiveListings(uint itemId)
     {
         var proxy = InfoProxyItemSearch.Instance();
-        if (proxy == null || proxy->WaitingForListings || proxy->SearchItemId != itemId)
+        // WaitingForListings stays set on this client after a complete response, so
+        // gating on it returned an empty board with every row already in memory.
+        // The tracker is the real signal: declared rows all received, no error.
+        if (proxy == null || proxy->SearchItemId != itemId ||
+            !response.IsReady(itemId, (int)proxy->ListingCount))
             return [];
 
         var result = new List<LivePurchaseListing>();
@@ -332,7 +336,8 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService, IDisp
     {
         listing = null;
         var proxy = InfoProxyItemSearch.Instance();
-        if (proxy == null || proxy->WaitingForListings || proxy->SearchItemId != expected.ItemId)
+        if (proxy == null || proxy->SearchItemId != expected.ItemId ||
+            !response.IsReady(expected.ItemId, (int)proxy->ListingCount))
             return false;
 
         var candidates = new List<LivePurchaseListing>();
@@ -357,7 +362,7 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService, IDisp
     public bool SubmitPurchase(LivePurchaseListing listing)
     {
         var proxy = InfoProxyItemSearch.Instance();
-        if (proxy == null || proxy->WaitingForListings || proxy->SearchItemId != listing.ItemId ||
+        if (proxy == null || proxy->SearchItemId != listing.ItemId ||
             !response.Contains(listing.ListingId) || !response.IsReady(listing.ItemId, (int)proxy->ListingCount) ||
             !IsAddonVisible("ItemSearchResult") || listing.Index < 0 ||
             listing.Index >= proxy->ListingCount || listing.Index >= proxy->Listings.Length)

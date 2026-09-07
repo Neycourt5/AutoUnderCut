@@ -18,6 +18,21 @@ public sealed partial class ProcurementController
     private int priorityWorldsCompleted;
     public IReadOnlyList<ShoppingObservation> RecentPrices => observations;
 
+    /// <summary>The home-world prices every away deal is measured against.</summary>
+    public IReadOnlyList<HomePriceSummary> HomeReferencePrices => homePrices
+        .SelectMany(entry => new[] { false, true }
+            .Select(quality => HomePriceReference.Summarize(entry.Key,
+                stockHuntRules.FirstOrDefault(r => r.ItemId == entry.Key)?.ItemName ??
+                configuration.Current.ProcurementRules.FirstOrDefault(r => r.ItemId == entry.Key)?.ItemName ??
+                $"#{entry.Key}",
+                quality, entry.Value)))
+        .Where(x => x.Listings > 0)
+        .OrderBy(x => x.ItemName, StringComparer.OrdinalIgnoreCase)
+        .ToArray();
+
+    public DateTimeOffset? HomePricesUpdatedAt =>
+        homePriceTimes.Count == 0 ? null : homePriceTimes.Values.Max();
+
     private void BeginPriorityShopping(IReadOnlyList<ProcurementMarketItem> markets)
     {
         priorityDemand = markets;
@@ -82,8 +97,24 @@ public sealed partial class ProcurementController
         if (!priorityShopping) return false;
         if (stockHuntWorldIndex == 0)
         {
-            if (timeProvider.GetUtcNow() - priorityDepartedAt < TimeSpan.FromMinutes(20)) return false;
-            FinishShopping("Home price checks exceeded 20 minutes. Returning to retainers before retrying.");
+            // The home scan happens at home, so it is not time away from the
+            // retainers and a flat 20 minutes is the wrong budget for it: with 51
+            // flips to check it expired mid-scan, threw the prices away and started
+            // over, which is why the route never left the home world. Budget it
+            // against the size of the list instead.
+            var homeBudget = TimeSpan.FromSeconds(Math.Max(1_200, stockHuntRules.Count * 30));
+            if (timeProvider.GetUtcNow() - priorityDepartedAt < homeBudget) return false;
+            if (homePrices.Count > 0)
+            {
+                // Prices already gathered are worth travelling on. Restarting the
+                // scan from scratch would only expire again at the same point.
+                log.Add(AutomationLogLevel.Warning,
+                    $"Home price checks ran long; travelling with the {homePrices.Count} price(s) already gathered.");
+                stockHuntRuleIndex = stockHuntRules.Count;
+                FinishStockHuntWorld();
+                return true;
+            }
+            FinishShopping("Home price checks ran long without gathering any prices. Returning to retainers.");
             return true;
         }
         if (AvailablePurchaseSlots() > 0 && SpendableGil() > 0 &&

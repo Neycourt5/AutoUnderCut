@@ -878,6 +878,45 @@ public sealed class DashboardWindow : Window
             ImGui.TextWrapped("Automatic shopping checks every configured flip with recent home sales, in item priority and sales-volume order. " +
                 "Each live deal must fit your profit, demand and stock limits. One purchase per item per world keeps the first pass diverse. " +
                 $"Next route stop: {((string.IsNullOrEmpty(configuration.Current.PriorityNextWorld)) ? "Aether" : configuration.Current.PriorityNextWorld)}.");
+        if (ImGui.CollapsingHeader("Home reference prices"))
+        {
+            var reference = procurement.HomeReferencePrices;
+            ImGui.TextWrapped("What every away-world deal is measured against, read live from your home world. " +
+                              "A listing under half the median is treated as someone's mistake and ignored, so one " +
+                              "wildly cheap row cannot make every deal look unprofitable.");
+            if (procurement.HomePricesUpdatedAt is { } updated)
+                ImGui.TextDisabled($"Last read {updated.LocalDateTime:g}");
+            if (reference.Count == 0)
+                ImGui.TextDisabled("No home prices yet. They are read at the start of each shopping route.");
+            else if (ImGui.BeginTable("home-reference", 6,
+                         ImGuiTableFlags.RowBg | ImGuiTableFlags.Borders | ImGuiTableFlags.ScrollY | ImGuiTableFlags.Resizable,
+                         new Vector2(0, 260 * ImGuiHelpers.GlobalScale)))
+            {
+                ImGui.TableSetupColumn("Item");
+                ImGui.TableSetupColumn("Q", ImGuiTableColumnFlags.WidthFixed, 30);
+                ImGui.TableSetupColumn("Listings", ImGuiTableColumnFlags.WidthFixed, 65);
+                ImGui.TableSetupColumn("Lowest", ImGuiTableColumnFlags.WidthFixed, 85);
+                ImGui.TableSetupColumn("Median", ImGuiTableColumnFlags.WidthFixed, 85);
+                ImGui.TableSetupColumn("Reference", ImGuiTableColumnFlags.WidthFixed, 110);
+                ImGui.TableHeadersRow();
+                foreach (var row in reference)
+                {
+                    ImGui.TableNextRow();
+                    ImGui.TableNextColumn(); ImGui.TextUnformatted(row.ItemName);
+                    ImGui.TableNextColumn(); ImGui.TextUnformatted(row.IsHighQuality ? "HQ" : "NQ");
+                    ImGui.TableNextColumn(); ImGui.TextUnformatted(row.Listings.ToString("N0"));
+                    ImGui.TableNextColumn(); ImGui.TextUnformatted(row.Lowest.ToString("N0"));
+                    ImGui.TableNextColumn(); ImGui.TextUnformatted(row.Median.ToString("N0"));
+                    ImGui.TableNextColumn();
+                    if (row.Ignored > 0)
+                        ImGui.TextColored(new Vector4(1f, 0.72f, 0.2f, 1f),
+                            $"{row.Reference:N0}  ({row.Ignored} ignored)");
+                    else
+                        ImGui.TextUnformatted(row.Reference.ToString("N0"));
+                }
+                ImGui.EndTable();
+            }
+        }
         if (ImGui.CollapsingHeader("Recent live price comparisons"))
         {
             ImGui.TextWrapped("These checks are also saved to the session log on the Activity log tab. Zero listings means a completed empty server response.");
