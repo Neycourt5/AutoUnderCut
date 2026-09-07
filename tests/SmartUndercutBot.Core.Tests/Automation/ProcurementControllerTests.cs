@@ -994,7 +994,8 @@ public sealed class ProcurementControllerTests
         config.Normalize();
         Assert.Equal(after, config.MarketBoardTravelCommand);
         Assert.True(config.PriorityShoppingEnabled);
-        Assert.Equal(29, config.Version);
+        // Compare against a fresh config so this survives later migrations.
+        Assert.Equal(new Configuration().Version, config.Version);
     }
 
     private sealed class Clock : TimeProvider

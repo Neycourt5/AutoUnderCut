@@ -91,9 +91,6 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
     private readonly HashSet<(ulong Retainer, short Slot)> skippedProblemListings = [];
     private int consecutiveRecoveries;
     private string? lastWriteFailure;
-    // Items the game returned nothing for this session. Retrying them costs a full
-    // timeout each and never produces prices.
-    private readonly HashSet<uint> itemsWithNoLiveMarket = [];
     private readonly List<int> retainerRows = [];
     private readonly Dictionary<(ulong RetainerId, short Slot), PortfolioListingEstimate> portfolioListings = [];
     private readonly Dictionary<ulong, PortfolioRetainerBalance> portfolioRetainers = [];
@@ -909,19 +906,13 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
             var message = marketTask.Exception?.GetBaseException().Message ?? "Live market request timed out.";
             var failedEntry = queue[currentIndex];
             if (!marketData.LastRequestSawAnyPacket)
-            {
-                // Nothing at all came back. On the evidence this means the item has no
-                // live market rather than that we are being throttled, so remember the
-                // item and stop paying its full timeout on every later row.
-                itemsWithNoLiveMarket.Add(failedEntry.Listing.ItemId);
-                log.Add(AutomationLogLevel.Warning,
-                    $"The game returned no market data at all for {failedEntry.Listing.ItemName}. " +
-                    "Treating it as having no live market and moving on.");
-            }
-
-            var worthRetrying = marketData.LastRequestSawAnyPacket ||
-                                !itemsWithNoLiveMarket.Contains(failedEntry.Listing.ItemId);
-            if (worthRetrying && marketRequestAttempts <= configuration.Current.MarketRequestRetryCount &&
+                // The board answers an over-eager request with nothing at all. That is
+                // not proof the item has no market: the very same items return full
+                // listings a row or two later. Retry instead of writing the item off.
+                log.Add(AutomationLogLevel.Debug,
+                    $"The board returned nothing for {failedEntry.Listing.ItemName}; " +
+                    "treating that as asked-too-soon and retrying.");
+            if (marketRequestAttempts <= configuration.Current.MarketRequestRetryCount &&
                 retainerListings.IsPriceEditorOpen)
             {
                 TryMapCurrentPriceEditor(0);
@@ -990,7 +981,10 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
         {
             ReplaceCurrent(entry with { Status = "Could not map visible row" });
             log.Add(AutomationLogLevel.Error,
-                $"Visible row {currentIndex + 1}: live item #{currentMarket.ItemId} could not be mapped to an unused retainer market slot; skipped.");
+                $"Visible row {currentIndex + 1}: live item #{currentMarket.ItemId} could not be mapped to an " +
+                $"unused retainer market slot; skipped. Queue row says {entry.Listing.ItemName} " +
+                $"(#{entry.Listing.ItemId}) x{entry.Listing.Quantity} at {entry.Listing.CurrentPrice:N0} in slot " +
+                $"{entry.Listing.Slot}; {processedSlots.Count} slot(s) already claimed for this retainer.");
             retainerListings.CancelPriceEditor();
             if (returnToAutoListingAfterCurrent)
             {
@@ -1624,7 +1618,6 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
     {
         listingFailureCounts.Clear();
         skippedProblemListings.Clear();
-        itemsWithNoLiveMarket.Clear();
         consecutiveRecoveries = 0;
         lastWriteFailure = null;
     }

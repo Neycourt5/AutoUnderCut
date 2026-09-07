@@ -7,7 +7,7 @@ namespace SmartUndercutBot;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 29;
+    public int Version { get; set; } = 31;
     public bool AutomationEnabled { get; set; }
     public bool ProcessAllRetainers { get; set; } = true;
     public bool RepeatBellRuns { get; set; }
@@ -17,10 +17,10 @@ public sealed class Configuration : IPluginConfiguration
     public bool OpenDashboardOnRetainer { get; set; } = true;
     public int MinimumDelayMs { get; set; } = 250;
     public int MaximumDelayMs { get; set; } = 450;
-    public int MarketRequestTimeoutSeconds { get; set; } = 10;
+    public int MarketRequestTimeoutSeconds { get; set; } = 6;
     public int MarketRequestCooldownMs { get; set; } = 3000;
     public int MarketRequestRetryCount { get; set; } = 2;
-    public int MarketRetryBackoffMs { get; set; } = 2000;
+    public int MarketRetryBackoffMs { get; set; } = 1200;
     public int MaximumUpdatesPerSession { get; set; } = 200;
     public bool AutomaticallyCollectRetainerGil { get; set; } = true;
     public bool AutomaticProcurementEnabled { get; set; }
@@ -93,6 +93,15 @@ public sealed class Configuration : IPluginConfiguration
         AllowAutomaticPurchases = false;
         AllowAutomaticListing = false;
     }
+
+    // "General-purpose" and "Wide-Spectrum" are the high-volume lines; both are
+    // written with and without a hyphen in the game's own text.
+    private static bool IsMassMarketDyeName(string name) =>
+        name.EndsWith(" Dye", StringComparison.OrdinalIgnoreCase) &&
+        (name.StartsWith("General-purpose ", StringComparison.OrdinalIgnoreCase) ||
+         name.StartsWith("General purpose ", StringComparison.OrdinalIgnoreCase) ||
+         name.StartsWith("Wide-Spectrum ", StringComparison.OrdinalIgnoreCase) ||
+         name.StartsWith("Wide Spectrum ", StringComparison.OrdinalIgnoreCase));
 
     public void Normalize()
     {
@@ -340,7 +349,36 @@ public sealed class Configuration : IPluginConfiguration
                 MarketBoardTravelCommand = "/li tp Limsa Lominsa Lower Decks";
             Version = 29;
         }
-        Version = Math.Max(Version, 29);
+        if (Version < 30)
+        {
+            // A live response arrives in about a second when the board answers at all,
+            // so a ten second wait per attempt only made a stalled row expensive.
+            if (MarketRequestTimeoutSeconds > 6)
+                MarketRequestTimeoutSeconds = 6;
+            if (MarketRetryBackoffMs > 1200)
+                MarketRetryBackoffMs = 1200;
+            Version = 30;
+        }
+        if (Version < 31)
+        {
+            // The tour flags were added in v1.0.0.38 but only ever set on newly seeded
+            // rules. An existing config therefore kept every gemdraught, popcorn and
+            // dye at the default priority and off the tour, so the tour walked only
+            // materia and skipped the items actually being flipped. Backfill them in
+            // the intended order: raid food and potions, then the mass-market dyes,
+            // then current materia.
+            foreach (var rule in ProcurementRules.Where(x => x.ItemId != 0 && !x.LiquidateOnly))
+            {
+                if (ResaleStockPolicy.IsCuratedConsumable(rule.ItemName))
+                    (rule.HuntOnTour, rule.TourPriority) = (true, 0);
+                else if (IsMassMarketDyeName(rule.ItemName))
+                    (rule.HuntOnTour, rule.TourPriority) = (true, 1);
+                else if (ResaleStockPolicy.IsTradeableMateria(rule.ItemName))
+                    (rule.HuntOnTour, rule.TourPriority) = (true, 2);
+            }
+            Version = 31;
+        }
+        Version = Math.Max(Version, 31);
         LiveWorldStockHuntMaximumItems = Math.Clamp(LiveWorldStockHuntMaximumItems, 1, 40);
         ProcurementBufferGilPercent = Math.Clamp(ProcurementBufferGilPercent, 0m, 100m);
         ProcurementBagBufferStacks = Math.Clamp(ProcurementBagBufferStacks, 0, 50);

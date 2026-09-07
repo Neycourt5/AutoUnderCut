@@ -39,6 +39,43 @@ public sealed class ReinvestmentAndStockPolicyTests
     }
 
     [Fact]
+    public void AnExistingConfigGetsItsFlipsBackOntoTheTourAheadOfMateria()
+    {
+        // Rules saved before the tour flags existed kept the default priority and
+        // were never marked for the tour, so a real config walked only materia.
+        var config = new SmartUndercutBot.Configuration
+        {
+            Version = 30,
+            ProcurementRules =
+            [
+                new() { ItemId = 1, ItemName = "Caramel Popcorn" },
+                new() { ItemId = 2, ItemName = "General-purpose Metallic Sky Blue Dye" },
+                new() { ItemId = 3, ItemName = "Wide Spectrum #1 Dye" },
+                new() { ItemId = 4, ItemName = "Savage Might Materia XI" },
+                new() { ItemId = 5, ItemName = "Dalamud Red Dye", LiquidateOnly = true },
+            ],
+        };
+        config.Normalize();
+
+        var byName = config.ProcurementRules.ToDictionary(x => x.ItemName);
+        Assert.Equal((true, 0), (byName["Caramel Popcorn"].HuntOnTour, byName["Caramel Popcorn"].TourPriority));
+        Assert.Equal((true, 1), (byName["General-purpose Metallic Sky Blue Dye"].HuntOnTour,
+            byName["General-purpose Metallic Sky Blue Dye"].TourPriority));
+        Assert.Equal((true, 1), (byName["Wide Spectrum #1 Dye"].HuntOnTour,
+            byName["Wide Spectrum #1 Dye"].TourPriority));
+        Assert.Equal((true, 2), (byName["Savage Might Materia XI"].HuntOnTour,
+            byName["Savage Might Materia XI"].TourPriority));
+        // Sell-off stock stays off the tour entirely.
+        Assert.False(byName["Dalamud Red Dye"].HuntOnTour);
+
+        // And the tour now walks the flips before the materia.
+        Assert.Equal(
+            ["Caramel Popcorn", "General-purpose Metallic Sky Blue Dye", "Wide Spectrum #1 Dye",
+             "Savage Might Materia XI"],
+            ResaleStockPolicy.SelectTourRules(config.ProcurementRules, _ => true, 8).Select(x => x.ItemName));
+    }
+
+    [Fact]
     public void TheAllWorldTourOnlyWalksMarkedStockInPriorityOrder()
     {
         ProcurementRule Tour(string name, int priority) =>

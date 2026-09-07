@@ -67,6 +67,49 @@ Primary source checks: [FFXIVClientStructs market proxy](https://github.com/aers
 [Lifestream market shortcut](https://github.com/NightmareXIV/Lifestream/blob/main/Lifestream/Tasks/Shortcuts/TaskMBShortcut.cs),
 [Lifestream public IPC](https://github.com/NightmareXIV/Lifestream/blob/main/Lifestream/IPC/IPCProvider.cs).
 
+## v1.0.0.50 - the tour was walking only materia, and empty boards were written off
+
+### The tour skipped every item being flipped
+Read the live config at
+`%AppData%\XIVLauncher\pluginConfigs\SmartUndercutBot.json` - do this, it is
+authoritative:
+
+    buyable rules by (TourPriority, HuntOnTour): {(5, False): 25, (2, True): 26}
+
+All 26 materia were on the tour at priority 2. All 25 flips - four gemdraughts,
+Caramel Popcorn and twenty General-purpose dyes - were at the **default priority 5
+with HuntOnTour false**, so the all-world tour walked materia and nothing else.
+
+Cause: v1.0.0.38 added `HuntOnTour`/`TourPriority` and set them in the seeding
+methods, but seeding only touches rules the config does not already have
+(`ProcurementRules.All(x => x.ItemId != rule.ItemId)`). Existing rules were never
+backfilled; only materia, added fresh in that same version, ever got the fields.
+Config version 31 backfills them: curated consumables 0, mass-market dyes 1,
+current materia 2. Dye names are matched with and without the hyphen because the
+game uses both ("General-purpose", "Wide Spectrum #1 Dye").
+
+### v1.0.0.46's "no live market" conclusion was wrong - retracted
+The log disproves it directly:
+
+    01:19:17  row 6  Pastel Purple Dye      15 live listings      OK
+    01:19:29  row 7  Pastel Purple Dye      0 packets, skipped after 1 attempt
+    01:19:41  row 8  Savage Might Materia XI 0 packets, skipped after 1 attempt
+    01:19:50  row 11 Savage Might Materia XI 18 live listings     OK
+
+The same items return full listings seconds later, so an empty board never meant
+"this item has no market". It means the request was made too soon - exactly what
+the user described. Worse, .46 turned that into "skipped after **1** attempt",
+removing the retries that would have recovered it.
+
+Retries restored. Timeout 10s -> 6s and retry backoff 2s -> 1.2s (config 30): a
+real response arrives in about a second, so the old settings only made a stalled
+row cost ~90s.
+
+### Still open
+Row 9 (#13721, Metallic Sky Blue Dye) still fails to map to a retainer slot. The
+skip message now reports what the queue row expected and how many slots were
+already claimed, which is the missing piece for diagnosing it.
+
 ## v1.0.0.48 - the purchase confirmation prompt was never answered (historical hypothesis)
 
 v1.0.0.47 fixed the search completely. The log now runs the whole chain:
