@@ -56,6 +56,9 @@ public sealed class ProcurementControllerTests
         run.Config.Current.ContinueShoppingWhenStocked = true;
         run.Repricing.LastKnownFreeSaleSlots = 0;
         run.Repricing.ListedStock = [new(999, false, 60, 60)];
+        // Buffer stacks are capped per item by that item's allowed sale slots, so
+        // give this one enough room for the twelve stacks the target expects.
+        run.Config.Current.ProcurementRules[0].MaximumSaleSlots = 20;
         run.Game.Inventory = 12 * 99;
         Assert.Equal(0, run.Controller.PurchaseCapacity);
         run.Tick(); run.Tick();
@@ -751,6 +754,28 @@ public sealed class ProcurementControllerTests
         for (var tick = 0; tick < 200 && run.Controller.IsActive; tick++)
             run.Tick(2);
         Assert.Equal(0, run.Game.Purchases);
+    }
+
+    [Fact]
+    public void ADeepStackIsNotMistakenForAWholeTradingBuffer()
+    {
+        using var run = new Route();
+        run.Config.Current.EnableStockAutomation();
+        run.Repricing.LastKnownFreeSaleSlots = 18;
+        // One bag slot holding 999 materia, whose rule allows a single sale slot.
+        // Counting raw quantity made that look like 50 stacks of trading buffer,
+        // which filled the comfortable-stock target and stopped shopping entirely.
+        run.Config.Current.ProcurementRules.Add(new()
+        {
+            ItemId = 700, ItemName = "Savage Might Materia XII", TargetStackSize = 20,
+            MaximumSaleSlots = 1, ListFromBags = true,
+        });
+        run.Game.OtherBagItems.Add(new(FFXIVClientStructs.FFXIV.Client.Game.InventoryType.Inventory1,
+            5, 700, "Savage Might Materia XII", 999, false, 999));
+
+        Assert.Equal(1, run.Controller.ResaleBagSlots);
+        Assert.True(run.Controller.PurchaseCapacity > 0,
+            "a single deep stack must not consume the whole shopping allowance");
     }
 
     private sealed class Clock : TimeProvider

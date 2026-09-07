@@ -1563,6 +1563,12 @@ public sealed class ProcurementController : IDisposable
             var quantity = Math.Max(held, entry?.PendingQuantity ?? 0);
             var size = Math.Max(1, rule?.TargetStackSize ?? entry?.TargetStackSize ?? 99);
             var slots = (int)(((long)quantity + size - 1) / size);
+            // Cap by what this item may actually occupy on the retainers. A pile of
+            // 999 materia is not 50 stacks of trading buffer when its rule allows one
+            // sale slot; counting the raw quantity made a full-looking buffer out of
+            // a few deep stacks and stopped shopping entirely.
+            if (rule is not null && rule.MaximumSaleSlots > 0)
+                slots = Math.Min(slots, rule.MaximumSaleSlots);
             if (entry is not null)
                 slots = Math.Max(slots, (int)Math.Min(entry.PendingQuantity, (long)entry.MaximumListingSlots - entry.ListingsCreated));
             if (quantity > 0)

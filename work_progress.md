@@ -11,6 +11,27 @@ Build: use `C:/Users/Acour/.dotnet/dotnet.exe` (SDK 10.0.301), **not** the PATH
 
 ---
 
+## v1.0.0.45 - a deep stack counted as a whole trading buffer
+
+Panel showed shopping permanently parked on "comfortable trading stock is ready
+(238/12 sale stacks)" with 18 empty sale slots and 35 bag slots of marketable
+items. 238 buffer stacks out of 35 bag slots is impossible, and that inflated
+count is what stopped shopping ever starting after a retainer pass.
+
+`CollectBagStock` computed `slots = ceil(quantity / TargetStackSize)` with no cap.
+Materia XI/XII became **buyable** in v1.0.0.38, so they stopped being excluded as
+sell-only and started counting: a single bag slot holding 999 materia at stack 20
+counted as 50 buffer stacks. A few deep stacks reached 238 and swamped a target
+of 12.
+
+Buffer slots are now capped per item by that rule's `MaximumSaleSlots`. Extra
+quantity beyond what an item may occupy is concentration, not readiness to fill
+diverse sale slots.
+
+This also required updating `FullRetainersSearchOnScheduleEvenWhenComfortableStockIsReady`,
+whose fixture reached 12 stacks from one item with 8 allowed slots - impossible
+under the corrected rule, so the fixture now grants that item enough slots.
+
 ## v1.0.0.44 - the market board is throttling us
 
 The v1.0.0.43 diagnostics answered it on the first run:
