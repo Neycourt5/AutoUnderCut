@@ -11,6 +11,36 @@ Build: use `C:/Users/Acour/.dotnet/dotnet.exe` (SDK 10.0.301), **not** the PATH
 
 ---
 
+## v1.0.0.40 - the reprice pass reopened one listing forever
+User: "it keeps opening the same auction over and over checking the price and
+never actually doing anything."
+
+`ReadListings` in a fill-only run picks the first curated listing whose price is
+still an unresolved safety seed and calls `BeginSafetySeedPricing`, which sets
+`returnToAutoListingAfterCurrent` and returns to `ReadingListings` afterwards.
+Two faults made that a closed loop:
+
+1. `MoveToNextListing` only added the slot to `freshlyRepricedAutoListingSlots`
+   when the outcome was a verified write, or NoChange/WithinTolerance below the
+   maximum. **Every other outcome left it unmarked** - no safe adjustment, write
+   disarmed, commit failed, stale market data rejected, row could not be mapped.
+2. The `unresolvedSeed` selector never consulted that set anyway.
+
+So the listing's price never changed, it matched the selector again on the next
+pass, and the run reopened it indefinitely. Now the slot is always recorded, with
+a warning naming the unsettled status, and the selector skips attempted slots.
+The set is cleared per run, so the next run retries.
+
+### Testing gap (important)
+This path has **no automated coverage**. `FakeRetainerService` throws
+`NotSupportedException` for `OpenListingContextMenu`, `SelectAdjustPrice`,
+`TryReadListing`, `TryResolveOpenPriceEditor`, `IsOpenPriceEditorFor`,
+`RequestComparePrices` and `CommitPrice`, and several are not virtual, so no test
+can drive a listing through context menu -> price editor -> market data ->
+evaluate -> commit. The 154 passing tests never touch it. Building that fake
+surface is the highest-value next task: the repricing loop is where the live bugs
+keep appearing and it is the only major controller path with zero coverage.
+
 ## v1.0.0.39 - tomestone materials are listed from the bags
 User pasted a market analysis of tome materials on Siren and asked to "include
 these if they are in my bag". These are bought with tomestones, not gil, so they

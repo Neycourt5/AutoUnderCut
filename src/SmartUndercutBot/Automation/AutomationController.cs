@@ -585,8 +585,12 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
                 ? retainerListings.ActiveRetainerId
                 : (ulong)(retainerIndex + 1);
             fillListingCounts[countKey] = currentListings.Count;
+            // Skipping slots already attempted this run is what stops the fill pass
+            // reopening the same unresolved listing forever: its price is unchanged,
+            // so without this it matches again on every pass.
             var unresolvedSeed = currentListings.FirstOrDefault(x =>
                 IsUnresolvedCuratedPrice(x) &&
+                !freshlyRepricedAutoListingSlots.Contains(x.Slot) &&
                 CuratedAutoListItems.Contains(x.ItemName));
             if (unresolvedSeed is not null)
             {
@@ -1233,10 +1237,19 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
     {
         if (returnToAutoListingAfterCurrent)
         {
-            if (queue[currentIndex].Status.StartsWith("Verified", StringComparison.Ordinal) ||
+            var entry = queue[currentIndex];
+            var settled = entry.Status.StartsWith("Verified", StringComparison.Ordinal) ||
                 (currentDecision?.Kind is PriceDecisionKind.NoChange or PriceDecisionKind.WithinTolerance &&
-                 queue[currentIndex].Listing.CurrentPrice < PricingStrategyService.MaximumListingPrice))
-                freshlyRepricedAutoListingSlots.Add(queue[currentIndex].Listing.Slot);
+                 entry.Listing.CurrentPrice < PricingStrategyService.MaximumListingPrice);
+            // Record the attempt whichever way it went. Every other outcome - no safe
+            // adjustment, a disarmed or failed write, stale market data - used to
+            // leave the slot unmarked, so the pass reopened that one listing and
+            // re-read its price indefinitely without ever changing anything.
+            freshlyRepricedAutoListingSlots.Add(entry.Listing.Slot);
+            if (!settled)
+                log.Add(AutomationLogLevel.Warning,
+                    $"{entry.Listing.ItemName}: could not settle its safety-seeded price this pass " +
+                    $"({entry.Status}). Leaving it for the next run instead of reopening it.");
             returnToAutoListingAfterCurrent = false;
             marketTask = null;
             currentMarket = null;
