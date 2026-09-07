@@ -15,7 +15,10 @@ for profitable purchases when capacity remains, travels to buy them, then return
 home to list them. Retainer checks repeat every 5–10 minutes by default, so sold
 slots are detected on the next check. Bag refills get priority before shopping.
 The normal deal search uses Universalis to choose destinations and rechecks each
-purchase against the live in-game listing. Home-world sale history and competing
+purchase against the live in-game listing. At the board, it prepares a normal
+item-name search, waits for the exact item row, opens it once, and waits for fresh
+live prices. Home and MARKET SEARCH log entries show each stage so a search
+that has not produced results is not presented as a completed price check. Home-world sale history and competing
 listings set the resale estimate; the player's own retainers are excluded.
 
 By default **Reinvest available gil and sale income** is on, so each trip may spend

@@ -9,6 +9,7 @@ using FFXIVClientStructs.FFXIV.Client.UI.Info;
 using FFXIVClientStructs.FFXIV.Component.GUI;
 using Lumina.Excel.Sheets;
 using SmartUndercutBot.Core.Models;
+using SmartUndercutBot.Core.Services;
 
 namespace SmartUndercutBot.Services;
 
@@ -18,11 +19,9 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService
     private readonly IGameGui gameGui;
     private readonly IDataManager dataManager;
     private readonly AutomationLog log;
-    private uint visibleSearchItemId;
-    private bool visibleSearchResultSelected;
-    private bool visibleListingsReported;
-    private DateTimeOffset nextVisibleSelectionAt;
-    private DateTimeOffset nextSearchDiagnosticAt;
+    private readonly MarketSearchSession search;
+    private string lastSearchStatus = string.Empty;
+    public string? SearchStatus => search.Status;
 
     public MarketPurchaseService(
         IObjectTable objectTable,
@@ -34,6 +33,7 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService
         this.gameGui = gameGui;
         this.dataManager = dataManager;
         this.log = log;
+        search = new MarketSearchSession(new SearchUi(this));
     }
 
     public bool IsMarketBoardOpen => IsAddonVisible("ItemSearch");
@@ -87,120 +87,139 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService
     {
         if (itemId == 0 || !dataManager.GetExcelSheet<Item>().TryGetRow(itemId, out var item))
             return false;
-
-        var addon = gameGui.GetAddonByName<AddonItemSearch>("ItemSearch");
-        var agent = AgentItemSearch.Instance();
-        if (addon == null || !addon->IsVisible || addon->SearchTextInput == null ||
-            addon->ResultsList == null || agent == null)
-            return false;
-
-        if (visibleSearchItemId == itemId)
-            return true;
-
-        ResetListingRequest();
-        addon->SearchTextInput->SetText(item.Name.ToString());
-        // Procurement searches an exact configured item. A category left over
-        // from manual browsing must not hide it from the results.
-        addon->RunSearch(true);
-        visibleSearchItemId = itemId;
-        visibleSearchResultSelected = false;
-        log.Add(AutomationLogLevel.Debug, $"MARKET BUY search typed '{item.Name}' ({itemId}).");
-        return true;
+        var started = search.Request(itemId, item.Name.ToString());
+        ReportSearchStatus();
+        return started;
     }
 
     public bool AreListingsReady(uint itemId)
     {
-        var proxy = InfoProxyItemSearch.Instance();
-        if (proxy == null || visibleSearchItemId != itemId)
-            return false;
-
-        var resultAddon = gameGui.GetAddonByName<AtkUnitBase>("ItemSearchResult");
-        if (resultAddon != null && resultAddon->IsVisible)
-        {
-            if (proxy->SearchItemId == itemId && visibleSearchResultSelected)
-            {
-                if (proxy->WaitingForListings)
-                    return false;
-                if (!visibleListingsReported)
-                {
-                    visibleListingsReported = true;
-                    log.Add(AutomationLogLevel.Information,
-                        $"MARKET BUY live results ready for item {itemId}: {proxy->ListingCount} listing(s).");
-                }
-                return true;
-            }
-
-            // Never accept data from a previously opened item. Wait for an
-            // in-flight request, or close the stale result so the exact search
-            // row can be activated below.
-            if (proxy->WaitingForListings)
-                return false;
-            resultAddon->Close(true);
-            return false;
-        }
-
-        if (proxy->WaitingForListings)
-            return false;
-
-        if (visibleSearchResultSelected && DateTimeOffset.UtcNow < nextVisibleSelectionAt)
-            return false;
-        visibleSearchResultSelected = false;
-        visibleListingsReported = false;
-
-        var addon = gameGui.GetAddonByName<AddonItemSearch>("ItemSearch");
-        var agent = AgentItemSearch.Instance();
-        if (addon == null || !addon->IsVisible || addon->ResultsList == null || agent == null)
-            return false;
-
-        var ids = agent->ListingPageItemIds;
-        var count = (int)Math.Min(agent->ListingPageItemCount, (uint)ids.Length);
-        count = Math.Min(count, addon->ResultsList->GetItemCount());
-        if (count <= 0)
-        {
-            LogSearchDiagnostic(itemId, "search results are not populated yet");
-            return false;
-        }
-
-        for (var index = 0; index < count; index++)
-        {
-            if (ids[index] != itemId || addon->ResultsList->GetItemDisabledState(index))
-                continue;
-
-            // SelectItem(..., true) emits ListItemSelect, which only highlights
-            // this list. A real user click emits ListItemClick and is what opens
-            // ItemSearchResult and starts the server listing request.
-            addon->ResultsList->SelectItem(index);
-            addon->ResultsList->DispatchItemEvent(index, AtkEventType.ListItemClick);
-            addon->ResultsList->DispatchItemEvent(index, AtkEventType.ListItemDoubleClick);
-            log.Add(AutomationLogLevel.Debug,
-                $"MARKET BUY activated search row {index + 1}/{count} for item {itemId}; waiting for ItemSearchResult.");
-            visibleSearchResultSelected = true;
-            nextVisibleSelectionAt = DateTimeOffset.UtcNow.AddMilliseconds(2_500);
-            return false;
-        }
-        var visibleIds = new List<string>();
-        for (var i = 0; i < Math.Min(count, 8); i++)
-            visibleIds.Add(ids[i].ToString());
-        LogSearchDiagnostic(itemId,
-            $"no exact row matched; first ids: {string.Join(", ", visibleIds)}");
-        return false;
+        var ready = search.Poll(itemId);
+        ReportSearchStatus();
+        return ready;
     }
 
     public void ResetListingRequest()
     {
-        var proxy = InfoProxyItemSearch.Instance();
-        if (proxy != null)
+        search.Reset();
+        lastSearchStatus = string.Empty;
+    }
+
+    private void ReportSearchStatus()
+    {
+        if (lastSearchStatus == search.Status) return;
+        lastSearchStatus = search.Status;
+        log.Add(AutomationLogLevel.Information, $"MARKET SEARCH {search.Status}");
+    }
+
+    private sealed class SearchUi(MarketPurchaseService owner) : IMarketSearchUi
+    {
+        public bool PrepareSearch(string name)
         {
-            if (proxy->WaitingForListings)
-                proxy->EndRequest();
-            proxy->ClearListData();
+            var addon = owner.gameGui.GetAddonByName<AddonItemSearch>("ItemSearch");
+            if (!CanUseInput(addon)) return false;
+            addon->SetModeFilter(AddonItemSearch.SearchMode.Normal, 0);
+            return FocusSearchInput(addon);
         }
-        CloseAddon("ItemSearchResult");
-        visibleSearchItemId = 0;
-        visibleSearchResultSelected = false;
-        visibleListingsReported = false;
-        nextVisibleSelectionAt = default;
-        nextSearchDiagnosticAt = default;
+
+        public bool SubmitSearch(string name)
+        {
+            var addon = owner.gameGui.GetAddonByName<AddonItemSearch>("ItemSearch");
+            var proxy = InfoProxyItemSearch.Instance();
+            if (!CanUseInput(addon) || proxy == null || proxy->WaitingForListings || !FocusSearchInput(addon))
+                return false;
+            // Drive the input's own callbacks, which update the game's search
+            // state. Mirroring text into the addon's cached strings or calling
+            // RunSearch directly can leave a typed query with no submitted search.
+            SetSearchInput(addon, string.Empty);
+            SetSearchInput(addon, name);
+            var input = &addon->SearchTextInput->AtkComponentInputBase;
+            var result = input->Callback(&addon->AtkUnitBase, InputCallbackType.Enter,
+                input->RawString.StringPtr, input->EvaluatedString.StringPtr, input->CallbackEventKind);
+            owner.log.Add(AutomationLogLevel.Information,
+                $"MARKET SEARCH Enter submitted '{name}'; mode={addon->Mode}, filter={addon->SelectedFilter}, callback={result}.");
+            return true;
+        }
+
+        private static bool CanUseInput(AddonItemSearch* addon) =>
+            addon != null && addon->IsReady && addon->IsVisible && addon->ResultsList != null &&
+            addon->SearchTextInput != null && addon->SearchTextInput->AtkComponentInputBase.Callback != null;
+
+        private static bool FocusSearchInput(AddonItemSearch* addon)
+        {
+            var input = &addon->SearchTextInput->AtkComponentInputBase;
+            var component = &input->AtkComponentBase;
+            var node = input->CollisionNode != null ? &input->CollisionNode->AtkResNode
+                : component->OwnerNode != null ? &component->OwnerNode->AtkResNode : null;
+            if (node == null) return false;
+            addon->AtkUnitBase.Focus();
+            addon->AtkUnitBase.SetFocusNode(node, true);
+            addon->AtkUnitBase.SetComponentFocusNode(component);
+            var stage = AtkStage.Instance();
+            if (stage != null && stage->AtkInputManager != null)
+                stage->AtkInputManager->SetFocus(node, &addon->AtkUnitBase, 0);
+            input->IsActive = true;
+            return true;
+        }
+
+        private static void SetSearchInput(AddonItemSearch* addon, string text)
+        {
+            var widget = addon->SearchTextInput;
+            widget->SetText(text);
+            var input = &widget->AtkComponentInputBase;
+            input->CursorPos = input->SelectionStart = input->SelectionEnd = text.Length;
+            input->Callback(&addon->AtkUnitBase, InputCallbackType.TextChanged,
+                input->RawString.StringPtr, input->EvaluatedString.StringPtr, input->CallbackEventKind);
+        }
+
+        public IReadOnlyList<MarketSearchRow> ReadRows()
+        {
+            var addon = owner.gameGui.GetAddonByName<AddonItemSearch>("ItemSearch");
+            var agent = AgentItemSearch.Instance();
+            if (addon == null || !addon->IsVisible || addon->ResultsList == null ||
+                agent == null || agent->ItemBuffer == null || agent->IsPartialSearching || agent->IsItemPushPending)
+                return [];
+            // Name searches populate ItemBuffer/ItemCount. ListingPageItemIds
+            // belongs to category pages and can be empty or left over from browsing.
+            var ids = agent->ItemBuffer;
+            var count = Math.Min((int)Math.Min(agent->ItemCount, 100u), addon->ResultsList->GetItemCount());
+            var rows = new List<MarketSearchRow>();
+            for (var i = 0; i < count; i++)
+                rows.Add(new(i, ids[i], !addon->ResultsList->GetItemDisabledState(i)));
+            return rows;
+        }
+
+        public bool ActivateRow(int index, uint itemId)
+        {
+            // Re-read the exact identity immediately before crossing the native boundary.
+            if (!ReadRows().Any(x => x.Index == index && x.ItemId == itemId && x.Enabled)) return false;
+            var addon = owner.gameGui.GetAddonByName<AddonItemSearch>("ItemSearch");
+            if (addon == null || addon->ResultsList == null ||
+                (!addon->ResultsList->IsItemInteractionEnabled && !addon->ResultsList->IsItemClickEnabled)) return false;
+            addon->ResultsList->SelectItem(index, true);
+            addon->ResultsList->DispatchItemEvent(index, AtkEventType.ListItemClick);
+            return true;
+        }
+
+        public MarketSearchResult ReadResult()
+        {
+            var proxy = InfoProxyItemSearch.Instance();
+            return new(owner.IsAddonVisible("ItemSearchResult"), proxy == null ? 0 : proxy->SearchItemId,
+                proxy == null || proxy->WaitingForListings);
+        }
+
+        public void CloseResult() => owner.CloseAddon("ItemSearchResult");
+
+        public void ClearSearch()
+        {
+            var proxy = InfoProxyItemSearch.Instance();
+            if (proxy != null)
+            {
+                if (proxy->WaitingForListings) proxy->EndRequest();
+                proxy->ClearListData();
+            }
+            CloseResult();
+        }
     }
 
     public IReadOnlyList<LivePurchaseListing> ReadLiveListings(uint itemId)
@@ -303,11 +322,4 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService
             addon->Close(true);
     }
 
-    private void LogSearchDiagnostic(uint itemId, string reason)
-    {
-        if (DateTimeOffset.UtcNow < nextSearchDiagnosticAt)
-            return;
-        nextSearchDiagnosticAt = DateTimeOffset.UtcNow.AddSeconds(3);
-        log.Add(AutomationLogLevel.Debug, $"MARKET BUY waiting for item {itemId}: {reason}.");
-    }
 }

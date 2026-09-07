@@ -829,6 +829,7 @@ public sealed class ProcurementController : IDisposable
 
         if (!market.AreListingsReady(currentStockHuntRule.ItemId))
         {
+            if (market.SearchStatus is { } searchStatus) detail = searchStatus;
             if (timeProvider.GetUtcNow() >= deadline)
             {
                 if (RetryListingRequest(currentStockHuntRule.ItemName))
@@ -1031,6 +1032,7 @@ public sealed class ProcurementController : IDisposable
         };
         if (!market.AreListingsReady(currentOrder.ItemId))
         {
+            if (market.SearchStatus is { } searchStatus) detail = searchStatus;
             if (timeProvider.GetUtcNow() >= deadline)
             {
                 if (RetryListingRequest(currentOrder.ItemName))

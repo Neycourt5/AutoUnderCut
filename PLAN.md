@@ -1,5 +1,24 @@
 # Retainer automation and UI plan
 
+## Active release: v1.0.0.36 market-search handoff
+Screenshot shows an item typed while the wishlist remains visible. Local Dalamud
+log confirms search timeouts on Behemoth before any purchase (20:06-20:07).
+- [x] Prepare normal search mode and focus; wait 400 ms, then drive editable
+  text through clear/change, set/change and Enter callbacks. Do not mirror cached
+  search strings or call RunSearch directly.
+- [x] Read name-search matches from ItemBuffer/ItemCount (not category-page IDs),
+  wait for the exact enabled row, dispatch one click, and accept
+  only that item's fresh listing response after our selection.
+- [x] Show the current search stage in Home and information-level game logs.
+- [x] 146 tests pass and Release build has no warnings/errors. Existing purchase
+  verification is preserved; no unverified write is retried.
+- [ ] Publish v1.0.0.36 and verify the actual public installer JSON and ZIP.
+
+Native calls have not been exercised in game. Existing local game log lines prove
+that .35 timed out before buying; the new state-machine tests simulate UI responses.
+Resume point: implementation is committed only after validation, then tag/push
+and record actual artifact verification here and in work_progress.md.
+
 ## Active release: v1.0.0.35 comfortable bag stock
 User wants a comfortable bag reserve and says the 932-stack count is wrong.
 - [x] Exclude sale-only backlog from trading buffer capacity and acquisition cost.

@@ -15,6 +15,7 @@ public sealed record LivePurchaseListing(
 
 public interface IMarketPurchaseService
 {
+    string? SearchStatus => null;
     bool IsMarketBoardOpen { get; }
     uint FreeInventorySlots { get; }
     uint Gil { get; }
@@ -34,4 +35,3 @@ public interface IMarketPurchaseService
     void CloseMarketBoard();
     void CloseRetainerList();
 }
-

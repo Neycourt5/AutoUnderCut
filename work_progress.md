@@ -11,6 +11,41 @@ Build: use `C:/Users/Acour/.dotnet/dotnet.exe` (SDK 10.0.301), **not** the PATH
 
 ---
 
+## v1.0.0.36 - submit the market search before waiting for prices
+User screenshot: General-purpose Pastel Pink Dye appears in the input box, but
+ItemSearch still shows the empty wishlist while Home says revalidating prices.
+Read the local Dalamud log: 20:06:38 and 20:07:10 on 2026-09-06 show attempts 2/3
+and 3/3 for that dye on Behemoth, with no purchase submitted.
+
+- The old code typed text and called RunSearch directly. Submit now focuses the
+  native input and emits clear/TextChanged, set/TextChanged, then Enter through
+  its callback, after a 400 ms mode/focus settle. Does not write cached addon
+  search strings: working native drivers document that as a no-op submit path.
+- Name-search matches live in AgentItemSearch.ItemBuffer/ItemCount. The old code
+  read ListingPageItemIds/ListingPageItemCount (category-page data), which can
+  remain empty/stale after a text search. Now read the actual match buffer with
+  null/count guards, check the rendered list and wait for in-progress searches.
+- A native-free MarketSearchSession coordinates preparation, submission, match
+  selection and fresh-result readiness. Revalidate the exact enabled row before
+  selecting and dispatching one ListItemClick; remove the old second double click.
+- Reject stale result windows unless our matching row was selected; wait for
+  in-flight responses. Every completed purchase still resets the search before
+  another order, even for the same item. Purchase submission and inventory
+  verification are unchanged.
+- Home reports the actual search stage. Information-level MARKET SEARCH log
+  transitions replace debug-only diagnostics, including submitted mode/filter.
+- 146 tests pass; Release plugin build has 0 warnings/errors. Search tests cover
+  settling, exact/disabled rows, stale results, in-flight responses, repeat polling,
+  item changes, fresh same-item retries and missing-result status messages.
+- Native contracts and working input-event drivers checked against sources and
+  installed API 15:
+  https://github.com/barnicskolaci/Conduit/blob/ccb4926eddd8a39b56676c94b525e6ca02161475/Conduit/Reflection/MarketBuyer.cs
+  https://github.com/FranFkntastic/MarketMafioso/blob/6dd67c3394dfd52a8c7ada131867388b49d1e2cf/src/MarketMafioso/Automation/MarketBoard/MarketBoardItemSearchDriver.cs
+  https://github.com/aers/FFXIVClientStructs/blob/main/FFXIVClientStructs/FFXIV/Client/UI/AddonItemSearch.cs
+  https://github.com/aers/FFXIVClientStructs/blob/main/FFXIVClientStructs/FFXIV/Client/UI/Agent/AgentItemSearch.cs
+- Publication verification pending. Native behavior still needs an in-game check;
+  these sessions read logs but did not submit a purchase in the running client.
+
 ## v1.0.0.35 - comfortable bag stock and accurate stack labels
 User: keep visiting servers and buying until there is comfortable bag stock; the
 Home display of 932 stacks looked wrong.
