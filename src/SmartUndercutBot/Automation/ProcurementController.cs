@@ -837,6 +837,19 @@ public sealed partial class ProcurementController : IDisposable
         }
         if (PriorityTripShouldReturn()) return;
 
+        // On the home world, an item whose price was already read - by an earlier
+        // sweep or, far more often, by the retainer pass repricing it - does not
+        // need reading again. That is what made the home leg take so long.
+        if (priorityShopping && stockHuntWorldIndex == 0 &&
+            HomePriceIsFresh(stockHuntRules[stockHuntRuleIndex].ItemId))
+        {
+            stockHuntRuleIndex++;
+            nextActionAt = timeProvider.GetUtcNow();
+            State = ProcurementState.WaitingForStockHuntListings;
+            detail = "Reusing a home price already read this cycle.";
+            return;
+        }
+
         currentStockHuntRule = stockHuntRules[stockHuntRuleIndex];
         listingRequestAttempts = 1;
         if (!market.RequestListings(currentStockHuntRule.ItemId))

@@ -65,8 +65,7 @@ public sealed partial class ProcurementController
             return;
         }
 
-        homePrices.Clear();
-        homePriceTimes.Clear();
+        SeedHomePricesFromRepricing();
         var route = NorthAmericaWorlds.Where(w => !w.Equals(homeWorld, StringComparison.OrdinalIgnoreCase)).ToArray();
         var resume = Array.FindIndex(route, w => w.Equals(config.PriorityNextWorld, StringComparison.OrdinalIgnoreCase));
         // Finish the rest of this circuit before restarting at Aether; do not wrap
@@ -117,14 +116,76 @@ public sealed partial class ProcurementController
             FinishShopping("Home price checks ran long without gathering any prices. Returning to retainers.");
             return true;
         }
-        if (AvailablePurchaseSlots() > 0 && SpendableGil() > 0 &&
-            market.FreeInventorySlots > configuration.Current.ProcurementInventoryReserve &&
-            priorityWorldsCompleted < 4 && timeProvider.GetUtcNow() - priorityDepartedAt < TimeSpan.FromMinutes(20))
+        var config = configuration.Current;
+        // Keep shopping while the buffer is short on either spread or value. A bag
+        // full of cheap dye meets the stack target without being worth selling, and
+        // returning then leaves gil idle and the good stock unbought.
+        var roomToBuy = AvailablePurchaseSlots() > 0 ||
+            !ResaleStockPolicy.BufferIsComfortable(ResaleBagSlots, ComfortableStockTarget,
+                ResaleBagValue, config.ProcurementBufferValueTarget);
+        if (roomToBuy && SpendableGil() > 0 &&
+            market.FreeInventorySlots > config.ProcurementInventoryReserve &&
+            priorityWorldsCompleted < config.PriorityWorldsPerTrip &&
+            timeProvider.GetUtcNow() - priorityDepartedAt < TimeSpan.FromMinutes(config.PriorityMinutesPerTrip))
             return false;
         SavePriorityCursor();
         FinishShopping("Priority shopping checkpoint: returning to list stock, check sales and collect gil. The next trip resumes here.");
         return true;
     }
+
+    /// <summary>
+    /// Estimated resale value of the trading buffer, priced from the home reference.
+    /// Items with no known home price contribute nothing rather than a guess.
+    /// </summary>
+    public ulong ResaleBagValue
+    {
+        get
+        {
+            ulong total = 0;
+            foreach (var stock in CollectBagStock())
+            {
+                if (!homePrices.TryGetValue(stock.ItemId, out var listings)) continue;
+                var reference = HomePriceReference.Summarize(
+                    stock.ItemId, string.Empty, stock.IsHighQuality, listings).Reference;
+                total += (ulong)reference * stock.Quantity;
+            }
+            return total;
+        }
+    }
+
+    // A retainer pass reads the live home board for every listing it reprices, so
+    // those prices are already paid for. Reuse anything inside the freshness window
+    // instead of sweeping the same items again at the start of every trip.
+    private void SeedHomePricesFromRepricing()
+    {
+        var maxAge = TimeSpan.FromHours(Math.Max(1, configuration.Current.HomePriceMaxAgeHours));
+        var now = timeProvider.GetUtcNow();
+        foreach (var stale in homePriceTimes.Where(x => now - x.Value > maxAge).Select(x => x.Key).ToArray())
+        {
+            homePrices.Remove(stale);
+            homePriceTimes.Remove(stale);
+        }
+        var reused = 0;
+        foreach (var (itemId, observed) in repricing.ObservedHomePrices)
+        {
+            if (now - observed.At > maxAge) continue;
+            if (homePriceTimes.TryGetValue(itemId, out var have) && have >= observed.At) continue;
+            homePrices[itemId] = observed.Listings
+                .Where(x => x.PricePerUnit > 0 && x.Quantity > 0)
+                .Select(x => new ProcurementMarketListing(itemId, 0, x.RetainerId, homeWorld, 0,
+                    x.PricePerUnit, x.Quantity, x.IsHighQuality))
+                .ToArray();
+            homePriceTimes[itemId] = observed.At;
+            reused++;
+        }
+        if (reused > 0)
+            log.Add(AutomationLogLevel.Information,
+                $"Reused {reused} home price(s) already read during the retainer pass; those items are not re-checked.");
+    }
+
+    private bool HomePriceIsFresh(uint itemId) =>
+        homePriceTimes.TryGetValue(itemId, out var at) &&
+        timeProvider.GetUtcNow() - at <= TimeSpan.FromHours(Math.Max(1, configuration.Current.HomePriceMaxAgeHours));
 
     private void SavePriorityCursor()
     {

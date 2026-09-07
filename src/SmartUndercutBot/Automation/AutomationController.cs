@@ -91,6 +91,7 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
     private readonly HashSet<(ulong Retainer, short Slot)> skippedProblemListings = [];
     private int consecutiveRecoveries;
     private string? lastWriteFailure;
+    private readonly Dictionary<uint, (DateTimeOffset At, IReadOnlyList<MarketListing> Listings)> observedHomePrices = [];
     private readonly List<int> retainerRows = [];
     private readonly Dictionary<(ulong RetainerId, short Slot), PortfolioListingEstimate> portfolioListings = [];
     private readonly Dictionary<ulong, PortfolioRetainerBalance> portfolioRetainers = [];
@@ -163,6 +164,14 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
     public int? LastKnownFreeSaleSlots { get; private set; }
     public bool RequiresManualRestart { get; private set; }
     public string? LastWriteFailure => lastWriteFailure;
+
+    /// <summary>
+    /// Home-world prices seen while repricing. Every retainer pass reads the live
+    /// board for each listing anyway, so shopping can reuse those instead of paying
+    /// for a separate sweep of the same items.
+    /// </summary>
+    public IReadOnlyDictionary<uint, (DateTimeOffset At, IReadOnlyList<MarketListing> Listings)> ObservedHomePrices =>
+        observedHomePrices;
     public IReadOnlyList<StockExposure> ListedStock { get; private set; } = [];
     public bool IsActive => State is not (AutomationState.Idle or AutomationState.Completed or AutomationState.Halted or AutomationState.Faulted or AutomationState.WaitingForScheduledRun);
 
@@ -958,6 +967,8 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
         }
 
         currentMarket = marketTask.Result;
+        if (currentMarket.ItemId != 0 && currentMarket.Listings.Count > 0)
+            observedHomePrices[currentMarket.ItemId] = (timeProvider.GetUtcNow(), currentMarket.Listings);
         var entry = queue[currentIndex];
         if (currentMarket.ItemId != 0 && currentMarket.ItemId != entry.Listing.ItemId)
         {

@@ -848,6 +848,8 @@ public sealed class ProcurementControllerTests
     public void PriorityCircuitReturnsToListAndResumesAcrossAllFourDataCenters()
     {
         using var run = new Route(priority: true);
+        run.Config.Current.PriorityWorldsPerTrip = 4;
+        run.Config.Current.PriorityMinutesPerTrip = 20;
         run.Game.AutomaticWorldArrival = true;
         run.Game.LiveProvider = (world, item) => [new(0, item, 10, 20, 2000, 99, true, 0)];
         for (var trip = 0; trip < 8; trip++)
@@ -931,6 +933,8 @@ public sealed class ProcurementControllerTests
     {
         using var run = new Route(priority: true);
         run.Config.Current.EnableStockAutomation();
+        run.Config.Current.PriorityWorldsPerTrip = 4;
+        run.Config.Current.PriorityMinutesPerTrip = 20;
         run.Game.AutomaticWorldArrival = true;
         run.Game.LiveProvider = (world, item) => [new(0, item, 10, 20, 2000, 99, true, 0)];
         for (var trip = 0; trip < 3; trip++)
@@ -950,6 +954,8 @@ public sealed class ProcurementControllerTests
     public void PriorityTimeCheckpointPreservesTheNextItemOnTheSameWorld()
     {
         using var run = new Route(priority: true);
+        run.Config.Current.PriorityWorldsPerTrip = 4;
+        run.Config.Current.PriorityMinutesPerTrip = 20;
         run.Game.AutomaticWorldArrival = true;
         run.Config.Current.ProcurementRules[0].TourPriority = 0;
         run.Config.Current.ProcurementRules.Add(new() { ItemId = 2, ItemName = "Another flip" });

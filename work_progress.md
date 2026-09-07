@@ -67,6 +67,31 @@ Primary source checks: [FFXIVClientStructs market proxy](https://github.com/aers
 [Lifestream market shortcut](https://github.com/NightmareXIV/Lifestream/blob/main/Lifestream/Tasks/Shortcuts/TaskMBShortcut.cs),
 [Lifestream public IPC](https://github.com/NightmareXIV/Lifestream/blob/main/Lifestream/IPC/IPCProvider.cs).
 
+## v1.0.0.53 - stock health by value, longer trips, no redundant home sweep
+
+The loop is working now: it reached Adamantoise and Cactuar and kept the retainers
+stocked. Three refinements from that run.
+
+**Stock health is value, not stacks.** `PriorityTripShouldReturn` only asked
+`AvailablePurchaseSlots() > 0`, so twelve stacks of cheap dye satisfied the target
+and the trip came home with gil idle. `ResaleStockPolicy.BufferIsComfortable`
+requires both the stack target and a value target
+(`ProcurementBufferValueTarget`, 1M default), and `ResaleBagValue` prices the
+buffer from the home reference. Items with no known home price contribute nothing
+rather than a guess.
+
+**Two worlds was the cap, not the appetite.** 4 worlds / 20 minutes per trip are
+now `PriorityWorldsPerTrip` (8) and `PriorityMinutesPerTrip` (45).
+
+**The home sweep was redundant.** Every retainer pass already reads the live home
+board for each listing it reprices, so `AutomationController.ObservedHomePrices`
+records them and shopping seeds `homePrices` from that. Anything fresher than
+`HomePriceMaxAgeHours` (24) is skipped on the home leg instead of re-read, which
+removes most of the 51-item home scan.
+
+Three trip tests pinned the old 4/20 caps; they now set them explicitly so they
+test the checkpoint mechanism rather than the shipped defaults.
+
 ## v1.0.0.52 - every live read returned empty, and the route never left home
 
 ### WaitingForListings, a fourth and fifth time

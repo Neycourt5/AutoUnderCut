@@ -45,6 +45,17 @@ public static class ResaleStockPolicy
             .Take(Math.Max(1, maximumItems))
             .ToArray();
 
+    // A stack count alone is a poor measure of stock health: twelve stacks of cheap
+    // dye is not the same trading position as twelve stacks of gemdraughts. Stock is
+    // only "comfortable" when the buffer meets both the stack target and a value
+    // target, so shopping keeps going while the bags are full of cheap goods.
+    public static bool BufferIsComfortable(int stacks, int stackTarget, ulong value, ulong valueTarget) =>
+        stacks >= Math.Max(0, stackTarget) && value >= valueTarget;
+
+    /// <summary>How short of the value target the buffer is, for display and logging.</summary>
+    public static ulong BufferValueShortfall(ulong value, ulong valueTarget) =>
+        value >= valueTarget ? 0 : valueTarget - value;
+
     public static bool QualityAllowed(ProcurementRule rule, bool hq) =>
         hq ? rule.AllowHighQuality || rule.RequireHighQuality : !rule.RequireHighQuality;
 

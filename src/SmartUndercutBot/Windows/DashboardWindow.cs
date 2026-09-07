@@ -995,6 +995,32 @@ public sealed class DashboardWindow : Window
             ImGui.TextDisabled(highQualityOnly
                 ? "On: buy HQ when an item has an HQ form. NQ-only items such as dyes are still eligible."
                 : "Off: normal quality is bought whenever an item rule allows it.");
+            var valueTarget = config.ProcurementBufferValueTarget;
+            if (InputUInt("Spare stock worth at least (gil)", ref valueTarget, 0, 999_999_999))
+            {
+                config.ProcurementBufferValueTarget = valueTarget;
+                configurationDirty = true;
+            }
+            ImGui.TextDisabled("Shopping keeps going while the bag buffer is worth less than this, even once the stack count is met - a bag of cheap dye is not a trading position. Set 0 to judge on stack count alone.");
+            var worldsPerTrip = config.PriorityWorldsPerTrip;
+            if (InputInt("Worlds per shopping trip", ref worldsPerTrip, 1, 40))
+            {
+                config.PriorityWorldsPerTrip = worldsPerTrip;
+                configurationDirty = true;
+            }
+            var minutesPerTrip = config.PriorityMinutesPerTrip;
+            if (InputInt("Minutes away per trip", ref minutesPerTrip, 5, 480))
+            {
+                config.PriorityMinutesPerTrip = minutesPerTrip;
+                configurationDirty = true;
+            }
+            var homeAge = config.HomePriceMaxAgeHours;
+            if (InputInt("Reuse home prices for (hours)", ref homeAge, 1, 168))
+            {
+                config.HomePriceMaxAgeHours = homeAge;
+                configurationDirty = true;
+            }
+            ImGui.TextDisabled("Home prices are also picked up free whenever a retainer pass reprices an item, so a full home sweep is rarely needed.");
             var salesShare = (float)config.ProcurementWeeklySalesSharePercent;
             if (ImGui.DragFloat("Maximum stock to hold, as % of weekly sales", ref salesShare, 1f, 1, 100, "%.0f%%"))
             {

@@ -7,7 +7,7 @@ namespace SmartUndercutBot;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 31;
+    public int Version { get; set; } = 32;
     public bool AutomationEnabled { get; set; }
     public bool ProcessAllRetainers { get; set; } = true;
     public bool RepeatBellRuns { get; set; }
@@ -33,6 +33,14 @@ public sealed class Configuration : IPluginConfiguration
     public bool ReinvestAvailableGil { get; set; } = true;
     public bool BuyHighQualityOnly { get; set; } = true;
     public int ProcurementBagBufferStacks { get; set; } = 5;
+    // Stock health is value as well as spread: a bag full of cheap dye meets the
+    // stack target without being worth anything to sell.
+    public uint ProcurementBufferValueTarget { get; set; } = 1_000_000;
+    public int PriorityWorldsPerTrip { get; set; } = 8;
+    public int PriorityMinutesPerTrip { get; set; } = 45;
+    // Home prices barely move day to day, and repricing re-reads them for free every
+    // retainer pass, so a full home sweep is not needed more than once a day.
+    public int HomePriceMaxAgeHours { get; set; } = 24;
     public bool ContinueShoppingWhenStocked { get; set; } = true;
     public decimal ProcurementBufferGilPercent { get; set; } = 20m;
     public uint ProcurementTravelReserve { get; set; } = 5_000;
@@ -378,7 +386,19 @@ public sealed class Configuration : IPluginConfiguration
             }
             Version = 31;
         }
-        Version = Math.Max(Version, 31);
+        if (Version < 32)
+        {
+            ProcurementBufferValueTarget = 1_000_000;
+            PriorityWorldsPerTrip = 8;
+            PriorityMinutesPerTrip = 45;
+            HomePriceMaxAgeHours = 24;
+            Version = 32;
+        }
+        Version = Math.Max(Version, 32);
+        ProcurementBufferValueTarget = Math.Min(ProcurementBufferValueTarget, 999_999_999u);
+        PriorityWorldsPerTrip = Math.Clamp(PriorityWorldsPerTrip, 1, 40);
+        PriorityMinutesPerTrip = Math.Clamp(PriorityMinutesPerTrip, 5, 480);
+        HomePriceMaxAgeHours = Math.Clamp(HomePriceMaxAgeHours, 1, 168);
         LiveWorldStockHuntMaximumItems = Math.Clamp(LiveWorldStockHuntMaximumItems, 1, 40);
         ProcurementBufferGilPercent = Math.Clamp(ProcurementBufferGilPercent, 0m, 100m);
         ProcurementBagBufferStacks = Math.Clamp(ProcurementBagBufferStacks, 0, 50);

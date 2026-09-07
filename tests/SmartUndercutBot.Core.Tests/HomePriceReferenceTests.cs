@@ -70,3 +70,30 @@ public sealed class HomePriceReferenceTests
         Assert.Equal(7_000u, summary.Reference);
     }
 }
+
+public sealed class BufferHealthTests
+{
+    [Fact]
+    public void CheapStacksDoNotCountAsAHealthyBuffer()
+    {
+        // Twelve stacks of cheap dye meets the count but is not a trading position.
+        Assert.False(ResaleStockPolicy.BufferIsComfortable(12, 12, 60_000, 1_000_000));
+        Assert.Equal(940_000ul, ResaleStockPolicy.BufferValueShortfall(60_000, 1_000_000));
+    }
+
+    [Fact]
+    public void BothTargetsMustBeMet()
+    {
+        Assert.True(ResaleStockPolicy.BufferIsComfortable(12, 12, 1_200_000, 1_000_000));
+        // Value is there but the spread is not.
+        Assert.False(ResaleStockPolicy.BufferIsComfortable(3, 12, 5_000_000, 1_000_000));
+        Assert.Equal(0ul, ResaleStockPolicy.BufferValueShortfall(1_200_000, 1_000_000));
+    }
+
+    [Fact]
+    public void AZeroValueTargetLeavesTheStackCountInCharge()
+    {
+        Assert.True(ResaleStockPolicy.BufferIsComfortable(12, 12, 0, 0));
+        Assert.False(ResaleStockPolicy.BufferIsComfortable(11, 12, 0, 0));
+    }
+}
