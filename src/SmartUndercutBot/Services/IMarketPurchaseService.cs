@@ -32,6 +32,9 @@ public interface IMarketPurchaseService
         IReadOnlySet<ulong> excludedRetainerIds,
         out LivePurchaseListing? listing);
     bool SubmitPurchase(LivePurchaseListing listing);
+    // The market board asks for confirmation before it takes the gil. Returns true
+    // only when the prompt for this exact item was found and accepted.
+    bool TryConfirmPurchase(string itemName) => false;
     void CloseMarketBoard();
     void CloseRetainerList();
 }

@@ -778,6 +778,23 @@ public sealed class ProcurementControllerTests
             "a single deep stack must not consume the whole shopping allowance");
     }
 
+    [Fact]
+    public void APurchaseIsCompletedByAnsweringTheConfirmationPrompt()
+    {
+        using var run = new Route();
+        run.Game.NeedsPurchaseDialog = true;
+        run.ReachPurchase();
+        Assert.Equal(1, run.Game.Purchases);
+        Assert.Equal(ProcurementState.WaitingForPurchase, run.Controller.State);
+        // Nothing has been bought yet; the board is waiting on the prompt.
+        Assert.Empty(run.Ledger.Snapshot());
+
+        run.Tick();
+        Assert.Equal(1, run.Game.DialogsConfirmed);
+        run.Tick();
+        Assert.Equal(99u, Assert.Single(run.Ledger.Snapshot()).PendingQuantity);
+    }
+
     private sealed class Clock : TimeProvider
     {
         private DateTimeOffset now = DateTimeOffset.UtcNow;
@@ -929,15 +946,29 @@ public sealed class ProcurementControllerTests
             listing = new(0, 1, expected.ListingId, expected.RetainerId, 1_000, 99, true, BuyerTax);
             return true;
         }
+        public bool NeedsPurchaseDialog { get; set; }
+        public int DialogsConfirmed { get; private set; }
+        private LivePurchaseListing? awaitingConfirmation;
         public bool SubmitPurchase(LivePurchaseListing listing)
         {
             Purchases++;
             if (ThrowAfterPurchaseSubmission) throw new InvalidOperationException("Submission response lost.");
+            // The real board takes nothing until the yes/no prompt is answered.
+            if (NeedsPurchaseDialog) { awaitingConfirmation = listing; return true; }
             if (AutomaticPurchaseConfirmation)
             {
                 Inventory += (int)listing.Quantity;
                 Gil -= listing.PricePerUnit * listing.Quantity + listing.TotalTax;
             }
+            return true;
+        }
+        public bool TryConfirmPurchase(string itemName)
+        {
+            if (awaitingConfirmation is not { } pending) return false;
+            DialogsConfirmed++;
+            Inventory += (int)pending.Quantity;
+            Gil -= pending.PricePerUnit * pending.Quantity + pending.TotalTax;
+            awaitingConfirmation = null;
             return true;
         }
         public void CloseMarketBoard() => BoardOpen = false;

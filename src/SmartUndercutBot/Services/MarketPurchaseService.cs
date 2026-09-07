@@ -21,6 +21,7 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService
     private readonly AutomationLog log;
     private readonly MarketSearchSession search;
     private string lastSearchStatus = string.Empty;
+    private DateTimeOffset nextDialogDiagnosticAt;
     public string? SearchStatus => search.Status;
 
     public MarketPurchaseService(
@@ -333,6 +334,35 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService
                 (sent ? "Waiting for inventory confirmation." : "No purchase confirmation received."));
             return sent;
         }
+    }
+
+    public bool TryConfirmPurchase(string itemName)
+    {
+        var addon = gameGui.GetAddonByName<AddonSelectYesno>("SelectYesno");
+        if (addon == null || !addon->AtkUnitBase.IsVisible)
+            return false;
+        var prompt = addon->PromptText == null ? string.Empty : addon->PromptText->NodeText.ToString();
+        // Only ever accept the prompt naming the item being bought. Any other yes/no
+        // dialog in front of the player is left completely alone.
+        if (string.IsNullOrWhiteSpace(itemName) ||
+            !prompt.Contains(itemName, StringComparison.OrdinalIgnoreCase))
+        {
+            if (DateTimeOffset.UtcNow >= nextDialogDiagnosticAt)
+            {
+                nextDialogDiagnosticAt = DateTimeOffset.UtcNow.AddSeconds(5);
+                log.Add(AutomationLogLevel.Warning,
+                    $"MARKET BUY a yes/no dialog is open but does not name {itemName}; leaving it alone. " +
+                    $"Prompt: '{prompt}'");
+            }
+            return false;
+        }
+
+        var values = stackalloc AtkValue[1];
+        values[0].Type = AtkValueType.Int;
+        values[0].Int = 0;
+        addon->AtkUnitBase.FireCallback(1, values, true);
+        log.Add(AutomationLogLevel.Information, $"MARKET BUY confirmed the purchase prompt for {itemName}.");
+        return true;
     }
 
     public void CloseMarketBoard()

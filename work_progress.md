@@ -11,6 +11,39 @@ Build: use `C:/Users/Acour/.dotnet/dotnet.exe` (SDK 10.0.301), **not** the PATH
 
 ---
 
+## v1.0.0.48 - the purchase confirmation prompt was never answered
+
+v1.0.0.47 fixed the search completely. The log now runs the whole chain:
+
+    MARKET SEARCH Waiting for search rows ...; no results are visible yet
+    MARKET SEARCH Opened the General-purpose Metallic Red Dye row
+    MARKET SEARCH Live prices loaded
+    00:30:06 MARKET BUY request sent for item 13717, ... quantity 8, unit price 1,148
+    00:30:16 PURCHASE OUTCOME UNKNOWN ... inventory did not confirm it
+
+So search, row activation, live prices and submission all work; only the last
+step failed. The market board asks for confirmation before taking gil and nothing
+answered it, so the request sat unanswered and inventory never moved.
+
+This was flagged as an open risk at the very start of these sessions
+("SendPurchaseRequestPacket with no handling for a confirmation dialog") and never
+closed. `TryConfirmPurchase` now finds the SelectYesno prompt, and **only accepts
+it when the prompt text names the item being bought** - any other yes/no dialog in
+front of the player is left alone, and a non-matching prompt is logged so a wrong
+guess about the text is visible rather than silent. Answering the prompt extends
+the confirmation deadline by 10s, and the timeout message reports how many prompts
+were answered.
+
+`APurchaseIsCompletedByAnsweringTheConfirmationPrompt` models a board that takes
+nothing until the prompt is answered; it fails without the fix.
+
+### Also
+The most frequent skip, "the Universalis deal was gone or exceeded the live
+ceiling", now reports what the board actually held: the price ceiling and quantity
+wanted, how many matching-quality listings were present, and the cheapest one.
+That skip is correct safety behaviour - the plan comes from Universalis and the
+live board disagrees - but it was undiagnosable.
+
 ## v1.0.0.47 - shopping search never read its results
 
 Session log, shopping on another world:

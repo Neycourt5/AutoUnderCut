@@ -111,6 +111,7 @@ public sealed class ProcurementController : IDisposable
     private int successfulLiveScans;
     private int failedLiveScans;
     private int confirmedPurchases;
+    private int purchaseConfirmations;
     private int skippedPurchases;
     private string routeOutcome = string.Empty;
     private int consecutiveFailedWorlds;
@@ -304,6 +305,7 @@ public sealed class ProcurementController : IDisposable
         deadline = timeProvider.GetUtcNow().AddSeconds(150);
         Plan = ProcurementPlan.Empty;
         confirmedPurchases = 0;
+        purchaseConfirmations = 0;
         skippedPurchases = 0;
         gilSpent = 0;
         State = ProcurementState.ScanningUniversalis;
@@ -605,6 +607,7 @@ public sealed class ProcurementController : IDisposable
         Plan = ProcurementPlan.Empty;
         gilSpent = 0;
         confirmedPurchases = 0;
+        purchaseConfirmations = 0;
         skippedPurchases = 0;
         successfulLiveScans = 0;
         failedLiveScans = 0;
@@ -688,6 +691,7 @@ public sealed class ProcurementController : IDisposable
         orderIndex = 0;
         gilSpent = 0;
         confirmedPurchases = 0;
+        purchaseConfirmations = 0;
         skippedPurchases = 0;
         routeOutcome = string.Empty;
         purchasedSlotsByItem.Clear();
@@ -1047,7 +1051,20 @@ public sealed class ProcurementController : IDisposable
         }
         if (!market.TrySelectLiveListing(currentOrder, retainerListings.OwnedRetainerIds, out var live) || live is null)
         {
-            SkipCurrentOrder($"SKIPPED BUY {currentOrder.ItemName}: the Universalis deal was gone or exceeded the live ceiling.");
+            // This is the most common skip, so say what the board actually held
+            // rather than only that nothing qualified.
+            var seen = market.ReadLiveListings(currentOrder.ItemId)
+                .Where(x => x.IsHighQuality == currentOrder.IsHighQuality)
+                .OrderBy(x => x.PricePerUnit)
+                .ToArray();
+            var cheapest = seen.FirstOrDefault();
+            SkipCurrentOrder(
+                $"SKIPPED BUY {currentOrder.ItemName}: no live listing matched the plan. " +
+                $"Wanted up to {currentOrder.MaximumAcceptableUnitPrice:N0} gil each for at most " +
+                $"{currentOrder.Quantity} unit(s); the board showed {seen.Length} matching-quality listing(s)" +
+                (cheapest is null
+                    ? "."
+                    : $", cheapest {cheapest.PricePerUnit:N0} gil x{cheapest.Quantity}."));
             return;
         }
 
@@ -1108,10 +1125,20 @@ public sealed class ProcurementController : IDisposable
         var count = market.GetInventoryCount(currentLiveListing.ItemId, currentLiveListing.IsHighQuality);
         if (count < inventoryBefore + currentLiveListing.Quantity)
         {
+            // The board asks for confirmation before it takes the gil. Without
+            // answering it the request sits unanswered and inventory never changes,
+            // which is what "outcome unknown" was reporting.
+            if (market.TryConfirmPurchase(currentOrder.ItemName))
+            {
+                purchaseConfirmations++;
+                deadline = timeProvider.GetUtcNow().AddSeconds(10);
+                return;
+            }
             if (timeProvider.GetUtcNow() < deadline)
                 return;
             Halt($"PURCHASE OUTCOME UNKNOWN for {currentOrder.ItemName}: the game accepted the request, " +
-                 "but inventory did not confirm it before the timeout. Procurement stopped to prevent a duplicate buy.");
+                 $"but inventory did not confirm it before the timeout ({purchaseConfirmations} confirmation " +
+                 "prompt(s) answered). Procurement stopped to prevent a duplicate buy.");
             return;
         }
 
