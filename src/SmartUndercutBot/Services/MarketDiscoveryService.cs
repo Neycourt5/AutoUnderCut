@@ -40,6 +40,15 @@ public sealed class MarketDiscoveryService
     public DateTimeOffset? LastSuccessAt { get; private set; }
     public string Status { get; private set; } = "Market discovery has not run yet.";
 
+    /// <summary>
+    /// True while a refresh is still in flight. <see cref="LastSuccessAt"/> is set
+    /// before the task finishes, so it is not a completion signal on its own.
+    /// </summary>
+    public bool IsRefreshing
+    {
+        get { lock (sync) return running is { IsCompleted: false }; }
+    }
+
     private TimeSpan CacheLifetime =>
         TimeSpan.FromHours(Math.Clamp(configuration.Current.MarketDiscoveryCacheHours, 1, 168));
 

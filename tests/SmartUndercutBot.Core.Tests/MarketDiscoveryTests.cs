@@ -200,8 +200,9 @@ public sealed class MarketDiscoveryTests
 
         // The curated flip is still bought, and the failure is reported plainly.
         Assert.Equal(("Cactuar", 1u, 99u), Assert.Single(run.Game.Bought));
-        Assert.True(statistics.Calls > 0, "discovery should have been attempted");
-        Assert.True(Settles(() => run.Discovery!.Status.Contains("unavailable")));
+        Assert.True(Settles(() => !run.Discovery!.IsRefreshing && statistics.Calls > 0),
+            "discovery should have been attempted");
+        Assert.Contains("unavailable", run.Discovery!.Status);
         Assert.Contains(run.Log.Messages, m => m.Contains("MARKET DISCOVERY") && m.Contains("unavailable"));
         Assert.DoesNotContain(run.Config.Current.ProcurementRules, r => r.DiscoveredAutomatically);
     }
@@ -229,7 +230,7 @@ public sealed class MarketDiscoveryTests
 
         run.Controller.RunNow();
         for (var i = 0; i < 600 && run.Controller.IsActive; i++) run.Tick(2);
-        Assert.True(Settles(() => run.Discovery!.LastSuccessAt is not null));
+        Assert.True(Settles(() => !run.Discovery!.IsRefreshing && run.Discovery.LastSuccessAt is not null));
         // The second pass runs with the discovered rule already merged in.
         run.Repricing.IsActive = false;
         run.Controller.RunNow();
@@ -250,7 +251,7 @@ public sealed class MarketDiscoveryTests
         var discovery = run.Discovery!;
 
         discovery.RefreshIfDue();
-        Assert.True(Settles(() => discovery.LastSuccessAt is not null));
+        Assert.True(Settles(() => !discovery.IsRefreshing && discovery.LastSuccessAt is not null));
         var firstSuccess = discovery.LastSuccessAt;
         Assert.Equal(1, statistics.Calls);
 
@@ -262,7 +263,7 @@ public sealed class MarketDiscoveryTests
 
         run.Tick(2 * 3600);
         discovery.RefreshIfDue();
-        Assert.True(Settles(() => discovery.LastSuccessAt != firstSuccess));
+        Assert.True(Settles(() => !discovery.IsRefreshing && discovery.LastSuccessAt != firstSuccess));
         Assert.Equal(2, statistics.Calls);
         Assert.Equal(1, discovery.ApplyPendingDiscoveries());
         Assert.Contains(run.Config.Current.ProcurementRules, r => r.ItemId == 42 && r.PreferredStock);

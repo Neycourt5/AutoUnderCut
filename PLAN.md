@@ -1,4 +1,4 @@
-# Active: v1.0.0.59 restore market-board search confidence
+# Active: v1.0.0.60 restore market-board search confidence
 
 User report against 1.0.0.58: the market board opened the Gemdraught of Mind
 search repeatedly and never showed the price listings.
@@ -52,7 +52,14 @@ list for six different reasons and the log cannot distinguish them.
 - [x] Fix the cross-thread config read and the 16,822 off-thread item lookups.
 - [x] Cache the portfolio summary.
 - [x] 260 tests pass; Release build 1.0.0.59 clean.
-- [ ] Commit, push main, tag v1.0.0.59, verify published repo.json/zip.
+- [x] v1.0.0.59 published, but its Build run failed on a flaky test of mine:
+      MarketDiscoveryService sets LastSuccessAt inside RefreshAsync, before the
+      task completes, so a test that waited on it could race the next
+      RefreshIfDue into the "already running" guard. Added IsRefreshing and
+      waited on that; 12 consecutive Release runs of the discovery tests pass.
+- [x] Build workflow now writes a TRX and uploads it even on failure, because
+      the checks API reports only "exit code 1".
+- [ ] Commit, push main, tag v1.0.0.60, verify both workflows and the installer.
 
 ## What the user should do
 Update to .59 and run one shopping pass. If the search still stalls, the log line

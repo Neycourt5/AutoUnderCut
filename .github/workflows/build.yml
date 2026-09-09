@@ -29,7 +29,17 @@ jobs:
         run: dotnet restore SmartUndercutBot.sln
 
       - name: Test pricing core
-        run: dotnet test tests/SmartUndercutBot.Core.Tests/SmartUndercutBot.Core.Tests.csproj --configuration Release --no-restore
+        run: dotnet test tests/SmartUndercutBot.Core.Tests/SmartUndercutBot.Core.Tests.csproj --configuration Release --no-restore --logger "trx;LogFileName=test-results.trx" --results-directory artifacts/test-results
+
+      # A failing run reports only "exit code 1" through the checks API, which is
+      # not enough to identify which test failed. Keep the results either way.
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: artifacts/test-results
+          if-no-files-found: warn
 
       - name: Build plugin
         run: dotnet build src/SmartUndercutBot/SmartUndercutBot.csproj --configuration Release --no-restore
