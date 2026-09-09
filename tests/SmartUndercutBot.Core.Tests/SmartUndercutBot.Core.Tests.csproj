@@ -22,6 +22,8 @@
     <Compile Include="../../src/SmartUndercutBot/Automation/StockAutomationController.cs" Link="Production/StockAutomationController.cs" />
     <Compile Include="../../src/SmartUndercutBot/Configuration.cs" Link="Production/Configuration.cs" />
     <Compile Include="../../src/SmartUndercutBot/Services/ProcurementLedger.cs" Link="Production/ProcurementLedger.cs" />
+    <Compile Include="../../src/SmartUndercutBot/Services/MarketDiscoveryService.cs" Link="Production/MarketDiscoveryService.cs" />
+    <Compile Include="../../src/SmartUndercutBot/Services/SaddlebagStatisticsProvider.cs" Link="Production/SaddlebagStatisticsProvider.cs" />
     <Compile Include="../../src/SmartUndercutBot/Services/IMarketPurchaseService.cs" Link="Production/IMarketPurchaseService.cs" />
     <Compile Include="../../src/SmartUndercutBot/Services/VnavmeshService.cs" Link="Production/VnavmeshService.cs" />
     <Compile Include="../../src/SmartUndercutBot/Services/LifestreamService.cs" Link="Production/LifestreamService.cs" />

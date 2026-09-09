@@ -102,6 +102,10 @@ namespace SmartUndercutBot.Services
         string ResolveDataCenter(string configured);
         Task<IReadOnlyList<ProcurementMarketItem>> ScanAsync(IReadOnlyList<ProcurementRule> rules,
             string dataCenter, CancellationToken cancellationToken);
+        Task<IReadOnlyList<MarketPriceHint>> FetchPriceHintsAsync(IReadOnlyList<ProcurementRule> rules,
+            string scope, CancellationToken cancellationToken)
+            => Task.FromResult<IReadOnlyList<MarketPriceHint>>([]);
+        MarketItemFacts? LookupItem(uint itemId) => null;
     }
     public interface ITaskbarAttentionService
     {

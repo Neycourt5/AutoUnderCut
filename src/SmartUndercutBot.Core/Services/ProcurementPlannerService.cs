@@ -19,11 +19,13 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
             request.MaximumWeeklySalesSharePercent is <= 0 or > 100)
             return ProcurementPlan.Empty;
 
+        var gates = request.Portfolio ?? PortfolioGates.Unrestricted;
         var rules = request.Rules
             .Where(x => x.Enabled && x.ItemId != 0 && !x.LiquidateOnly)
             .GroupBy(x => x.ItemId)
             .ToDictionary(x => x.Key, x => x.First());
         var candidates = new List<ProcurementOrder>();
+        var rejected = new List<PortfolioDecision>();
         var remainingUnits = new Dictionary<(uint, bool), ulong>();
 
         foreach (var market in request.Markets)
@@ -88,6 +90,7 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
                 if (ceiling == 0)
                     continue;
 
+                var salesPerDay = SalesVelocityPolicy.DailyUnits(market, quality);
                 foreach (var listing in market.Listings)
                 {
                     if (listing.ItemId != market.ItemId || listing.PricePerUnit == 0 || listing.PricePerUnit > ceiling ||
@@ -105,7 +108,7 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
                     if (expectedProfit > uint.MaxValue)
                         expectedProfit = uint.MaxValue;
 
-                    candidates.Add(new ProcurementOrder(
+                    AddCandidate(candidates, rejected, gates, rule, new(
                         market.ItemId,
                         string.IsNullOrWhiteSpace(rule.ItemName) ? market.ItemName : rule.ItemName,
                         listing.ListingId,
@@ -118,14 +121,14 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
                         targetSalePrice,
                         ceiling,
                         (uint)expectedProfit,
-                        1, SalesPerDay: SalesVelocityPolicy.DailyUnits(market, quality)));
+                        1, SalesPerDay: salesPerDay));
                 }
             }
         }
 
-        return Allocate(candidates, rules, request.GilBudget,
+        return Allocate(candidates, rejected, rules, request.GilBudget,
             Math.Min(request.FreeSaleSlots, request.FreeInventorySlots), request.BuyerFeePercent,
-            request.OwnedStock ?? [], remainingUnits);
+            request.OwnedStock ?? [], remainingUnits, gates, request.PortfolioCapacitySlots);
     }
 
     public ProcurementPlan BuildLiveMarketPlan(LiveMarketPlanRequest request)
@@ -136,11 +139,13 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
             request.BuyerFeePercent is < 0 or > 100 || request.MinimumRoiPercent is < 0 or > 1_000)
             return ProcurementPlan.Empty;
 
+        var gates = request.Portfolio ?? PortfolioGates.Unrestricted;
         var rules = request.Rules
             .Where(x => x.Enabled && x.ItemId != 0 && !x.LiquidateOnly)
             .GroupBy(x => x.ItemId)
             .ToDictionary(x => x.Key, x => x.First());
         var candidates = new List<ProcurementOrder>();
+        var rejected = new List<PortfolioDecision>();
 
         foreach (var market in request.Markets)
         {
@@ -180,6 +185,7 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
                 if (ceiling == 0)
                     continue;
 
+                var salesPerDay = SalesVelocityPolicy.DailyUnits(market, quality);
                 foreach (var listing in market.Listings)
                 {
                     if (listing.ItemId != market.ItemId || string.IsNullOrWhiteSpace(listing.WorldName) ||
@@ -193,7 +199,7 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
                     if (totalCost > uint.MaxValue || totalNet <= totalCost)
                         continue;
                     var expectedProfit = Math.Min((ulong)uint.MaxValue, totalNet - totalCost);
-                    candidates.Add(new(
+                    AddCandidate(candidates, rejected, gates, rule, new(
                         market.ItemId,
                         string.IsNullOrWhiteSpace(rule.ItemName) ? market.ItemName : rule.ItemName,
                         listing.ListingId,
@@ -206,71 +212,165 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
                         targetSalePrice,
                         ceiling,
                         (uint)expectedProfit,
-                        1));
+                        1, SalesPerDay: salesPerDay));
                 }
             }
         }
 
-        return Allocate(candidates, rules, request.GilBudget,
+        return Allocate(candidates, rejected, rules, request.GilBudget,
             Math.Min(request.FreeSaleSlots, request.FreeInventorySlots), request.BuyerFeePercent,
-            request.OwnedStock ?? [], null);
+            request.OwnedStock ?? [], null, gates, request.PortfolioCapacitySlots);
     }
 
-    private static ProcurementPlan Allocate(List<ProcurementOrder> candidates,
-        IReadOnlyDictionary<uint, ProcurementRule> rules, uint budget, int slotLimit, decimal buyerFee,
-        IReadOnlyList<StockExposure> owned, IReadOnlyDictionary<(uint, bool), ulong>? quantityLimits)
+    /// <summary>
+    /// Tier the candidate and apply the value gate. ROI has already been enforced by
+    /// the price ceiling; this is the separate question of whether the deal is worth
+    /// a whole retainer slot, which is what stops a 300% margin on a worthless dye.
+    /// </summary>
+    private static void AddCandidate(List<ProcurementOrder> candidates, List<PortfolioDecision> rejected,
+        PortfolioGates gates, ProcurementRule rule, ProcurementOrder candidate)
     {
-        // Absolute profit works well when slots are scarce; ROI can buy more
-        // profitable combinations with a small wallet. Compare complete feasible
-        // plans instead of letting one expensive stack consume the whole budget.
+        var tier = PortfolioPolicy.ClassifyCandidate(rule.PreferredStock, candidate.SalesPerDay,
+            candidate.ResaleValuePerSaleSlot, candidate.ExpectedProfitPerSaleSlot, gates);
+        var tiered = candidate with { Tier = tier };
+        if (tier != PortfolioTier.Core && tiered.ExpectedProfitPerSaleSlot < gates.MinimumProfitPerSaleSlot)
+        {
+            rejected.Add(Describe(tiered, false,
+                $"insufficient slot value ({tiered.ExpectedProfitPerSaleSlot:N0} gil per sale slot, " +
+                $"{gates.MinimumProfitPerSaleSlot:N0} required)"));
+            return;
+        }
+        candidates.Add(tiered);
+    }
+
+    private static PortfolioDecision Describe(ProcurementOrder order, bool selected, string reason) => new(
+        order.ItemId, order.ItemName, order.IsHighQuality, order.Tier, selected, reason,
+        order.SalesPerDay, order.ExpectedProfit, order.RoiPercent, order.EstimatedDaysToSell,
+        order.ExpectedResaleValue);
+
+    private static ProcurementPlan Allocate(List<ProcurementOrder> candidates, List<PortfolioDecision> rejected,
+        IReadOnlyDictionary<uint, ProcurementRule> rules, uint budget, int slotLimit, decimal buyerFee,
+        IReadOnlyList<StockExposure> owned, IReadOnlyDictionary<(uint, bool), ulong>? quantityLimits,
+        PortfolioGates gates, int capacitySlots)
+    {
         ulong Cost(ProcurementOrder x) => PurchaseCost(x.PricePerUnit, x.Quantity, buyerFee);
-        // Home-world sales velocity measures demand. Category preferences break
-        // ties instead of guessing that every potion outsells every dye.
+        // Category preferences only ever break ties; actual value and demand decide.
         int Priority(ProcurementOrder x) => rules.TryGetValue(x.ItemId, out var rule) ? rule.TourPriority : int.MaxValue;
+
+        var ownedSlots = owned.GroupBy(x => x.Tier).ToDictionary(x => x.Key, x => x.Sum(y => y.SaleSlots));
+        var opening = PortfolioPolicy.Summarize(ownedSlots, slotLimit, capacitySlots, gates);
+        if (candidates.Count == 0)
+            return new(DateTimeOffset.UtcNow, [], 0, 0, 0, opening, rejected);
+
+        // Absolute profit works well when slots are scarce; profit per gil can buy
+        // more combinations with a small wallet. Every ordering is tier-major, so a
+        // cheap opportunistic listing never displaces core stock in any of them.
         var strategies = new[]
         {
-            candidates.OrderByDescending(x => (double)x.ExpectedProfit).ThenBy(Cost),
-            candidates.OrderByDescending(x => (double)x.ExpectedProfit / Math.Max(1UL, Cost(x))).ThenBy(Cost),
-            candidates.OrderByDescending(x => x.ExpectedProfit / Math.Sqrt(Math.Max(1UL, Cost(x)))).ThenBy(Cost),
-            candidates.OrderBy(Priority).ThenByDescending(x => (double)x.ExpectedProfit / Math.Max(1UL, Cost(x))).ThenBy(Cost),
-            candidates.OrderByDescending(x => x.SalesPerDay).ThenBy(Priority)
-                .ThenByDescending(x => (double)x.ExpectedProfit / Math.Max(1UL, Cost(x))).ThenBy(Cost),
+            Tiered(candidates).ThenByDescending(x => x.ProfitVelocity).ThenBy(Cost),
+            Tiered(candidates).ThenByDescending(x => (double)x.ExpectedProfit).ThenBy(Cost),
+            Tiered(candidates).ThenByDescending(x => (double)x.ExpectedProfit / Math.Max(1UL, Cost(x))).ThenBy(Cost),
+            Tiered(candidates).ThenByDescending(x => x.SalesPerDay).ThenByDescending(x => x.ProfitVelocity).ThenBy(Cost),
+            Tiered(candidates).ThenByDescending(x => x.ResaleValuePerSaleSlot).ThenBy(Priority).ThenBy(Cost),
         };
+
         var plans = new List<ProcurementPlan>();
         foreach (var strategy in strategies)
         {
             var itemSlots = owned.GroupBy(x => x.ItemId).ToDictionary(x => x.Key, x => x.Sum(y => y.SaleSlots));
+            var tierSlots = new Dictionary<PortfolioTier, int>(ownedSlots);
             var boughtUnits = new Dictionary<(uint, bool), ulong>();
             var orders = new List<ProcurementOrder>();
+            var notes = new List<PortfolioDecision>();
             ulong spent = 0, profit = 0;
             foreach (var candidate in strategy)
             {
                 var key = (candidate.ItemId, candidate.IsHighQuality);
                 var cost = Cost(candidate);
                 var used = itemSlots.GetValueOrDefault(candidate.ItemId);
-                if (orders.Count >= slotLimit || used >= rules[candidate.ItemId].MaximumSaleSlots ||
-                    spent + cost > budget || quantityLimits is not null &&
-                    boughtUnits.GetValueOrDefault(key) + candidate.Quantity > quantityLimits.GetValueOrDefault(key))
+                if (orders.Count >= slotLimit)
+                {
+                    notes.Add(Describe(candidate, false, "no free sale slot remains in this plan"));
                     continue;
+                }
+                // The opportunistic cap counts stock already listed, so a retainer
+                // full of dye actively blocks buying more of it.
+                if (candidate.Tier == PortfolioTier.Opportunistic &&
+                    tierSlots.GetValueOrDefault(PortfolioTier.Opportunistic) + candidate.SaleSlots >
+                    opening.OpportunisticCap)
+                {
+                    notes.Add(Describe(candidate, false,
+                        $"opportunistic portfolio cap reached ({tierSlots.GetValueOrDefault(PortfolioTier.Opportunistic)}" +
+                        $"/{opening.OpportunisticCap} slots)"));
+                    continue;
+                }
+                if (used >= rules[candidate.ItemId].MaximumSaleSlots)
+                {
+                    notes.Add(Describe(candidate, false, $"already holding {used} sale slot(s) of this item"));
+                    continue;
+                }
+                if (spent + cost > budget)
+                {
+                    notes.Add(Describe(candidate, false, "the remaining budget does not cover this stack"));
+                    continue;
+                }
+                if (quantityLimits is not null &&
+                    boughtUnits.GetValueOrDefault(key) + candidate.Quantity > quantityLimits.GetValueOrDefault(key))
+                {
+                    notes.Add(Describe(candidate, false, "the weekly market-share limit for this item is reached"));
+                    continue;
+                }
                 orders.Add(candidate);
+                notes.Add(Describe(candidate, true, SelectionReason(candidate, tierSlots, opening)));
                 itemSlots[candidate.ItemId] = used + 1;
+                tierSlots[candidate.Tier] = tierSlots.GetValueOrDefault(candidate.Tier) + candidate.SaleSlots;
                 boughtUnits[key] = boughtUnits.GetValueOrDefault(key) + candidate.Quantity;
                 spent += cost;
                 profit += candidate.ExpectedProfit;
             }
             plans.Add(new(DateTimeOffset.UtcNow, orders, (uint)spent,
-                (uint)Math.Min(profit, uint.MaxValue), orders.Count));
+                (uint)Math.Min(profit, uint.MaxValue), orders.Count,
+                PortfolioPolicy.Summarize(tierSlots, 0, capacitySlots, gates),
+                notes));
         }
-        // Filling more sale slots beats a marginally richer plan that leaves them
-        // empty, and among equal fills the higher-volume stock wins.
-        return plans.OrderByDescending(x => x.Orders.Count)
-            .ThenByDescending(x => x.Orders.Sum(o => o.SalesPerDay))
-            .ThenBy(x => x.Orders.Sum(Priority))
-            .ThenByDescending(x => x.Orders.Sum(y => (long)y.ExpectedProfit))
-            .ThenByDescending(x => x.Orders.Select(y => y.ItemId).Distinct().Count())
-            .ThenBy(x => x.Orders.Select(y => y.WorldName).Distinct(StringComparer.OrdinalIgnoreCase).Count())
-            .ThenBy(x => x.TotalCost).First();
+
+        // The lexicographic objective. Slot occupancy is deliberately last: a cheap
+        // low-value item must never win merely by filling one more slot.
+        var best = plans
+            // 1. close the core/preferred deficit
+            .OrderByDescending(x => Math.Min(TierSlots(x, PortfolioTier.Core), opening.CoreDeficit))
+            // 2. never exceed the opportunistic cap
+            .ThenBy(x => Math.Max(0, x.Summary.OpportunisticSlots - opening.OpportunisticCap))
+            // 3. maximise high-quality, high-liquidity opportunity value
+            .ThenByDescending(x => x.Orders.Where(o => o.Tier != PortfolioTier.Opportunistic).Sum(o => o.ProfitVelocity))
+            // 4. maximise expected absolute profit
+            .ThenByDescending(x => x.Orders.Sum(o => (long)o.ExpectedProfit))
+            // 5. and only then use the remaining capacity
+            .ThenByDescending(x => x.Orders.Count)
+            .ThenByDescending(x => x.Orders.Select(o => o.ItemId).Distinct().Count())
+            .ThenBy(x => x.Orders.Select(o => o.WorldName).Distinct(StringComparer.OrdinalIgnoreCase).Count())
+            .ThenBy(x => x.TotalCost)
+            .First();
+        return best with { Decisions = rejected.Concat(best.DecisionLog).ToArray() };
     }
+
+    private static int TierSlots(ProcurementPlan plan, PortfolioTier tier) =>
+        plan.Orders.Where(x => x.Tier == tier).Sum(x => x.SaleSlots);
+
+    private static string SelectionReason(ProcurementOrder order,
+        IReadOnlyDictionary<PortfolioTier, int> tierSlots, PortfolioAllocationSummary opening) => order.Tier switch
+    {
+        PortfolioTier.Core => tierSlots.GetValueOrDefault(PortfolioTier.Core) < opening.CoreTarget
+            ? "core portfolio below target"
+            : "core portfolio stock",
+        PortfolioTier.Secondary => $"high-liquidity secondary stock ({order.SalesPerDay:N0} units/day, " +
+                                   $"{order.ResaleValuePerSaleSlot:N0} gil per sale slot)",
+        _ => $"opportunistic capacity available ({tierSlots.GetValueOrDefault(PortfolioTier.Opportunistic)}" +
+             $"/{opening.OpportunisticCap} slots)",
+    };
+
+    private static IOrderedEnumerable<ProcurementOrder> Tiered(IEnumerable<ProcurementOrder> candidates) =>
+        candidates.OrderBy(x => PortfolioPolicy.Rank(x.Tier));
 
     private static IEnumerable<bool> EligibleQualities(ProcurementRule rule, bool highQualityOnly)
     {

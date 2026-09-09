@@ -117,6 +117,8 @@ public sealed partial class ProcurementController : IDisposable
     private int consecutiveFailedWorlds;
     private int worldSuccessfulScans;
     private readonly Dictionary<uint, int> purchasedSlotsByItem = [];
+    private IReadOnlyList<PortfolioDecision> portfolioDecisions = [];
+    private readonly MarketDiscoveryService? discovery;
 
     public ProcurementController(
         IFramework framework,
@@ -133,8 +135,10 @@ public sealed partial class ProcurementController : IDisposable
         IRetainerAutomation repricing,
         ConfigurationService configuration,
         AutomationLog log,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        MarketDiscoveryService? discovery = null)
     {
+        this.discovery = discovery;
         this.framework = framework;
         this.playerState = playerState;
         this.commandManager = commandManager;
@@ -277,6 +281,10 @@ public sealed partial class ProcurementController : IDisposable
             return;
         stockHuntScanning = false;
         priorityShopping = mode == ProcurementRunMode.AutomaticPurchase && configuration.Current.PriorityShoppingEnabled;
+        // Optional, cached, and never blocking: discovery may add candidates for
+        // the next scan, but a failure leaves the curated rules to do their job.
+        discovery?.ApplyPendingDiscoveries();
+        discovery?.RefreshIfDue();
         var dataCenter = ProcurementTravelPolicy.ShoppingScope(
             universalis.ResolveDataCenter(configuration.Current.ProcurementDataCenter));
         if (string.IsNullOrWhiteSpace(dataCenter))
@@ -540,6 +548,10 @@ public sealed partial class ProcurementController : IDisposable
             x.Listings.Any(y => string.Equals(y.WorldName, planningHomeWorld, StringComparison.OrdinalIgnoreCase) &&
                                 y.PricePerUnit > 0 && y.Quantity > 0 &&
                                 !retainerListings.OwnedRetainerIds.Contains(y.RetainerId)));
+        // These markets already carry home-world sales history and velocity, so the
+        // portfolio can tier owned stock on real demand rather than assuming the
+        // worst about everything that is not pinned.
+        priorityDemand = scanTask.Result;
         var freeSaleSlots = repricing.LastKnownFreeSaleSlots ?? config.ProcurementTargetSaleSlots;
         var plannedSaleSlots = PlannedSaleSlots(freeSaleSlots);
         var freeInventorySlots = Math.Max(0, (int)market.FreeInventorySlots - config.ProcurementInventoryReserve);
@@ -555,7 +567,10 @@ public sealed partial class ProcurementController : IDisposable
             OwnedRetainerIds: retainerListings.OwnedRetainerIds,
             OwnedStock: CollectOwnedStock(),
             MaximumWeeklySalesSharePercent: config.ProcurementWeeklySalesSharePercent,
-            HighQualityOnly: config.BuyHighQualityOnly));
+            HighQualityOnly: config.BuyHighQualityOnly,
+            Portfolio: config.PortfolioGates,
+            PortfolioCapacitySlots: PortfolioCapacitySlots()));
+        LogPortfolioDecisions("DEAL SEARCH", Plan);
         lastScannedFreeSaleSlots = plannedSaleSlots;
         lastScannedBudget = ShoppingBudget;
         scanTask = null;
@@ -1036,7 +1051,10 @@ public sealed partial class ProcurementController : IDisposable
             config.ProcurementMinimumRoiPercent,
             config.ProcurementMinimumProfitPerUnit,
             OwnedStock: CollectOwnedStock(),
-            HighQualityOnly: config.BuyHighQualityOnly));
+            HighQualityOnly: config.BuyHighQualityOnly,
+            Portfolio: config.PortfolioGates,
+            PortfolioCapacitySlots: PortfolioCapacitySlots()));
+        LogPortfolioDecisions("LIVE TOUR", Plan);
         detail = Plan.Orders.Count == 0
             ? $"Live tour checked {stockHuntWorlds.Count} worlds; no listing beat the live {homeWorld} resale floor and safety guards."
             : $"Live tour found {Plan.Orders.Count} guarded buy(s), costing {Plan.TotalCost:N0} gil with about {Plan.ExpectedProfit:N0} gil expected profit.";
@@ -1127,6 +1145,20 @@ public sealed partial class ProcurementController : IDisposable
             configuration.Current.ProcurementTargetSaleSlots))
         {
             SkipCurrentOrder($"SKIPPED BUY {currentOrder.ItemName}: empty retainer slots are already covered; the lower fill margin no longer applies.");
+            return;
+        }
+        // The lower fill margin exists to keep good stock flowing, not to occupy a
+        // slot. Opportunistic stock never reaches it, even through a stale plan.
+        if (currentOrder.IsFillOrder && currentOrder.Tier == PortfolioTier.Opportunistic)
+        {
+            SkipCurrentOrder($"SKIPPED BUY {currentOrder.ItemName}: opportunistic stock cannot use the lower fill margin.");
+            return;
+        }
+        // An opportunistic buy planned before other stock was listed must not push
+        // the portfolio past its cap.
+        if (currentOrder.Tier == PortfolioTier.Opportunistic && PortfolioSummary is { OpportunisticHeadroom: <= 0 } portfolio)
+        {
+            SkipCurrentOrder($"SKIPPED BUY {currentOrder.ItemName}: {portfolio}. The opportunistic cap is reached.");
             return;
         }
         var rule = ShoppingRules(configuration.Current.ProcurementRules).FirstOrDefault(x => x.ItemId == currentOrder.ItemId);
@@ -1697,9 +1729,74 @@ public sealed partial class ProcurementController : IDisposable
     // Stock the planner must count against its per-item limits: stacks already
     // listed on the retainers plus everything held in the bags. Without this a
     // cheap item is re-bought every trip until it crowds out everything else.
-    private IReadOnlyList<StockExposure> CollectOwnedStock()
+    // Each holding also carries its portfolio tier, so what is already listed
+    // counts toward the preferred target and against the opportunistic cap.
+    private IReadOnlyList<StockExposure> CollectOwnedStock() =>
+        repricing.ListedStock.Concat(CollectBagStock()).Select(WithPortfolioTier).ToArray();
+
+    /// <summary>
+    /// Tier a holding we already own. Profit is sunk on owned stock, so only the
+    /// pinned flag, the observed sales rate and the value of the occupied slot
+    /// decide. An item with no known market data counts as opportunistic, which is
+    /// what makes a retainer full of listed dye block buying more of it.
+    /// </summary>
+    private StockExposure WithPortfolioTier(StockExposure stock)
     {
-        return repricing.ListedStock.Concat(CollectBagStock()).ToArray();
+        var rule = configuration.Current.ProcurementRules
+            .FirstOrDefault(x => x.ItemId == stock.ItemId && x.ItemId != 0);
+        var slots = Math.Max(1, stock.SaleSlots);
+        var unitPrice = homePrices.TryGetValue(stock.ItemId, out var listings)
+            ? HomePriceReference.Summarize(stock.ItemId, string.Empty, stock.IsHighQuality, listings).Reference
+            : configuration.Current.GetEffectiveRule(stock.ItemId).CostBasis;
+        return stock with
+        {
+            Tier = PortfolioPolicy.ClassifyHolding(
+                rule?.PreferredStock == true && rule.LiquidateOnly != true,
+                HomeSalesPerDay(stock.ItemId, stock.IsHighQuality),
+                (ulong)unitPrice * stock.Quantity / (ulong)slots),
+        };
+    }
+
+    /// <summary>
+    /// The denominator for the portfolio percentages: the whole trading position,
+    /// not one shopping run. Without this a single trip with three free slots would
+    /// treat one dye as a third of the portfolio.
+    /// </summary>
+    private int PortfolioCapacitySlots() => Math.Max(
+        configuration.Current.ProcurementTargetSaleSlots,
+        (repricing.LastKnownFreeSaleSlots ?? 0) + repricing.ListedStock.Sum(x => x.SaleSlots));
+
+    /// <summary>What the current portfolio looks like against its targets.</summary>
+    public PortfolioAllocationSummary PortfolioSummary
+    {
+        get
+        {
+            var owned = CollectOwnedStock().GroupBy(x => x.Tier)
+                .ToDictionary(x => x.Key, x => x.Sum(y => y.SaleSlots));
+            return PortfolioPolicy.Summarize(owned, 0, PortfolioCapacitySlots(), configuration.Current.PortfolioGates);
+        }
+    }
+
+    /// <summary>The last plan's reasoning, newest first, for the dashboard.</summary>
+    public IReadOnlyList<PortfolioDecision> PortfolioDecisions => portfolioDecisions;
+
+    // Explain the allocation in the session log. One line per item and quality,
+    // so a hundred rejected listings of the same dye do not bury the reasoning.
+    private void LogPortfolioDecisions(string prefix, ProcurementPlan plan)
+    {
+        var rows = plan.DecisionLog
+            .GroupBy(x => (x.ItemId, x.IsHighQuality, x.Selected))
+            .Select(g => g.OrderByDescending(x => x.ExpectedProfit).First())
+            .OrderByDescending(x => x.Selected)
+            .ThenBy(x => PortfolioPolicy.Rank(x.Tier))
+            .ThenByDescending(x => x.ExpectedProfit)
+            .ToArray();
+        portfolioDecisions = rows;
+        if (rows.Length == 0)
+            return;
+        log.Add(AutomationLogLevel.Information, $"{prefix} PORTFOLIO: {plan.Summary}");
+        foreach (var row in rows.Take(40))
+            log.Add(AutomationLogLevel.Information, $"{prefix} {row}");
     }
 
     private IReadOnlyList<StockExposure> CollectBagStock()

@@ -162,7 +162,8 @@ public sealed class DashboardWindow : Window
             ImGui.Text(scan <= DateTimeOffset.UtcNow
                 ? "Deal search: ready after the retainer check and bag refill."
                 : $"Next deal search / retry: {scan.LocalDateTime:t}");
-        ImGui.TextWrapped("Sold slots are detected on the next retainer check. When no deal meets your limits, empty slots stay open and shopping retries later.");
+        DrawPortfolioSummary();
+        ImGui.TextWrapped("Sold slots are detected on the next retainer check. An empty slot is better than a slot of low-value stock, so slots stay open when nothing good qualifies.");
         if (config.ContinueShoppingWhenStocked)
             ImGui.TextWrapped($"Trading stock in bags: {procurement.ResaleBagSlots} planned sale stack(s), aiming for {procurement.ComfortableStockTarget}. " +
                 "One sale stack uses that item's selling quantity, such as 99 potions or 20 dyes. Personal reserves and sale-only items are excluded.");
@@ -191,6 +192,26 @@ public sealed class DashboardWindow : Window
                           "See Stock for exactly what each bag item will do, and Shopping for the item list and limits.");
         ImGui.TextWrapped($"At home: check retainers every {config.RepeatMinimumMinutes}-{config.RepeatMaximumMinutes} minutes; retry deals every {config.ProcurementIntervalMinutes} minutes. Shopping pauses these checks until the return trip.");
         ImGui.TextWrapped("Travel requires Lifestream and vnavmesh. Live prices and inventory confirmation are checked before another purchase is attempted.");
+    }
+
+    // One compact line: is the portfolio the shape it is meant to be? Preferred
+    // stock should hold most of it, and opportunistic arbitrage should be a sliver.
+    private void DrawPortfolioSummary()
+    {
+        var portfolio = procurement.PortfolioSummary;
+        if (portfolio.CapacitySlots == 0)
+            return;
+        var short_ = portfolio.CoreDeficit > 0;
+        var over = portfolio.OpportunisticSlots > portfolio.OpportunisticCap;
+        ImGui.TextColored(short_ ? new Vector4(1f, 0.72f, 0.2f, 1f) : new Vector4(0.55f, 0.85f, 0.65f, 1f),
+            $"Preferred: {portfolio.CoreSlots} / {portfolio.CoreTarget} target");
+        ImGui.SameLine();
+        ImGui.TextUnformatted($"   Secondary: {portfolio.SecondarySlots}   ");
+        ImGui.SameLine();
+        ImGui.TextColored(over ? new Vector4(1f, 0.72f, 0.2f, 1f) : new Vector4(0.55f, 0.85f, 0.65f, 1f),
+            $"Opportunistic: {portfolio.OpportunisticSlots} / {portfolio.OpportunisticCap} cap");
+        if (over)
+            ImGui.TextDisabled("Opportunistic stock is over its cap, so purchases favour preferred stock until it sells down.");
     }
 
     // Start runs every stage, but when one is idle the reason is invisible - full
@@ -880,6 +901,50 @@ public sealed class DashboardWindow : Window
                 "Two stops per data center: Aether > Primal > Crystal > Dynamis. Ordinary deals are compared before a buying pass; " +
                 "only deals with at least 100% expected return after fees are bought immediately. All purchases still need live price, demand, stock and budget checks. " +
                 $"Next route stop: {((string.IsNullOrEmpty(configuration.Current.PriorityNextWorld)) ? "Aether" : configuration.Current.PriorityNextWorld)}.");
+        DrawPortfolioSummary();
+        if (ImGui.CollapsingHeader("Why each item was chosen or skipped"))
+        {
+            ImGui.TextWrapped("Core stock is the curated food and gemdraughts. Secondary is anything not pinned that " +
+                              "still shows real value and demand. Opportunistic is dyes, materia and one-off arbitrage, " +
+                              "and it is capped so it cannot take over the retainers.");
+            var decisions = procurement.PortfolioDecisions;
+            if (decisions.Count == 0)
+                ImGui.TextDisabled("No decisions yet. They are recorded each time a purchase plan is built.");
+            else if (ImGui.BeginTable("portfolio-decisions", 7,
+                         ImGuiTableFlags.RowBg | ImGuiTableFlags.Borders | ImGuiTableFlags.ScrollY | ImGuiTableFlags.Resizable,
+                         new Vector2(0, 260 * ImGuiHelpers.GlobalScale)))
+            {
+                ImGui.TableSetupColumn("Item");
+                ImGui.TableSetupColumn("Tier", ImGuiTableColumnFlags.WidthFixed, 100);
+                ImGui.TableSetupColumn("Units/day", ImGuiTableColumnFlags.WidthFixed, 75);
+                ImGui.TableSetupColumn("Profit", ImGuiTableColumnFlags.WidthFixed, 85);
+                ImGui.TableSetupColumn("ROI", ImGuiTableColumnFlags.WidthFixed, 60);
+                ImGui.TableSetupColumn("Turnover", ImGuiTableColumnFlags.WidthFixed, 75);
+                ImGui.TableSetupColumn("Decision");
+                ImGui.TableHeadersRow();
+                foreach (var row in decisions)
+                {
+                    ImGui.TableNextRow();
+                    ImGui.TableNextColumn();
+                    ImGui.TextUnformatted($"{row.ItemName}{(row.IsHighQuality ? " HQ" : string.Empty)}");
+                    ImGui.TableNextColumn();
+                    ImGui.TextColored(row.Tier switch
+                    {
+                        PortfolioTier.Core => new Vector4(0.35f, 0.9f, 0.45f, 1f),
+                        PortfolioTier.Secondary => new Vector4(0.35f, 0.75f, 1f, 1f),
+                        _ => new Vector4(0.75f, 0.75f, 0.75f, 1f),
+                    }, row.Tier.ToString().ToUpperInvariant());
+                    ImGui.TableNextColumn(); ImGui.TextUnformatted(row.SalesPerDay.ToString("N0"));
+                    ImGui.TableNextColumn(); ImGui.TextUnformatted(row.ExpectedProfit.ToString("N0"));
+                    ImGui.TableNextColumn(); ImGui.TextUnformatted($"{row.RoiPercent:N0}%");
+                    ImGui.TableNextColumn(); ImGui.TextUnformatted($"{row.DaysToSell:N2}d");
+                    ImGui.TableNextColumn();
+                    ImGui.TextColored(row.Selected ? new Vector4(0.55f, 0.85f, 0.65f, 1f) : new Vector4(0.8f, 0.8f, 0.8f, 1f),
+                        $"{(row.Selected ? "selected" : "skipped")}: {row.Reason}");
+                }
+                ImGui.EndTable();
+            }
+        }
         if (ImGui.CollapsingHeader("Home reference prices"))
         {
             var reference = procurement.HomeReferencePrices;
@@ -1013,7 +1078,47 @@ public sealed class DashboardWindow : Window
                 config.ProcurementFillRoiPercent = (decimal)Math.Max(0, fillRoi);
                 configurationDirty = true;
             }
-            ImGui.TextDisabled("When the compared plan still leaves sale slots empty, the best remaining deals are taken at this lower margin rather than coming home with slots open. It is still a profit after fees, and the highest-volume stock is preferred.");
+            ImGui.TextDisabled("When the plan still leaves sale slots empty, preferred and high-liquidity stock may be taken at this lower margin. Opportunistic stock never can: an empty slot beats a slot of junk.");
+
+            ImGui.Separator();
+            ImGui.TextUnformatted("Portfolio shape");
+            var preferredTarget = (float)config.PreferredPortfolioTargetPercent;
+            if (ImGui.DragFloat("Preferred stock target %", ref preferredTarget, 1f, 0, 100, "%.0f%%"))
+            {
+                config.PreferredPortfolioTargetPercent = (decimal)Math.Clamp(preferredTarget, 0f, 100f);
+                configurationDirty = true;
+            }
+            ImGui.TextDisabled("How much of the whole trading portfolio should be the curated food and gemdraughts, plus anything discovered that matches them. Already-listed stock counts toward this.");
+            var opportunisticCap = (float)config.OpportunisticPortfolioMaximumPercent;
+            if (ImGui.DragFloat("Opportunistic maximum %", ref opportunisticCap, 1f, 0, 100, "%.0f%%"))
+            {
+                config.OpportunisticPortfolioMaximumPercent = (decimal)Math.Clamp(opportunisticCap, 0f, 100f);
+                configurationDirty = true;
+            }
+            ImGui.TextDisabled("The ceiling for dyes, materia and other arbitrage. Listed holdings count against it, so an existing pile blocks buying more until it sells down.");
+            var slotValue = config.ProcurementMinimumProfitPerSaleSlot;
+            if (InputUInt("Minimum profit per sale slot (gil)", ref slotValue, 0, 100_000_000))
+            {
+                config.ProcurementMinimumProfitPerSaleSlot = slotValue;
+                configurationDirty = true;
+            }
+            ImGui.TextDisabled("A retainer slot is the scarce resource. A 300% return on a stack worth two thousand gil is not worth one. Pinned preferred stock is exempt.");
+
+            ImGui.Separator();
+            ImGui.TextUnformatted("Market discovery (optional)");
+            var discovery = config.MarketDiscoveryEnabled;
+            if (ImGui.Checkbox("Look for new high-value food and medicine automatically", ref discovery))
+            {
+                config.MarketDiscoveryEnabled = discovery;
+                configurationDirty = true;
+            }
+            ImGui.TextDisabled("Uses a daily market-statistics feed to suggest additional flips, validated against the game's own item data. Suggestions only: every purchase still needs fresh live prices and all the usual checks. The six curated items stay pinned whether or not this is on.");
+            var discoveryHours = config.MarketDiscoveryCacheHours;
+            if (InputInt("Refresh discovery every (hours)", ref discoveryHours, 1, 168))
+            {
+                config.MarketDiscoveryCacheHours = discoveryHours;
+                configurationDirty = true;
+            }
             var scoutAge = config.ScoutKnowledgeMaxAgeHours;
             if (InputInt("Remember away-world prices for (hours)", ref scoutAge, 1, 168))
             {

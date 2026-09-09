@@ -61,8 +61,52 @@ listed on the retainers plus everything held in the bags, so a cheap item is not
 re-bought every trip until it crowds out everything else. One full target stack is
 always allowed, so an item with no stock can always be restocked. Bag-space
 reserves, per-item slot limits, minimum profit, and sale capacity still apply. If
-no deal qualifies, slots stay empty and another search runs later; filling every
-slot is a goal, not a guarantee.
+no deal qualifies, slots stay empty and another search runs later.
+
+### The portfolio comes before the slot count
+
+Filling retainer slots is not the objective; holding good stock is. Every
+prospective purchase and every holding sits in one of three tiers:
+
+- **Core / preferred** - the curated food and gemdraughts, plus anything automatic
+  discovery finds that matches them. Targets **75%** of the portfolio by default.
+- **Secondary** - not pinned by hand, but with real trading characteristics:
+  meaningful value in the occupied sale slot, meaningful profit, and genuine sales
+  velocity. It uses whatever capacity the core stock does not.
+- **Opportunistic** - dyes, materia and one-off arbitrage. Capped at **10%** by
+  default so a good-looking percentage cannot take over the retainers.
+
+Stock already listed on the retainers counts toward these percentages, so a
+backlog of listed dye actively blocks buying more of it and pushes the next
+purchases back toward preferred stock. ROI stays a safety guard rather than the
+objective: plans are compared by core deficit first, then the opportunistic cap,
+then the profit velocity of the good stock, then absolute profit, and only last by
+how many slots get filled. A 300% return on a stack worth two thousand gil loses
+to a large, fast-moving stack of raid food, and **an empty slot is preferred to a
+slot of junk**. The lower fill-up margin reaches preferred and high-liquidity
+stock only.
+
+**Shopping > Why each item was chosen or skipped** and the session log show the
+tier, units per day, expected profit, ROI, estimated turnover in days, and the
+reason for every decision, with a portfolio summary line on Home.
+
+### Optional market discovery
+
+A daily market-statistics feed can suggest additional high-value, high-volume food
+and medicine. Candidates are validated against the game's own item data (the item
+exists, is tradable, its high-quality capability, and its category) before a rule
+is created, and results are cached for 24 hours. This is intelligence, not
+authorization: a suggested item still has to pass fresh live market-board prices,
+the live buyer tax, ROI, budget and every portfolio gate before anything is bought.
+The six curated items stay pinned whether or not discovery is enabled or reachable,
+and a discovery failure never interrupts normal shopping.
+
+Scouting uses Universalis' cached aggregate endpoint
+(`/api/v2/aggregated/{scope}/{ids}`, up to 100 items per request) to decide which
+worlds and items deserve an expensive live scan. Cached observations are a
+deliberately separate type from market listings, so they cannot be mistaken for
+something the planner may buy. Detailed listings and sale history are still
+requested for the home world, which is the resale anchor.
 
 The default buying list contains HQ Grade 4 gemdraughts and HQ Caramel Popcorn.
 **Only buy high-quality stock** is on by default: wherever an item exists at both

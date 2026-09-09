@@ -1,3 +1,166 @@
+# Active: v1.0.0.58 portfolio-quality procurement
+
+The economic objective changes from "fill as many retainer slots as possible" to
+"maintain a high-quality trading portfolio first, then use remaining capacity for
+secondary opportunities". An empty slot is better than a slot full of junk.
+
+## Why the current code buys junk
+
+- `ProcurementPlannerService.Allocate()` builds five candidate plans and then
+  picks `OrderByDescending(x => x.Orders.Count)` first. Slot occupancy is the
+  primary objective, so a cheap dye that fits one more slot beats a richer plan.
+- `ProcurementController.Priority.TopUpEmptySaleSlots()` re-runs the whole plan at
+  `ProcurementFillRoiPercent` (10%) over *every* buyable rule, so any dye or
+  materia with a technically positive margin can occupy an empty slot.
+- ROI and `MinimumProfitPerUnit` are the only quality gates. 300% ROI on a
+  2,100-gil dye stack outranks nothing, because absolute value is never compared.
+
+## Design
+
+### 1. Portfolio tiers (`SmartUndercutBot.Core/Services/PortfolioPolicy.cs`)
+
+`PortfolioTier` = `Core` | `Secondary` | `Opportunistic`.
+
+- **Core**: `ProcurementRule.PreferredStock` is set. Seeded true for the six
+  curated consumables (`ResaleStockPolicy.IsCuratedConsumable`,
+  `UniversalisService.CreateFavoriteRules`) and settable by discovery for
+  objectively high-value/high-volume food and medicine.
+- **Secondary**: not pinned, but the live metrics show real trading stock -
+  resale value per sale slot, sales velocity and turnover all clear the gates.
+- **Opportunistic**: everything else (dyes, materia, one-off arbitrage).
+
+`PortfolioGates` carries the thresholds. Only three come from configuration; the
+secondary liquidity floors are documented constants so the settings screen does
+not become a knob pile.
+
+### 2. Metrics beyond ROI
+
+Per candidate, all measured *per occupied sale slot*:
+
+- `ExpectedResaleValue` = target sale price x quantity
+- `ExpectedProfit` (already computed, after buyer fee and market tax)
+- `SalesPerDay` from `SalesVelocityPolicy` (home-world units/day, HQ/NQ separate)
+- `EstimatedDaysToSell` = quantity / salesPerDay, clamped to [0.25, 30] days so a
+  one-unit listing cannot manufacture an absurd score and an unsold item is not
+  treated as instant
+- `ProfitVelocity` = expectedProfit / estimatedDaysToSell (gil per day of slot
+  occupancy)
+
+ROI stays as a safety/profitability guard, not the objective.
+
+### 3. Lexicographic allocation
+
+`Allocate` still generates several greedy fills (a single ordering cannot solve
+the budget knapsack), but every ordering is tier-major, and the resulting plans
+are compared lexicographically:
+
+1. maximise core progress = `min(core slots selected, core deficit)`
+2. opportunistic slots (existing + selected) must stay within the cap - enforced
+   as a hard constraint while filling, and re-checked when comparing
+3. maximise core+secondary profit velocity (high-quality opportunity value)
+4. maximise total expected absolute profit
+5. maximise slot occupancy
+6. tie-break: fewer worlds, then lower cost
+
+A cheap low-value item can therefore never win purely by filling one more slot.
+
+### 4. Existing inventory counts
+
+`StockExposure` gains a `Tier`. `ProcurementController.CollectOwnedStock()`
+classifies listed retainer stacks and bag holdings with the same policy, so:
+
+- already-listed curated consumables count toward the preferred target;
+- already-listed dyes/materia (including the liquidation backlog) consume the
+  opportunistic cap and stop further opportunistic buying;
+- the denominator is `PortfolioCapacitySlots` (the configured target sale slot
+  count), not just this run's free slots, so percentages describe the whole
+  portfolio rather than one shopping trip.
+
+### 5. Top-up pass
+
+`TopUpEmptySaleSlots()` keeps the lower fill margin but runs with
+`OpportunisticMaximumPercent = 0`, so it can only reach Core and genuinely
+high-liquidity Secondary stock. `PollListings()` additionally refuses to buy an
+opportunistic order flagged `IsFillOrder`, so the cheaper margin cannot be
+reached through a stale plan.
+
+### 6. Market intelligence vs purchase authorization
+
+New Core abstractions keep cached statistics away from purchase decisions:
+
+- `IMarketStatisticsProvider` - per-item aggregates (median price, units/day).
+  Implementations: `UniversalisStatisticsProvider` (aggregated endpoint),
+  `SaddlebagStatisticsProvider` (optional, daily raw stats).
+- `MarketDiscoveryService` - turns statistics into candidate rules, validated
+  against local Lumina data (exists, tradable, HQ capability, food/medicine
+  category), cached for `MarketDiscoveryCacheHours` (24h).
+- `MarketPriceHint` - a deliberately separate type from
+  `ProcurementMarketListing`. Cached/aggregated data can only produce hints, so
+  it is structurally incapable of becoming a purchase candidate. Purchases still
+  require a fresh live board read, live buyer tax, the home resale anchor inside
+  `HomePriceMaxAgeMinutes`, and every existing guard.
+
+Universalis: `GET /api/v2/aggregated/{scope}/{ids}` (100 ids per request) replaces
+the `listings=100&entries=100` regional sweep used only for scout routing, and
+supplies velocity where the home scan has none. The home scan still uses the full
+endpoint because it needs real competing listings and sale history. This removes
+requests and payload rather than adding retries.
+
+Saddlebag Exchange (`POST https://docs.saddlebagexchange.com/api/ffxivrawstats`,
+verified 2026-09-08: returns `medianNQ/HQ`, `averageNQ/HQ`, `quantitySoldNQ/HQ`,
+`mainCategory`, `subCategory`, `lastUpdateTimeUnix`, `itemName`, keyed by item id)
+is optional discovery only. If it fails, curated rules and Universalis/live
+systems continue unchanged. Live queries are never routed through it.
+
+### 7. Configuration (version 35 -> 36)
+
+- `PreferredPortfolioTargetPercent` = 75
+- `OpportunisticPortfolioMaximumPercent` = 10
+- `ProcurementMinimumProfitPerSaleSlot` = 2,500 (value gate, tiers 2 and 3)
+- `MarketDiscoveryEnabled` = true
+- `MarketDiscoveryCacheHours` = 24
+- migration pins `PreferredStock` on existing curated consumable rules
+
+### 8. Observability
+
+`ProcurementPlan` carries a `PortfolioAllocationSummary` and per-item
+`PortfolioDecision` rows, logged and shown compactly in the dashboard:
+
+```
+Caramel Popcorn  CORE  420 units/day  41,000 profit  52% ROI  0.24d  selected: core portfolio below target
+Yellow Dye  OPPORTUNISTIC  340% ROI  2,100 profit  skipped: opportunistic cap reached
+Preferred 41/45 target | Secondary 8 | Opportunistic 5/6 cap
+```
+
+## Work checklist
+- [x] Core: portfolio policy, models, planner rewrite.
+- [x] Plugin: configuration + migration, controller wiring, top-up rework.
+- [x] Market intelligence: aggregated Universalis, optional Saddlebag discovery.
+- [x] Observability: logs and compact dashboard summary.
+- [x] 258 tests pass, including the ten required behaviours.
+- [x] Release build 1.0.0.58 passes with zero warnings and errors.
+- [ ] Commit, push main, tag v1.0.0.58, verify published repo.json/zip.
+
+## Realistic planner review
+A twelve-slot run with four curated consumables, one unpinned high-value tincture,
+two dye lines and grade XII materia, on a 60-slot portfolio already holding two
+core and two opportunistic slots, selects nine core stacks, two tinctures and one
+dye: 19,763,100 gil spent for 8,206,641 expected profit. The 180-212% ROI dyes
+lose to 37-53% ROI consumables, and total expected profit is higher than the old
+slot-filling objective produced on the same board (7,455,699), because the slots
+went to 400,000-gil flips instead of 25,000-gil ones.
+
+The first draft used a 20,000 gil secondary value floor, which let a 40,000 gil
+dye stack reach Secondary and take three slots. Curated stacks carry 1.2-4.4
+million gil per slot, so the floor is 150,000: ordinary dyes stay opportunistic
+while genuine medicine and grade XII materia still qualify.
+
+## Validation boundary
+Tests use simulated market/game services. No FFXIV client session is exercised by
+this work; do not describe native purchase behaviour as tested. The Universalis
+aggregate and Saddlebag raw-statistics response shapes were confirmed against the
+live endpoints on 2026-09-08; the in-game purchase path was not exercised.
+
 # Completed: v1.0.0.57 sales-per-day priority and cached-loop validation
 
 The .55 recovery changes and .56 cached-price/top-up changes were committed by

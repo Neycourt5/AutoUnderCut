@@ -7,7 +7,7 @@ namespace SmartUndercutBot;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 35;
+    public int Version { get; set; } = 36;
     public bool AutomationEnabled { get; set; }
     public bool ProcessAllRetainers { get; set; } = true;
     public bool RepeatBellRuns { get; set; }
@@ -36,9 +36,21 @@ public sealed class Configuration : IPluginConfiguration
     // Stock health is value as well as spread: a bag full of cheap dye meets the
     // stack target without being worth anything to sell.
     public uint ProcurementBufferValueTarget { get; set; } = 1_000_000;
-    // Keeping the retainers stocked is the point. When the compared plan leaves sale
-    // slots empty, a smaller but still real margin beats an empty slot.
+    // Filling a sale slot is not the objective; holding a good portfolio is. The
+    // lower fill margin only ever applies to preferred and high-liquidity stock.
     public decimal ProcurementFillRoiPercent { get; set; } = 10m;
+    // Portfolio shape. Preferred (core) stock should occupy most of the retainers;
+    // opportunistic arbitrage is capped so it cannot crowd out capital or slots.
+    public decimal PreferredPortfolioTargetPercent { get; set; } = 75m;
+    public decimal OpportunisticPortfolioMaximumPercent { get; set; } = 10m;
+    // A whole retainer slot is the scarce resource. A deal that cannot clear this
+    // much profit is not worth occupying one, however good its ROI percentage is.
+    public uint ProcurementMinimumProfitPerSaleSlot { get; set; } = 2_500;
+    // Optional external market discovery. Recommendations only: every purchase
+    // still needs a fresh live board reading and all existing safety checks.
+    public bool MarketDiscoveryEnabled { get; set; } = true;
+    public int MarketDiscoveryCacheHours { get; set; } = 24;
+    public string MarketDiscoveryRegion { get; set; } = "NA";
     public int PriorityWorldsPerTrip { get; set; } = 8;
     public int PriorityMinutesPerTrip { get; set; } = 45;
     // The same freshness limit applies to reusing a quote and approving a buy.
@@ -79,6 +91,10 @@ public sealed class Configuration : IPluginConfiguration
 
     public PricingRule GetEffectiveRule(uint itemId) =>
         PerItemRules.TryGetValue(itemId, out var rule) ? rule.Clone() : GlobalRule.Clone();
+
+    /// <summary>The portfolio shape every purchase plan is built against.</summary>
+    public PortfolioGates PortfolioGates => new(
+        PreferredPortfolioTargetPercent, OpportunisticPortfolioMaximumPercent, ProcurementMinimumProfitPerSaleSlot);
 
     public bool KeepsRetainersStocked => AutomationEnabled && ProcessAllRetainers && RepeatBellRuns &&
         AllowAutomaticWrites && AutomaticProcurementEnabled && AllowAutomaticPurchases &&
@@ -411,7 +427,28 @@ public sealed class Configuration : IPluginConfiguration
             ScoutKnowledgeMaxAgeHours = 24;
             Version = 35;
         }
-        Version = Math.Max(Version, 35);
+        if (Version < 36)
+        {
+            // The objective changed from "fill every sale slot" to "hold a good
+            // portfolio". Pin the curated consumables as preferred stock so the
+            // core target means something on an existing configuration, and adopt
+            // the new portfolio shape and slot-value gate.
+            PreferredPortfolioTargetPercent = 75m;
+            OpportunisticPortfolioMaximumPercent = 10m;
+            ProcurementMinimumProfitPerSaleSlot = 2_500;
+            MarketDiscoveryEnabled = true;
+            MarketDiscoveryCacheHours = 24;
+            foreach (var rule in ProcurementRules.Where(x =>
+                         x.ItemId != 0 && !x.LiquidateOnly && ResaleStockPolicy.IsCuratedConsumable(x.ItemName)))
+                rule.PreferredStock = true;
+            Version = 36;
+        }
+        Version = Math.Max(Version, 36);
+        PreferredPortfolioTargetPercent = Math.Clamp(PreferredPortfolioTargetPercent, 0m, 100m);
+        OpportunisticPortfolioMaximumPercent = Math.Clamp(OpportunisticPortfolioMaximumPercent, 0m, 100m);
+        ProcurementMinimumProfitPerSaleSlot = Math.Min(ProcurementMinimumProfitPerSaleSlot, 100_000_000u);
+        MarketDiscoveryCacheHours = Math.Clamp(MarketDiscoveryCacheHours, 1, 168);
+        MarketDiscoveryRegion = string.IsNullOrWhiteSpace(MarketDiscoveryRegion) ? "NA" : MarketDiscoveryRegion.Trim();
         ScoutKnowledgeMaxAgeHours = Math.Clamp(ScoutKnowledgeMaxAgeHours, 1, 168);
         ProcurementFillRoiPercent = Math.Clamp(ProcurementFillRoiPercent, 0m, 1_000m);
         PriorityScoutRoute ??= [];

@@ -810,7 +810,7 @@ public sealed class ProcurementControllerTests
         Assert.Equal(("Cactuar", 1u, 99u), Assert.Single(run.Game.Bought));
         run.Tick(2);
         Assert.Equal(99u, Assert.Single(run.Ledger.Snapshot()).PendingQuantity);
-        Assert.Contains(run.Controller.RecentPrices, x => x.World == "Cactuar" && x.Decision.StartsWith("Save for comparison"));
+        Assert.Contains(run.Controller.RecentPrices, x => x.World == "Cactuar" && x.Decision.Contains("Save for comparison"));
         Assert.Contains(run.Log.Messages, x => x.StartsWith("SCOUT COMPARISON:"));
         Assert.DoesNotContain("/li mb", run.Game.Commands);
     }
@@ -1003,6 +1003,86 @@ public sealed class ProcurementControllerTests
         Assert.Equal(3, run.Game.Commands.Count(c => c == "/li Cactuar")); // Scout, first check, updated winner.
     }
 
+    [Theory]
+    [InlineData(10.0)]
+    [InlineData(90.0)]
+    public void TheLowerFillMarginCannotBuyOpportunisticStockToOccupyASlot(double opportunisticCapPercent)
+    {
+        // Five empty sale slots, gil available, and a dye that clears the 10% fill
+        // margin, the minimum profit per unit and the slot-value gate. It is still
+        // not bought: the fill pass reaches preferred and high-liquidity stock only.
+        // A generous opportunistic cap does not change that.
+        using var run = new Route(priority: true);
+        run.Config.Current.ProcurementMinimumRoiPercent = 20;
+        run.Config.Current.ProcurementFillRoiPercent = 10;
+        run.Config.Current.OpportunisticPortfolioMaximumPercent = (decimal)opportunisticCapPercent;
+        run.Config.Current.ProcurementRules.Add(new()
+        {
+            ItemId = 2, ItemName = "Yellow Dye", TargetStackSize = 20, MaximumSaleSlots = 4, HuntOnTour = true,
+        });
+        run.Game.AutomaticWorldArrival = run.Game.AutomaticPurchaseConfirmation = true;
+        run.Game.DemandMarkets = [
+            new(1, "Popcorn", [], [new(2_000, 99, true, DateTimeOffset.UtcNow)]),
+            new(2, "Yellow Dye", [], [new(1_500, 700, false, DateTimeOffset.UtcNow)]),
+        ];
+        // The curated flip is nowhere to be found away from home, so only the dye
+        // could possibly fill the empty slots.
+        run.Game.LiveProvider = (world, item) => world == "Siren"
+            ? item == 1 ? [new(0, item, 11, 21, 2_000, 99, true, 0)] : [new(0, item, 11, 21, 900, 20, false, 0)]
+            : item == 2 ? [new(0, item, 10, 20, 690, 20, false, 690)] : [];
+
+        run.Controller.RunNow();
+        for (var i = 0; i < 600 && run.Controller.IsActive; i++) run.Tick(2);
+
+        Assert.Equal(ProcurementState.Completed, run.Controller.State);
+        Assert.Empty(run.Game.Bought);
+        Assert.Contains(run.Log.Messages, m => m.Contains("STOCK TOP-UP") && m.Contains("stay empty"));
+        Assert.DoesNotContain(run.Log.Messages, m => m.Contains("STOCK TOP-UP") && m.Contains("added"));
+        // The cheap dye really was on the board; it was refused on portfolio
+        // grounds, not because nothing was found.
+        Assert.Contains(run.Controller.RecentPrices,
+            p => p is { Item: "Yellow Dye", World: not "Siren", Lowest: 690 });
+    }
+
+    [Fact]
+    public void ListedJunkPushesTheNextPurchasesBackTowardPreferredStock()
+    {
+        // Sixty opportunistic slots are already listed, so the portfolio is far
+        // past its cap. The high-liquidity curated flip is still bought; nothing
+        // opportunistic is added beside it.
+        using var run = new Route(priority: true);
+        run.Repricing.LastKnownFreeSaleSlots = 4;
+        run.Repricing.ListedStock = [new(999, false, 600, 60)];
+        run.Config.Current.ProcurementRules.Add(new()
+        {
+            ItemId = 2, ItemName = "Yellow Dye", TargetStackSize = 20, MaximumSaleSlots = 4, HuntOnTour = true,
+        });
+        run.Game.AutomaticWorldArrival = run.Game.AutomaticPurchaseConfirmation = true;
+        run.Game.DemandMarkets = [
+            new(1, "Popcorn", [], [new(2_000, 99, true, DateTimeOffset.UtcNow)]),
+            new(2, "Yellow Dye", [], [new(1_500, 700, false, DateTimeOffset.UtcNow)]),
+        ];
+        run.Game.LiveProvider = (world, item) => world == "Siren"
+            ? item == 1 ? [new(0, item, 11, 21, 2_000, 99, true, 0)] : [new(0, item, 11, 21, 900, 20, false, 0)]
+            : item == 1
+                ? [new(0, item, 10, 20, 1_000, 99, true, 4_950)]
+                : [new(0, item, 12, 22, 400, 20, false, 420)];
+
+        run.Controller.RunNow();
+        for (var i = 0; i < 600 && run.Controller.IsActive; i++) run.Tick(2);
+
+        Assert.Equal(ProcurementState.Completed, run.Controller.State);
+        var bought = Assert.Single(run.Game.Bought);
+        Assert.Equal((1u, 99u), (bought.Item, bought.Quantity));
+        Assert.True(run.Controller.PortfolioSummary.OpportunisticSlots >
+                    run.Controller.PortfolioSummary.OpportunisticCap);
+        // The dye was profitable, fast moving and cheaper than the flip that was
+        // bought. The listed backlog is what kept it out.
+        Assert.Contains(run.Log.Messages,
+            m => m.Contains("Yellow Dye") && m.Contains("opportunistic portfolio cap reached"));
+        Assert.Contains(run.Log.Messages, m => m.Contains("Popcorn") && m.Contains("selected"));
+    }
+
     [Fact]
     public void FillPurchaseIsCancelledIfExistingBagsCoverTheEmptySlots()
     {
@@ -1119,11 +1199,15 @@ public sealed class ProcurementControllerTests
         run.Game.Inventory = 20 * 99;
         run.Config.Current.ProcurementRules[0].MaximumSaleSlots = 20;
         run.Tick(); run.Tick();
-        Assert.Equal(2, run.Game.Scans); // regional hints and home demand
+        // The home world needs a full listings-and-history scan; the rest of the
+        // region only needs the cached aggregate hints.
+        Assert.Equal(1, run.Game.Scans);
+        Assert.Equal(1, run.Game.HintRequests);
         Assert.Empty(run.Game.Commands);
         Assert.Equal(0, run.Game.Purchases);
         run.Tick(601); run.Tick();
-        Assert.Equal(4, run.Game.Scans);
+        Assert.Equal(2, run.Game.Scans);
+        Assert.Equal(2, run.Game.HintRequests);
     }
 
     [Theory]
@@ -1190,7 +1274,7 @@ public sealed class ProcurementControllerTests
         for (var i = 0; i < 100 && run.Game.Purchases == 0; i++) run.Tick(2);
         Assert.Equal(("Cactuar", 1u, 99u), Assert.Single(run.Game.Bought));
         Assert.Single(run.Game.Commands);
-        Assert.Contains(run.Controller.RecentPrices, p => p.Decision.StartsWith("Buy exceptional"));
+        Assert.Contains(run.Controller.RecentPrices, p => p.Decision.Contains("Buy exceptional"));
     }
 
     [Fact]
@@ -1237,13 +1321,15 @@ public sealed class ProcurementControllerTests
     {
         using var run = new Route(priority: true);
         run.Config.Current.ReinvestAvailableGil = false;
-        run.Config.Current.ProcurementBudget = 105_000;
+        run.Config.Current.ProcurementBudget = 106_000;
         run.Game.WeeklySalesQuantity = 2_000;
         run.Game.AutomaticWorldArrival = run.Game.AutomaticPurchaseConfirmation = true;
+        // Eleven units, not one: a single-unit flip is no longer worth a whole
+        // retainer slot however exceptional its percentage return looks.
         run.Game.LiveProvider = (world, item) => world switch
         {
             "Siren" => [new(0, item, 11, 21, 2000, 99, true, 0)],
-            "Cactuar" => [new(0, item, 10, 20, 100, 1, true, 5)],
+            "Cactuar" => [new(0, item, 10, 20, 100, 11, true, 55)],
             "Balmung" => [new(0, item, 12, 22, 1000, 99, true, 4950)],
             _ => [],
         };
@@ -1251,9 +1337,9 @@ public sealed class ProcurementControllerTests
         for (var i = 0; i < 500 && run.Controller.IsActive; i++) run.Tick(2);
         Assert.Equal(ProcurementState.Completed, run.Controller.State);
         Assert.Equal(2, run.Controller.Status.CurrentOrder);
-        Assert.Equal(104_055u, run.Controller.Status.GilSpent);
-        Assert.Equal(100, run.Game.Inventory);
-        Assert.Equal(1_000_000u - 104_055u, run.Game.Gil);
+        Assert.Equal(105_105u, run.Controller.Status.GilSpent);
+        Assert.Equal(110, run.Game.Inventory);
+        Assert.Equal(1_000_000u - 105_105u, run.Game.Gil);
     }
 
     [Fact]
@@ -1281,7 +1367,7 @@ public sealed class ProcurementControllerTests
         public void Advance(int seconds) => now = now.AddSeconds(seconds);
     }
 
-    private sealed class Route : IDisposable
+    internal sealed class Route : IDisposable
     {
         public Game Game { get; } = new();
         public ConfigurationService Config { get; } = new();
@@ -1289,8 +1375,9 @@ public sealed class ProcurementControllerTests
         public TestRetainerAutomation Repricing { get; } = new();
         public AutomationLog Log { get; } = new();
         public ProcurementController Controller { get; }
+        public MarketDiscoveryService? Discovery { get; }
         private readonly Clock clock = new();
-        public Route(bool priority = false)
+        public Route(bool priority = false, IMarketStatisticsProvider? statistics = null)
         {
             Config.Current.PriorityShoppingEnabled = priority;
             Game.UseLiveListings = priority;
@@ -1302,8 +1389,10 @@ public sealed class ProcurementControllerTests
             {
                 ItemId = 1, ItemName = "Popcorn", AllowHighQuality = true, RequireHighQuality = true, HuntOnTour = true,
             });
+            if (statistics is not null)
+                Discovery = new(statistics, Game.LookupItem, Config, Log, clock);
             Controller = new(Game, Game, Game, Game, Game, new ProcurementPlannerService(),
-                Game, Game, Game, Game, Ledger, Repricing, Config, Log, clock);
+                Game, Game, Game, Game, Ledger, Repricing, Config, Log, clock, Discovery);
         }
         public void Tick(int seconds = 0) { clock.Advance(seconds); Game.Tick(); }
         public void Begin()
@@ -1334,7 +1423,7 @@ public sealed class ProcurementControllerTests
         public void Dispose() => Controller.Dispose();
     }
 
-    private sealed class Game : FakeRetainerService, IFramework, IPlayerState, ICommandManager, IRetainerListingService,
+    internal sealed class Game : FakeRetainerService, IFramework, IPlayerState, ICommandManager, IRetainerListingService,
         IUniversalisService, IMarketPurchaseService, IVnavmeshService, ILifestreamService, ITaskbarAttentionService
     {
         public event Action<IFramework>? Update;
@@ -1389,8 +1478,34 @@ public sealed class ProcurementControllerTests
         public bool ChangeWorld(string world) => true;
         public void Abort() { Aborts++; IsBusy = false; }
         public string ResolveDataCenter(string configured) => configured;
+
+        // Stands in for the Lumina item sheet: only these ids exist, and only
+        // these are tradable food or medicine.
+        public Dictionary<uint, MarketItemFacts> ItemSheet { get; } = new()
+        {
+            [1] = new(1, "Popcorn", true, true, true, 999),
+            [42] = new(42, "Discovered Stew", true, true, true, 99),
+        };
+        public MarketItemFacts? LookupItem(uint itemId) => ItemSheet.GetValueOrDefault(itemId);
+
         public int Scans { get; private set; }
+        public int HintRequests { get; private set; }
+        public bool HintsFail { get; set; }
         public List<uint> ScannedItemIds { get; } = [];
+
+        // The cached aggregate endpoint names the cheapest world per item. It is a
+        // routing hint only: nothing here can be bought without a live board read.
+        public Task<IReadOnlyList<MarketPriceHint>> FetchPriceHintsAsync(IReadOnlyList<ProcurementRule> rules,
+            string scope, CancellationToken cancellationToken)
+        {
+            HintRequests++;
+            if (HintsFail)
+                return Task.FromException<IReadOnlyList<MarketPriceHint>>(new HttpRequestException("aggregate down"));
+            return Task.FromResult<IReadOnlyList<MarketPriceHint>>(rules
+                .Where(x => x.ItemId != 0)
+                .Select(x => new MarketPriceHint(x.ItemId, BuyingWorld, 1, 1_000, true, 14m))
+                .ToArray());
+        }
         public Task<IReadOnlyList<ProcurementMarketItem>> ScanAsync(IReadOnlyList<ProcurementRule> rules,
             string dataCenter, CancellationToken cancellationToken)
         {

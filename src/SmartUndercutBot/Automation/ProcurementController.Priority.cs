@@ -17,6 +17,8 @@ public sealed partial class ProcurementController
     private DateTimeOffset priorityDepartedAt;
     private int priorityWorldsCompleted;
     private readonly List<ProcurementMarketListing> scoutListings = [];
+    // Cached aggregate observations that only ever choose where to look.
+    private IReadOnlyList<MarketPriceHint> regionHints = [];
     // Remember routing hints between trips. Prices can change within this window;
     // every selected purchase still needs a fresh live price and tax check.
     private readonly Dictionary<(string World, uint Item), DateTimeOffset> scoutObservedAt = new();
@@ -46,39 +48,55 @@ public sealed partial class ProcurementController
         .Where(q => ResaleStockPolicy.BuyableQuality(rule, q, configuration.Current.BuyHighQualityOnly))
         .Select(q => HomeSalesPerDay(rule.ItemId, q)).DefaultIfEmpty().Max();
 
+    /// <summary>
+    /// Two very different requests. The home world needs real competing listings
+    /// and sale history, so it uses the full endpoint. The rest of the region only
+    /// has to answer "where is this cheap and how fast does it move", which the
+    /// cached aggregate endpoint does in one request per hundred items instead of
+    /// a hundred listings and a hundred sales for every item on every data center.
+    /// </summary>
     private async Task<IReadOnlyList<ProcurementMarketItem>> ScanPriorityRegionAsync(
         IReadOnlyList<ProcurementRule> rules, string home, CancellationToken token)
     {
-        var regional = universalis.ScanAsync(rules, "North-America", token);
+        var regional = universalis.FetchPriceHintsAsync(rules, "North-America", token);
         var local = universalis.ScanAsync(rules, home, token);
-        IReadOnlyList<ProcurementMarketItem> region;
-        try { region = await regional.ConfigureAwait(false); }
+        try { regionHints = await regional.ConfigureAwait(false); }
         catch (Exception) when (!token.IsCancellationRequested)
         {
             // Cached scouting is a hint, never a prerequisite for live prices.
-            region = [];
-            log.Add(AutomationLogLevel.Warning, "Regional price hints unavailable; using rotating live scouts across all four data centers.");
+            regionHints = [];
+            log.Add(AutomationLogLevel.Warning,
+                "Regional price hints unavailable; using rotating live scouts across all four data centers.");
         }
-        var homeMarkets = await local.ConfigureAwait(false);
-        return homeMarkets.Select(m => m with
-        {
-            Listings = m.Listings.Concat(region.Where(r => r.ItemId == m.ItemId).SelectMany(r => r.Listings)
-                .Where(l => !l.WorldName.Equals(home, StringComparison.OrdinalIgnoreCase))).Distinct().ToArray(),
-        }).ToArray();
+        // The hints deliberately do not feed home demand. Their velocity is the
+        // whole region's rate, and shopping priority is judged on what actually
+        // sells on the home world.
+        return await local.ConfigureAwait(false);
     }
 
     private void PrepareScoutRoute()
     {
         var config = configuration.Current;
-        var hints = priorityDemand.SelectMany(m => m.Listings.Select(l =>
-        {
-            var reference = HomePriceReference.Summarize(m.ItemId, m.ItemName, l.IsHighQuality,
-                m.Listings.Where(h => h.WorldName.Equals(homeWorld, StringComparison.OrdinalIgnoreCase)).ToArray()).Reference;
-            return (Listing: l, Score: Math.Max(0m, reference * 0.95m - l.PricePerUnit * 1.05m) * l.Quantity);
-        })).Where(x => stockHuntRules.Any(r => r.ItemId == x.Listing.ItemId &&
-            ResaleStockPolicy.BuyableQuality(r, x.Listing.IsHighQuality, config.BuyHighQualityOnly)) &&
-            !retainerListings.OwnedRetainerIds.Contains(x.Listing.RetainerId)).ToArray();
-        var scores = hints.GroupBy(x => x.Listing.WorldName, StringComparer.OrdinalIgnoreCase)
+        // Score each cached hint by the margin a target stack would carry against
+        // the home reference. Hints have no retainer id, but they only ever choose
+        // where to travel: the home world is excluded here, and every purchase is
+        // revalidated live with our own retainers excluded.
+        var hints = regionHints
+            .Where(h => !h.WorldName.Equals(homeWorld, StringComparison.OrdinalIgnoreCase) &&
+                        ProcurementTravelPolicy.CanShopOnWorld(h.WorldName))
+            .Select(h => (Hint: h, Rule: stockHuntRules.FirstOrDefault(r => r.ItemId == h.ItemId &&
+                ResaleStockPolicy.BuyableQuality(r, h.IsHighQuality, config.BuyHighQualityOnly))))
+            .Where(x => x.Rule is not null)
+            .Select(x =>
+            {
+                var reference = HomePriceReference.Summarize(x.Hint.ItemId, x.Rule!.ItemName, x.Hint.IsHighQuality,
+                    priorityDemand.FirstOrDefault(m => m.ItemId == x.Hint.ItemId)?.Listings
+                        .Where(h => h.WorldName.Equals(homeWorld, StringComparison.OrdinalIgnoreCase)).ToArray() ?? []).Reference;
+                var units = (uint)Math.Max(1, x.Rule.TargetStackSize);
+                return (x.Hint, Score: Math.Max(0m, reference * 0.95m - x.Hint.PricePerUnit * 1.05m) * units);
+            })
+            .ToArray();
+        var scores = hints.GroupBy(x => x.Hint.WorldName, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(g => g.Key, g => g.Sum(x => x.Score), StringComparer.OrdinalIgnoreCase);
         var expectedWorlds = NorthAmericaWorlds.Where(w => !w.Equals(homeWorld, StringComparison.OrdinalIgnoreCase)).ToArray();
         // Keep the route stable across retainer checkpoints; repricing the hints
@@ -95,9 +113,9 @@ public sealed partial class ProcurementController
             var world = config.PriorityScoutRoute[i];
             // Reserve half the quick scan for rotating high-volume flips, so
             // stale or missing regional hints cannot hide new bargains forever.
-            var hinted = hints.Where(x => x.Listing.WorldName.Equals(world, StringComparison.OrdinalIgnoreCase) && x.Score > 0)
-                .OrderByDescending(x => HomeSalesPerDay(x.Listing.ItemId, x.Listing.IsHighQuality))
-                .ThenByDescending(x => x.Score).Select(x => x.Listing.ItemId).Distinct().Take(Math.Max(1, limit / 2));
+            var hinted = hints.Where(x => x.Hint.WorldName.Equals(world, StringComparison.OrdinalIgnoreCase) && x.Score > 0)
+                .OrderByDescending(x => HomeSalesPerDay(x.Hint.ItemId, x.Hint.IsHighQuality))
+                .ThenByDescending(x => x.Score).Select(x => x.Hint.ItemId).Distinct().Take(Math.Max(1, limit / 2));
             var offset = i * Math.Max(1, limit / 2) % stockHuntRules.Count;
             var rotated = stockHuntRules.Skip(offset).Concat(stockHuntRules.Take(offset)).Select(r => r.ItemId);
             var resumed = world.Equals(config.PriorityNextWorld, StringComparison.OrdinalIgnoreCase) && config.PriorityNextItem != 0
@@ -169,9 +187,16 @@ public sealed partial class ProcurementController
             config.ProcurementMinimumRoiPercent, config.ProcurementMinimumProfitPerUnit,
             HomeWorld: homeWorld, OwnedRetainerIds: retainerListings.OwnedRetainerIds,
             OwnedStock: CollectOwnedStock(), MaximumWeeklySalesSharePercent: config.ProcurementWeeklySalesSharePercent,
-            HighQualityOnly: config.BuyHighQualityOnly, ResaleListings: homePrices.Values.SelectMany(x => x).ToArray()));
+            HighQualityOnly: config.BuyHighQualityOnly, ResaleListings: homePrices.Values.SelectMany(x => x).ToArray(),
+            Portfolio: config.PortfolioGates, PortfolioCapacitySlots: PortfolioCapacitySlots()));
+        LogPortfolioDecisions("SCOUT", compared);
         compared = TopUpEmptySaleSlots(compared, markets);
-        if (compared.Orders.Count == 0) { FinishShopping(reason + " No remaining compared deals fit the current limits; returning to retainers."); return; }
+        if (compared.Orders.Count == 0)
+        {
+            FinishShopping(reason + " No compared deal met the portfolio quality bar; leaving the slots empty " +
+                           $"rather than buying low-value stock. {compared.Summary}");
+            return;
+        }
         // A more expensive replacement may still pass ROI, but was not the deal
         // that won this comparison. Allow the observed price or better only.
         Plan = compared with { Orders = compared.Orders.Select(o => o with
@@ -181,15 +206,17 @@ public sealed partial class ProcurementController
         comparisonBuyingStarted = timeProvider.GetUtcNow();
         log.Add(AutomationLogLevel.Information,
             $"SCOUT COMPARISON: {priorityWorldsCompleted} away world(s), {scoutListings.Count} observed listing(s); " +
-            $"selected {Plan.Orders.Count} buy(s), expected profit {Plan.ExpectedProfit:N0}. Revisiting selected deals for fresh price and tax checks.");
+            $"selected {Plan.Orders.Count} buy(s), expected profit {Plan.ExpectedProfit:N0}. {Plan.Summary}. " +
+            "Revisiting selected deals for fresh price and tax checks.");
         BeginExecution(ProcurementRunMode.AutomaticPurchase, preserveTrip: true);
     }
 
     /// <summary>
-    /// Full retainers are the objective, so an empty sale slot is a worse outcome
-    /// than a thinner margin. If the compared plan does not fill the slots, run the
-    /// comparison again at a lower ROI bar and take the best of what is left. The
-    /// fill bar is still a real profit after fees, never a loss.
+    /// A thinner margin is worth taking on stock that belongs in the portfolio, but
+    /// never as an excuse to occupy a slot. The fill pass runs with the
+    /// opportunistic cap set to zero, so it can only reach preferred core stock and
+    /// genuinely high-liquidity secondary stock; the slot-value gate and every other
+    /// guard still apply, and the fill bar is still a real profit after fees.
     /// </summary>
     private ProcurementPlan TopUpEmptySaleSlots(ProcurementPlan compared, IReadOnlyList<ProcurementMarketItem> markets)
     {
@@ -208,25 +235,42 @@ public sealed partial class ProcurementController
             Listings = m.Listings.Where(l => !taken.Contains((l.WorldName, l.ListingId))).ToArray(),
         }).ToArray();
         var owned = CollectOwnedStock()
-            .Concat(compared.Orders.Select(o => new StockExposure(o.ItemId, o.IsHighQuality, o.Quantity, 1)))
+            .Concat(compared.Orders.Select(o => new StockExposure(o.ItemId, o.IsHighQuality, o.Quantity, 1, o.Tier)))
             .ToArray();
         var fill = planner.BuildPlan(new(remaining, ShoppingRules(stockHuntRules), budget, free,
             Math.Max(0, (int)market.FreeInventorySlots - config.ProcurementInventoryReserve - compared.SaleSlots),
             config.ProcurementFillRoiPercent, config.ProcurementMinimumProfitPerUnit,
             HomeWorld: homeWorld, OwnedRetainerIds: retainerListings.OwnedRetainerIds,
             OwnedStock: owned, MaximumWeeklySalesSharePercent: config.ProcurementWeeklySalesSharePercent,
-            HighQualityOnly: config.BuyHighQualityOnly, ResaleListings: homePrices.Values.SelectMany(x => x).ToArray()));
-        if (fill.Orders.Count == 0) return compared;
+            HighQualityOnly: config.BuyHighQualityOnly, ResaleListings: homePrices.Values.SelectMany(x => x).ToArray(),
+            Portfolio: config.PortfolioGates with { OpportunisticMaximumPercent = 0m },
+            PortfolioCapacitySlots: PortfolioCapacitySlots()));
+        // Belt and braces: the cap already excludes them, and PollListings refuses
+        // one again before buying, but never carry an opportunistic fill order.
+        var accepted = fill.Orders.Where(o => o.Tier != PortfolioTier.Opportunistic).ToArray();
+        if (accepted.Length == 0)
+        {
+            log.Add(AutomationLogLevel.Information,
+                $"STOCK TOP-UP: {free} sale slot(s) stay empty. No preferred or high-liquidity deal qualified at the " +
+                $"{config.ProcurementFillRoiPercent:N0}% fill margin, and low-value stock is not worth a retainer slot.");
+            return compared;
+        }
 
         log.Add(AutomationLogLevel.Information,
-            $"STOCK TOP-UP: {free} sale slot(s) would have been left empty; added {fill.Orders.Count} deal(s) " +
-            $"at the {config.ProcurementFillRoiPercent:N0}% fill margin, preferring the highest-volume stock.");
+            $"STOCK TOP-UP: {free} sale slot(s) would have been left empty; added {accepted.Length} preferred or " +
+            $"high-liquidity deal(s) at the {config.ProcurementFillRoiPercent:N0}% fill margin. " +
+            "Opportunistic stock cannot use this lower bar.");
+        // Mirror the planner's landed cost, including the buyer fee, because
+        // `accepted` may be a subset of the fill plan.
+        var addedCost = accepted.Aggregate(0UL, (sum, o) => sum +
+            (ulong)decimal.Ceiling((decimal)o.PricePerUnit * o.Quantity * 1.05m));
         return compared with
         {
-            Orders = compared.Orders.Concat(fill.Orders.Select(o => o with { IsFillOrder = true })).ToArray(),
-            TotalCost = (uint)Math.Min(uint.MaxValue, (ulong)compared.TotalCost + fill.TotalCost),
-            ExpectedProfit = (uint)Math.Min(uint.MaxValue, (ulong)compared.ExpectedProfit + fill.ExpectedProfit),
-            SaleSlots = compared.SaleSlots + fill.SaleSlots,
+            Orders = compared.Orders.Concat(accepted.Select(o => o with { IsFillOrder = true })).ToArray(),
+            TotalCost = (uint)Math.Min(uint.MaxValue, (ulong)compared.TotalCost + addedCost),
+            ExpectedProfit = (uint)Math.Min(uint.MaxValue,
+                (ulong)compared.ExpectedProfit + accepted.Aggregate(0UL, (sum, o) => sum + o.ExpectedProfit)),
+            SaleSlots = compared.SaleSlots + accepted.Sum(o => o.SaleSlots),
         };
     }
 
@@ -433,11 +477,13 @@ public sealed partial class ProcurementController
                     config.ProcurementMinimumRoiPercent, config.ProcurementMinimumProfitPerUnit,
                     HomeWorld: homeWorld, OwnedRetainerIds: retainerListings.OwnedRetainerIds,
                     OwnedStock: owned, MaximumWeeklySalesSharePercent: config.ProcurementWeeklySalesSharePercent,
-                    HighQualityOnly: config.BuyHighQualityOnly, ResaleListings: resale));
+                    HighQualityOnly: config.BuyHighQualityOnly, ResaleListings: resale,
+                    Portfolio: config.PortfolioGates, PortfolioCapacitySlots: PortfolioCapacitySlots()));
                 candidates.AddRange(plan.Orders);
             }
         }
-        var order = candidates.OrderByDescending(x => x.ExpectedProfit).ThenBy(x => x.PricePerUnit).FirstOrDefault();
+        var order = candidates.OrderBy(x => PortfolioPolicy.Rank(x.Tier))
+            .ThenByDescending(x => x.ExpectedProfit).ThenBy(x => x.PricePerUnit).FirstOrDefault();
         var exceptional = order is not null && ShoppingScoutPolicy.IsExceptional(order, config.ProcurementMinimumRoiPercent);
         if (stockHuntWorldIndex > 0)
         {
@@ -450,9 +496,9 @@ public sealed partial class ProcurementController
             if (!ResaleStockPolicy.BuyableQuality(rule, quality, config.BuyHighQualityOnly)) continue;
             var qualified = rows.Where(x => x.IsHighQuality == quality && !retainerListings.OwnedRetainerIds.Contains(x.RetainerId)).ToArray();
             var decision = order is not null && order.IsHighQuality == quality
-                ? $"{(exceptional ? "Buy exceptional deal now" : "Save for comparison after scouting")}: x{order.Quantity} at {order.PricePerUnit:N0}; resale {order.TargetSalePrice:N0}, ceiling {order.MaximumAcceptableUnitPrice:N0}, expected profit {order.ExpectedProfit:N0}."
+                ? $"{order.Tier.ToString().ToUpperInvariant()}. {(exceptional ? "Buy exceptional deal now" : "Save for comparison after scouting")}: x{order.Quantity} at {order.PricePerUnit:N0}; resale {order.TargetSalePrice:N0}, ceiling {order.MaximumAcceptableUnitPrice:N0}, expected profit {order.ExpectedProfit:N0}, estimated turnover {order.EstimatedDaysToSell:N2} days."
                 : homePrices.GetValueOrDefault(rule.ItemId)?.Length is not > 0 ? "No confirmed home resale listings; skip buying."
-                : "No deal passes home sales, ROI, demand, budget and stock limits.";
+                : "No deal passes home sales, ROI, portfolio quality, demand, budget and stock limits.";
             observations.Add(new(timeProvider.GetUtcNow(), WorldName, rule.ItemName, quality,
                 qualified.Length, qualified.Sum(x => (long)x.Quantity), qualified.Select(x => x.PricePerUnit).DefaultIfEmpty().Min(), decision));
             if (observations.Count > 300) observations.RemoveAt(0);

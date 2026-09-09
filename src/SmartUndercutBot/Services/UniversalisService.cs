@@ -19,6 +19,19 @@ public interface IUniversalisService
         IReadOnlyList<ProcurementRule> rules,
         string dataCenter,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Cheapest-world hints and velocity from the cached aggregate endpoint. Used
+    /// to rank worlds and items before spending a live scan on them. Hints can
+    /// never authorize a purchase - that needs a fresh in-game board reading.
+    /// </summary>
+    Task<IReadOnlyList<MarketPriceHint>> FetchPriceHintsAsync(
+        IReadOnlyList<ProcurementRule> rules,
+        string scope,
+        CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<MarketPriceHint>>([]);
+
+    /// <summary>Local game data used to validate a discovered candidate.</summary>
+    MarketItemFacts? LookupItem(uint itemId) => null;
 }
 
 public sealed class UniversalisService : IUniversalisService, IDisposable
@@ -40,11 +53,13 @@ public sealed class UniversalisService : IUniversalisService, IDisposable
     private readonly SemaphoreSlim requestSlots = new(2);
     private readonly IPlayerState playerState;
     private readonly IDataManager dataManager;
+    private readonly AutomationLog? log;
 
-    public UniversalisService(IPlayerState playerState, IDataManager dataManager)
+    public UniversalisService(IPlayerState playerState, IDataManager dataManager, AutomationLog? log = null)
     {
         this.playerState = playerState;
         this.dataManager = dataManager;
+        this.log = log;
         httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("SmartUndercutter/1.0");
     }
 
@@ -72,6 +87,9 @@ public sealed class UniversalisService : IUniversalisService, IDisposable
                 ListFromBags = true,
                 HuntOnTour = true,
                 TourPriority = 0,
+                // The pinned core of the portfolio. These stay preferred even when
+                // external market discovery is unavailable.
+                PreferredStock = true,
             })
             .OrderBy(x => x.ItemName)
             .ToArray();
@@ -220,6 +238,102 @@ public sealed class UniversalisService : IUniversalisService, IDisposable
                 using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken).ConfigureAwait(false);
                 return UniversalisResponseParser.Parse(document.RootElement,
                     enabled.ToDictionary(x => x.ItemId, x => x.ItemName));
+            }
+            catch (Exception ex) when (ex is HttpRequestException or JsonException ||
+                                       ex is TaskCanceledException && !cancellationToken.IsCancellationRequested)
+            {
+                if (attempt == MaximumAttempts)
+                    return null;
+            }
+            finally { requestSlots.Release(); }
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// The aggregate endpoint takes 100 ids per request and returns a cached
+    /// summary instead of a hundred listings and a hundred sales per item, so a
+    /// whole-region scouting sweep costs a fraction of the requests and payload.
+    /// One failed batch reduces the hints available; it never blocks shopping.
+    /// </summary>
+    public async Task<IReadOnlyList<MarketPriceHint>> FetchPriceHintsAsync(
+        IReadOnlyList<ProcurementRule> rules, string scope, CancellationToken cancellationToken)
+    {
+        var enabled = rules.Where(x => x.Enabled && x.ItemId != 0).DistinctBy(x => x.ItemId).ToArray();
+        if (enabled.Length == 0 || string.IsNullOrWhiteSpace(scope))
+            return [];
+        var names = enabled.ToDictionary(x => x.ItemId, x => x.ItemName);
+        var batches = enabled.Chunk(100).ToArray();
+        var responses = await Task.WhenAll(batches.Select(batch =>
+            FetchAggregateAsync(batch, scope, cancellationToken))).ConfigureAwait(false);
+        var hints = new List<MarketPriceHint>();
+        var failed = 0;
+        foreach (var document in responses)
+        {
+            if (document is null) { failed++; continue; }
+            using (document)
+                hints.AddRange(UniversalisAggregatedParser.ParseHints(
+                    document.RootElement, WorldName, names));
+        }
+        if (failed > 0)
+            log?.Add(AutomationLogLevel.Warning,
+                $"Universalis aggregate scouting: {failed} of {batches.Length} request(s) went unanswered for " +
+                $"{scope}. Fewer routing hints are available; live prices and purchase checks are unaffected.");
+        return hints;
+    }
+
+    public MarketItemFacts? LookupItem(uint itemId)
+    {
+        if (itemId == 0 || dataManager.GetExcelSheet<Item>().GetRowOrDefault(itemId) is not { } row)
+            return null;
+        var name = row.Name.ToString();
+        if (string.IsNullOrWhiteSpace(name))
+            return null;
+        var category = row.ItemUICategory.ValueNullable?.Name.ToString() ?? string.Empty;
+        return new(
+            itemId,
+            name,
+            !row.IsUntradable && row.ItemSearchCategory.RowId != 0,
+            row.CanBeHq,
+            FoodAndMedicineCategories.Contains(category),
+            Math.Max(1, (int)Math.Min(999u, row.StackSize)));
+    }
+
+    // The categories worth discovering automatically: the raid consumables the
+    // player actually trades, never furniture, gear or crafting materials.
+    private static readonly HashSet<string> FoodAndMedicineCategories =
+        new(StringComparer.OrdinalIgnoreCase) { "Meal", "Medicine", "Seafood", "Ingredient" };
+
+    private string? WorldName(uint worldId)
+    {
+        if (worldId == 0)
+            return null;
+        var world = dataManager.GetExcelSheet<World>().GetRowOrDefault(worldId);
+        var name = world?.Name.ToString();
+        return string.IsNullOrWhiteSpace(name) || world?.IsPublic != true ? null : name;
+    }
+
+    private async Task<JsonDocument?> FetchAggregateAsync(
+        IReadOnlyList<ProcurementRule> batch, string scope, CancellationToken cancellationToken)
+    {
+        var endpoint = $"https://universalis.app/api/v2/aggregated/{Uri.EscapeDataString(scope)}/" +
+                       string.Join(',', batch.Select(x => x.ItemId));
+        for (var attempt = 1; attempt <= MaximumAttempts; attempt++)
+        {
+            if (attempt > 1)
+                await Task.Delay(TimeSpan.FromSeconds(2 * (attempt - 1)), cancellationToken).ConfigureAwait(false);
+            await requestSlots.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                using var response = await httpClient.GetAsync(endpoint, cancellationToken).ConfigureAwait(false);
+                if (!response.IsSuccessStatusCode)
+                {
+                    if (attempt == MaximumAttempts || !IsWorthRetrying(response.StatusCode))
+                        return null;
+                    continue;
+                }
+                await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+                return await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken).ConfigureAwait(false);
             }
             catch (Exception ex) when (ex is HttpRequestException or JsonException ||
                                        ex is TaskCanceledException && !cancellationToken.IsCancellationRequested)

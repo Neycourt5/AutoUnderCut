@@ -39,6 +39,8 @@ public sealed class Plugin : IDalamudPlugin
     private readonly DashboardWindow dashboard;
     private readonly GuidedProcurementWindow guidedProcurement;
     private readonly TaskbarAttentionService taskbarAttention;
+    private readonly SaddlebagStatisticsProvider marketStatistics;
+    private readonly MarketDiscoveryService marketDiscovery;
 
     public Plugin()
     {
@@ -60,7 +62,13 @@ public sealed class Plugin : IDalamudPlugin
             configuration,
             procurementLedger,
             automationLog);
-        universalis = new UniversalisService(PlayerState, DataManager);
+        universalis = new UniversalisService(PlayerState, DataManager, automationLog);
+        marketStatistics = new SaddlebagStatisticsProvider(
+            () => configuration.Current.MarketDiscoveryEnabled,
+            () => configuration.Current.MarketDiscoveryRegion,
+            automationLog);
+        marketDiscovery = new MarketDiscoveryService(
+            marketStatistics, universalis.LookupItem, configuration, automationLog);
         if (configuration.Current.ProcurementRules.Count == 0)
         {
             configuration.Current.ProcurementRules.AddRange(universalis.CreateFavoriteRules());
@@ -135,7 +143,8 @@ public sealed class Plugin : IDalamudPlugin
             procurementLedger,
             automation,
             configuration,
-            automationLog);
+            automationLog,
+            discovery: marketDiscovery);
         bagListing = new BagListingController(
             Framework,
             CommandManager,
@@ -214,6 +223,7 @@ public sealed class Plugin : IDalamudPlugin
         bagListing.Dispose();
         automation.Dispose();
         universalis.Dispose();
+        marketStatistics.Dispose();
         marketData.Dispose();
         CommandManager.RemoveHandler(CommandName);
         PluginInterface.UiBuilder.Draw -= windowSystem.Draw;
