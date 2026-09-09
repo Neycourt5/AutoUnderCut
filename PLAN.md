@@ -59,7 +59,10 @@ list for six different reasons and the log cannot distinguish them.
       waited on that; 12 consecutive Release runs of the discovery tests pass.
 - [x] Build workflow now writes a TRX and uploads it even on failure, because
       the checks API reports only "exit code 1".
-- [ ] Commit, push main, tag v1.0.0.60, verify both workflows and the installer.
+- [x] Commit 87d0189 pushed to main with annotated v1.0.0.60. Release Actions
+      34307467926 and Build 34307465424 both succeeded. Public latest repo.json
+      and ZIP verified at 1.0.0.60, API 15, both DLLs present, ZIP 541,078 bytes.
+      Installer URL unchanged.
 
 ## What the user should do
 Update to .59 and run one shopping pass. If the search still stalls, the log line
