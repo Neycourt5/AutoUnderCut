@@ -74,6 +74,33 @@ public sealed class ShoppingScoutPolicyTests
     }
 
     [Fact]
+    public void TheBusiestSecondaryLinesArePricedOnEveryWorld()
+    {
+        // `secondary` arrives in descending average volume, so the head of it is
+        // what a sale slot can actually be turned over on. It must survive the
+        // rotation the same way the food block does.
+        var first = ShoppingScoutPolicy.SelectWorldItems(Food, Secondary, [], [], 0, 12);
+        var later = ShoppingScoutPolicy.SelectWorldItems(Food, Secondary, [], [], 7, 12);
+
+        // Six food leaves six; half of that is the volume lead.
+        Assert.Contains(100u, later);
+        Assert.Contains(101u, later);
+        Assert.Contains(102u, later);
+        Assert.Equal(first.Take(9), later.Take(9));
+        // The tail still rotates, so the quiet lines are not starved forever.
+        Assert.NotEqual(first.Skip(9), later.Skip(9));
+    }
+
+    [Fact]
+    public void TheVolumeLeadNeverCrowdsOutTheFoodBlock()
+    {
+        var selected = ShoppingScoutPolicy.SelectWorldItems(Food, Secondary, [], [], 4, 8);
+
+        Assert.All(Food, item => Assert.Contains(item, selected));
+        Assert.Equal(8, selected.Count);
+    }
+
+    [Fact]
     public void ItemsAreNeverPricedTwiceOnOneWorld()
     {
         // The resumed item is also a food line and a hint; it must cost one search.

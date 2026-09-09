@@ -31,11 +31,29 @@ public static class ShoppingScoutPolicy
         ArgumentNullException.ThrowIfNull(resumed);
         ArgumentNullException.ThrowIfNull(hinted);
         limit = Math.Max(1, limit);
+        var chosen = new List<uint>(limit);
+        void Take(IEnumerable<uint> items)
+        {
+            foreach (var item in items)
+            {
+                if (chosen.Count == limit) return;
+                if (!chosen.Contains(item)) chosen.Add(item);
+            }
+        }
+
+        Take(resumed);
+        Take(preferred);
+        Take(hinted);
+        // `secondary` arrives in descending average daily volume. Half of whatever
+        // capacity is left goes to the busiest lines on every world, because those
+        // are the ones a slot can actually be turned over on; the remainder rotates
+        // so a quieter line is still checked eventually rather than never.
+        Take(secondary.Take(Math.Max(0, (limit - chosen.Count + 1) / 2)));
         var offset = secondary.Count == 0
             ? 0
             : Math.Max(0, worldIndex) * Math.Max(1, limit / 2) % secondary.Count;
-        var rotated = secondary.Skip(offset).Concat(secondary.Take(offset));
-        return resumed.Concat(preferred).Concat(hinted).Concat(rotated).Distinct().Take(limit).ToArray();
+        Take(secondary.Skip(offset).Concat(secondary.Take(offset)));
+        return chosen;
     }
 
     public static bool IsExceptional(ProcurementOrder order, decimal minimumRoi) =>

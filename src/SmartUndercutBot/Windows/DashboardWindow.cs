@@ -521,6 +521,13 @@ public sealed class DashboardWindow : Window
         ImGui.SetNextItemWidth(140 * ImGuiHelpers.GlobalScale);
         if (ImGui.Combo("Range", ref wealthRangeIndex, WealthRanges.Select(x => x.Label).ToArray(), WealthRanges.Length))
             wealthRangeIndex = Math.Clamp(wealthRangeIndex, 0, WealthRanges.Length - 1);
+        ImGui.SameLine();
+        // Builds before v1.0.0.63 plotted bag-listing passes as gil-only points,
+        // which leaves a permanent sawtooth in an existing history.
+        if (ImGui.Button("Clear history"))
+            wealthHistory.Clear();
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Discards every recorded point and starts the series again from the next completed all-retainer check.");
 
         if (samples.Count < 2)
         {
@@ -1128,6 +1135,20 @@ public sealed class DashboardWindow : Window
                 configurationDirty = true;
             }
             ImGui.TextDisabled("A world/item pair already seen this recently is not searched again, so trips skim only what is not already known.");
+            var minimumSlots = config.ShoppingTripMinimumFreeSaleSlots;
+            if (InputInt("Free sale slots before a trip", ref minimumSlots, 0, 60))
+            {
+                config.ShoppingTripMinimumFreeSaleSlots = minimumSlots;
+                configurationDirty = true;
+            }
+            ImGui.TextDisabled("Below this many free retainer slots the bot stays home and keeps undercutting, which is what frees them. 0 shops at any vacancy.");
+            var minimumGil = config.ShoppingTripMinimumGil;
+            if (InputUInt("Gil needed before a trip", ref minimumGil, 0, 100_000_000))
+            {
+                config.ShoppingTripMinimumGil = minimumGil;
+                configurationDirty = true;
+            }
+            ImGui.TextDisabled("Spendable gil, after the travel reserve and buffer cap. Travelling with pocket change buys one cheap stack and wastes the trip.");
             var worldsPerTrip = config.PriorityWorldsPerTrip;
             if (InputInt("Worlds to scout before comparing", ref worldsPerTrip, 1, 40))
             {

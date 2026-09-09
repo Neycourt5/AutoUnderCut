@@ -174,9 +174,31 @@ public sealed partial class ProcurementController : IDisposable
         (repricing.LastKnownFreeSaleSlots ?? 0) + repricing.ListedStock.Sum(x => x.SaleSlots));
     public int PurchaseCapacity => AvailablePurchaseSlots();
     public uint ShoppingBudget => SpendableGil(newTrip: true);
+    /// <summary>
+    /// Free retainer shelf space, and whether there is enough of it to be worth a
+    /// trip. Repricing runs every few minutes and is what frees the slots, so
+    /// travelling to fill one or two of them spends most of the trip in transit.
+    /// </summary>
+    public int FreeSaleSlots => repricing.LastKnownFreeSaleSlots ?? 0;
+    public bool HoldingForSaleSlots => repricing.LastKnownFreeSaleSlots is not null &&
+        FreeSaleSlots < configuration.Current.ShoppingTripMinimumFreeSaleSlots;
+
+    /// <summary>
+    /// Travelling with pocket change spends the trip to buy one cheap stack, so the
+    /// route waits for a war chest. Measured on what the trip could actually spend,
+    /// not the raw wallet, so the travel reserve and buffer cap still apply.
+    /// </summary>
+    public bool HoldingForGil => ShoppingBudget < configuration.Current.ShoppingTripMinimumGil;
+
     public string? ShoppingWaitReason => repricing.LastKnownFreeSaleSlots is null
         ? "waiting for a complete retainer check"
         : market.FreeInventorySlots <= configuration.Current.ProcurementInventoryReserve ? "waiting for free bag space"
+        : HoldingForSaleSlots
+            ? $"holding for {configuration.Current.ShoppingTripMinimumFreeSaleSlots} free sale slots " +
+              $"({FreeSaleSlots} open); undercutting continues until stock sells"
+        : HoldingForGil
+            ? $"holding for a {configuration.Current.ShoppingTripMinimumGil:N0} gil shopping stock " +
+              $"({ShoppingBudget:N0} spendable); undercutting continues until sales build it up"
         : AvailablePurchaseSlots() == 0 ? configuration.Current.ContinueShoppingWhenStocked
             ? $"comfortable trading stock is ready ({ResaleBagSlots}/{ComfortableStockTarget} sale stacks); watching for restocks"
             : "the fixed spare-stock target is reached"
@@ -615,6 +637,16 @@ public sealed partial class ProcurementController : IDisposable
         if (repricing.LastKnownFreeSaleSlots is null)
         {
             HaltForRetry("The live all-world stock hunt needs a completed all-retainer bell pass first.");
+            return;
+        }
+        if (HoldingForSaleSlots || HoldingForGil)
+        {
+            // The same holds the priority route uses: a trip is not worth taking for
+            // a couple of slots, or with pocket change, when repricing will free a
+            // batch of slots and bring in gil shortly.
+            HaltForRetry(ShoppingWaitReason is { } hold
+                ? char.ToUpperInvariant(hold[0]) + hold[1..] + "."
+                : "Holding until there is shelf space and gil worth travelling for.");
             return;
         }
         if (AvailablePurchaseSlots() == 0 || market.FreeInventorySlots <= configuration.Current.ProcurementInventoryReserve || ShoppingBudget == 0)
@@ -1611,6 +1643,11 @@ public sealed partial class ProcurementController : IDisposable
                                      PlannedSaleSlots(freeSaleSlots.Value) != lastScannedFreeSaleSlots;
         var incomeArrived = ShoppingBudget > lastScannedBudget;
         if (!newlyAvailableCapacity && !incomeArrived && timeProvider.GetUtcNow() < nextAutomaticScan)
+            return;
+        // Holding for shelf space or gil means no trip can result from this scan, so
+        // do not spend a regional Universalis pass to reach that conclusion. The
+        // capacity and income triggers above still wake it the moment a hold lifts.
+        if (HoldingForSaleSlots || HoldingForGil)
             return;
         nextAutomaticScan = timeProvider.GetUtcNow().AddMinutes(configuration.Current.ProcurementIntervalMinutes);
         StartScan(ProcurementRunMode.AutomaticPurchase);

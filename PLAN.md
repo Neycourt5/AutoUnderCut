@@ -1,4 +1,44 @@
-# Current: v1.0.0.62 price food and potions on every world
+# Current: v1.0.0.63 hold for a worthwhile trip, and fix the net worth graph
+
+User direction while watching v1.0.0.62: diversification matters less now that
+undercutting runs every 5-10 minutes, so do not take a trip for a couple of
+slots. Wait until 10-20 slots open and there is real gil, then shop the busiest
+lines across all data centers. Also: the net worth graph does not work.
+
+## What the saved history actually shows
+
+`wealth-history.json` alternated between real valuations and gil-only ones:
+1,832,189 -> 4,217,559 -> 2,510,308 -> 6,869,448, with `ListedNet` exactly 0 on
+the low points. A fill-only bag-listing pass never reads the existing listings,
+but `ResetPortfolio` still marked it `isFullBellRun`, so it was recorded as a
+complete valuation worth retainer gil alone. The graph drew a cliff to bare gil
+and back on every bag pass.
+
+## Work checklist
+
+- [x] `ShoppingTripMinimumFreeSaleSlots` (default 10): below this the route stays
+      home and keeps undercutting, which is what frees the slots. 0 disables.
+- [x] `ShoppingTripMinimumGil` (default 1,000,000) on spendable gil, so a trip is
+      not spent buying one cheap stack. 0 disables.
+- [x] Both holds skip the periodic Universalis scan, because no trip can result
+      from it; the capacity and income triggers still wake it when a hold lifts.
+- [x] Half the non-preferred capacity on every world goes to the highest average
+      volume lines; cached hints drop from half the stop to a quarter; the tail
+      still rotates so quiet lines are not starved.
+- [x] A fill-only pass is no longer a full-bell valuation, so the net worth graph
+      stops sawtoothing, and the graph gained a Clear history button because an
+      existing history keeps its bad points.
+- [x] 295 Release tests pass; the API 15 plugin builds with 0 warnings, 0 errors.
+- [ ] Commit and push v1.0.0.63, publish the annotated tag, wait for both
+      workflows, and verify public `repo.json` and `SmartUndercutBot.zip`.
+
+## Validation boundary
+
+The holds and the scan skip are covered by controller tests; the graph fix is
+covered by a fill-only pass assertion. No in-game circuit has been run on this
+build, so the hold has not been observed live.
+
+# Completed: v1.0.0.62 price food and potions on every world
 
 User report against 1.0.0.61, watching a live circuit: the bot travelled to a
 world and never checked food or potion prices.
@@ -36,8 +76,8 @@ items were never priced, so no core candidate ever reached the planner.
 - [x] `PriorityItemsPerWorld` 8 -> 12 with a migration, so the 6-item block does
       not squeeze out the rotation.
 - [x] 289 Release tests pass; the API 15 plugin builds with 0 warnings, 0 errors.
-- [ ] Commit and push v1.0.0.62, publish the annotated tag, wait for both
-      workflows, and verify public `repo.json` and `SmartUndercutBot.zip`.
+- [x] Commit 2d264dc..b179b51 pushed to main with annotated v1.0.0.62. Release
+      Actions 34388157409 and Build 34388152931 both succeeded.
 
 ## Validation boundary
 

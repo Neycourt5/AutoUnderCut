@@ -59,6 +59,27 @@ public sealed class RetainerAutomationTests
     }
 
     [Fact]
+    public void ABagListingPassIsNotPlottedAsAFullBellWealthPoint()
+    {
+        // A fill-only pass never reads the existing listings, so its valuation is
+        // retainer gil and nothing else. Plotting it drew the net worth graph as a
+        // cliff down to bare gil and straight back up on the next real pass.
+        using var run = new Session();
+        run.Bot.StartNow();
+        run.CompletePass();
+        var repriced = run.Bot.PortfolioSnapshot();
+        Assert.True(repriced.IsFullBellRun);
+        Assert.NotNull(WealthHistory.FromValuation(repriced, DateTimeOffset.UtcNow));
+
+        run.Tick(120);
+        run.Bot.StartBagListingNow();
+        run.CompletePass();
+        var filled = run.Bot.PortfolioSnapshot();
+        Assert.False(filled.IsFullBellRun);
+        Assert.Null(WealthHistory.FromValuation(filled, DateTimeOffset.UtcNow));
+    }
+
+    [Fact]
     public void StopDuringRecoveryNeverRetries()
     {
         using var run = new Session();

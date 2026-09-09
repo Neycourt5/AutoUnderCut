@@ -113,6 +113,58 @@ public sealed class ProcurementControllerTests
     }
 
     [Fact]
+    public void AFewFreeSlotsAreNotWorthATripAndUndercuttingContinuesUntilABatchOpens()
+    {
+        using var run = new Route(priority: true);
+        run.Config.Current.EnableStockAutomation();
+        run.Config.Current.ShoppingTripMinimumFreeSaleSlots = 10;
+        run.Game.Gil = 10_000_000;
+        run.Repricing.LastKnownFreeSaleSlots = 3;
+
+        for (var i = 0; i < 24; i++) run.Tick(3600);
+        Assert.Empty(run.Game.Commands);
+        Assert.Contains("free sale slots", run.Controller.ShoppingWaitReason);
+        Assert.True(run.Controller.HoldingForSaleSlots);
+
+        // Undercutting frees a worthwhile batch, and only then does a trip depart.
+        run.Repricing.LastKnownFreeSaleSlots = 12;
+        Assert.False(run.Controller.HoldingForSaleSlots);
+        Assert.Null(run.Controller.ShoppingWaitReason);
+    }
+
+    [Fact]
+    public void PocketChangeIsNotWorthATripEvenWithPlentyOfEmptySlots()
+    {
+        using var run = new Route(priority: true);
+        run.Config.Current.EnableStockAutomation();
+        run.Config.Current.ShoppingTripMinimumGil = 1_000_000;
+        run.Repricing.LastKnownFreeSaleSlots = 40;
+        run.Game.Gil = 250_000;
+
+        for (var i = 0; i < 24; i++) run.Tick(3600);
+        Assert.Empty(run.Game.Commands);
+        Assert.True(run.Controller.HoldingForGil);
+        Assert.Contains("gil", run.Controller.ShoppingWaitReason);
+
+        run.Game.Gil = 4_000_000;
+        Assert.False(run.Controller.HoldingForGil);
+        Assert.Null(run.Controller.ShoppingWaitReason);
+    }
+
+    [Fact]
+    public void BothHoldsCanBeTurnedOffAndRestoreTheOlderShopAnyVacancyBehaviour()
+    {
+        using var run = new Route(priority: true);
+        run.Config.Current.ShoppingTripMinimumFreeSaleSlots = 0;
+        run.Config.Current.ShoppingTripMinimumGil = 0;
+        run.Repricing.LastKnownFreeSaleSlots = 1;
+        run.Game.Gil = 20_000;
+
+        Assert.False(run.Controller.HoldingForSaleSlots);
+        Assert.False(run.Controller.HoldingForGil);
+    }
+
+    [Fact]
     public void NewIncomeRetriesAnUnaffordablePlanBeforeTheNormalInterval()
     {
         using var run = new Route();
@@ -1416,6 +1468,11 @@ public sealed class ProcurementControllerTests
             Config.Current.AllowAutomaticPurchases = true;
             // Older regression cases exercise the optional fixed-buffer mode.
             Config.Current.ContinueShoppingWhenStocked = false;
+            // These fixtures drive trip mechanics with a handful of slots and small
+            // wallets, which is deliberately below the shipped "worth travelling
+            // for" thresholds. The holds have their own tests; opt these out.
+            Config.Current.ShoppingTripMinimumFreeSaleSlots = 0;
+            Config.Current.ShoppingTripMinimumGil = 0;
             Config.Current.ProcurementRules.Add(new()
             {
                 ItemId = 1, ItemName = "Popcorn", AllowHighQuality = true, RequireHighQuality = true, HuntOnTour = true,

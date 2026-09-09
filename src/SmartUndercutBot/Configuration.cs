@@ -7,7 +7,7 @@ namespace SmartUndercutBot;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 38;
+    public int Version { get; set; } = 39;
     public bool AutomationEnabled { get; set; }
     public bool ProcessAllRetainers { get; set; } = true;
     public bool RepeatBellRuns { get; set; }
@@ -62,6 +62,14 @@ public sealed class Configuration : IPluginConfiguration
     // re-reads it for free anyway. Away-world observations only decide where to look
     // and what to compare, and those barely move within a day.
     public int ScoutKnowledgeMaxAgeHours { get; set; } = 24;
+    // A shopping trip costs 15-45 minutes away from the retainers, so it is only
+    // worth taking when there is real shelf space to fill. Below this many free
+    // sale slots the bot stays home and keeps undercutting instead; the repricing
+    // loop is what frees the slots in the first place. Zero disables the hold.
+    public int ShoppingTripMinimumFreeSaleSlots { get; set; } = 10;
+    // Travelling with pocket change buys one cheap stack and wastes the trip. Hold
+    // until there is a real war chest to shop with. Zero disables the hold.
+    public uint ShoppingTripMinimumGil { get; set; } = 1_000_000;
     public bool ContinueShoppingWhenStocked { get; set; } = true;
     public decimal ProcurementBufferGilPercent { get; set; } = 20m;
     public uint ProcurementTravelReserve { get; set; } = 5_000;
@@ -467,7 +475,16 @@ public sealed class Configuration : IPluginConfiguration
                 PriorityItemsPerWorld = 12;
             Version = 38;
         }
-        Version = Math.Max(Version, 38);
+        if (Version < 39)
+        {
+            // Undercutting every few minutes keeps stock moving, so a trip taken to
+            // fill one or two slots is mostly travel time. Wait for a worthwhile
+            // batch of vacancies instead.
+            ShoppingTripMinimumFreeSaleSlots = 10;
+            ShoppingTripMinimumGil = 1_000_000;
+            Version = 39;
+        }
+        Version = Math.Max(Version, 39);
         PreferredPortfolioTargetPercent = Math.Clamp(PreferredPortfolioTargetPercent, 0m, 100m);
         OpportunisticPortfolioMaximumPercent = Math.Clamp(OpportunisticPortfolioMaximumPercent, 0m, 100m);
         ProcurementMinimumProfitPerSaleSlot = Math.Min(ProcurementMinimumProfitPerSaleSlot, 100_000_000u);
@@ -502,6 +519,8 @@ public sealed class Configuration : IPluginConfiguration
         LiveWorldStockThresholdPerItem = Math.Clamp(LiveWorldStockThresholdPerItem, 1, 9999);
         LiveWorldStockHuntCooldownMinutes = Math.Clamp(LiveWorldStockHuntCooldownMinutes, 60, 10_080);
         GuidedTourMaximumWorlds = Math.Clamp(GuidedTourMaximumWorlds, 1, 20);
+        ShoppingTripMinimumFreeSaleSlots = Math.Clamp(ShoppingTripMinimumFreeSaleSlots, 0, 60);
+        ShoppingTripMinimumGil = Math.Min(ShoppingTripMinimumGil, 100_000_000u);
         BagListingReservePerItem = Math.Clamp(BagListingReservePerItem, 0, 9999);
         ProcurementMinimumRoiPercent = Math.Clamp(ProcurementMinimumRoiPercent, 0m, 1_000m);
         ProcurementMinimumProfitPerUnit = Math.Clamp(ProcurementMinimumProfitPerUnit, 0u, 100_000_000u);

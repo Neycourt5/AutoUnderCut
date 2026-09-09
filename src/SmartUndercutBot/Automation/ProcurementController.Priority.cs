@@ -116,11 +116,12 @@ public sealed partial class ProcurementController
         for (var i = 0; i < config.PriorityScoutRoute.Count; i++)
         {
             var world = config.PriorityScoutRoute[i];
-            // Reserve half the quick scan for rotating high-volume flips, so
-            // stale or missing regional hints cannot hide new bargains forever.
+            // Cached bargains get a quarter of the stop rather than half: the rest
+            // belongs to the food block and to the busiest lines by average volume,
+            // which is what a sale slot can actually be turned over on.
             var hinted = hints.Where(x => x.Hint.WorldName.Equals(world, StringComparison.OrdinalIgnoreCase) && x.Score > 0)
                 .OrderByDescending(x => HomeSalesPerDay(x.Hint.ItemId, x.Hint.IsHighQuality))
-                .ThenByDescending(x => x.Score).Select(x => x.Hint.ItemId).Distinct().Take(Math.Max(1, limit / 2));
+                .ThenByDescending(x => x.Score).Select(x => x.Hint.ItemId).Distinct().Take(Math.Max(1, limit / 4));
             var resumed = world.Equals(config.PriorityNextWorld, StringComparison.OrdinalIgnoreCase) && config.PriorityNextItem != 0
                 ? new[] { config.PriorityNextItem } : [];
             scoutItems[world] = ShoppingScoutPolicy

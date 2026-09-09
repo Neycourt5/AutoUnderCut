@@ -570,7 +570,11 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
         portfolioRetainers.Clear();
         portfolioStartedAt = timeProvider.GetUtcNow();
         portfolioCompletedAt = null;
-        portfolioFullBellRun = isFullBellRun;
+        // A fill-only pass lists from the bags and deliberately never reads the
+        // existing listings, so its valuation sees retainer gil and nothing else.
+        // Recording that as a complete full-bell point drew the net worth graph as
+        // a cliff down to bare gil and back up on the next real pass.
+        portfolioFullBellRun = isFullBellRun && !fillOnlyRun;
         portfolioComplete = false;
         portfolioExpectedRetainers = retainerCount;
     }
