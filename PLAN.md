@@ -50,8 +50,10 @@ the transient buffer drain before the fixed 500 ms sample more consistently.
 - [x] Add regression and safety tests for durable/transient precedence, conflicting
       ids, disabled and unsettled rows, singleton guards, bounds, and dropped click.
 - [x] 276 Release tests pass; the API 15 plugin builds with 0 warnings and errors.
-- [ ] Commit and push v1.0.0.61, publish the annotated tag, wait for both workflows,
-      and verify public `repo.json` and `SmartUndercutBot.zip`.
+- [x] Commit 2d264dc pushed to main with annotated v1.0.0.61. Release Actions
+      34309714817 and Build 34309712068 both succeeded. Public latest repo.json
+      and ZIP verified at 1.0.0.61, API 15, both DLLs present, ZIP 544,212 bytes.
+      Installer URL unchanged.
 
 ## Validation boundary
 
