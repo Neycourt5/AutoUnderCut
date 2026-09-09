@@ -266,38 +266,73 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService, IDisp
                 if (addon->ResultsList == null) return "the results list is missing";
                 var agent = AgentItemSearch.Instance();
                 if (agent == null) return "the item search agent is unavailable";
-                if (agent->ItemBuffer == null) return "the item search agent has no result buffer";
-                if (agent->IsPartialSearching) return "the game is still running a partial search";
-                if (agent->IsItemPushPending) return "the game is still pushing result rows";
                 var proxy = InfoProxyItemSearch.Instance();
-                return $"agent rows {agent->ItemCount}, list rows {addon->ResultsList->GetItemCount()}, " +
+                var transientFirst = agent->ItemBuffer != null && agent->ItemCount > 0
+                    ? agent->ItemBuffer[0]
+                    : 0;
+                var pageIds = agent->ListingPageItemIds;
+                var pageFirst = agent->ListingPageItemCount > 0 ? pageIds[0] : 0;
+                var query = ReadSearchText(addon, agent);
+                return $"transient rows {agent->ItemCount} (first {transientFirst}), " +
+                       $"listing-page rows {agent->ListingPageItemCount} (first {pageFirst}), " +
+                       $"rendered rows {addon->ResultsList->GetItemCount()}, " +
                        $"mode {addon->Mode}, filter {addon->SelectedFilter}, " +
+                       $"query '{query}', partial {agent->IsPartialSearching}, " +
+                       $"push pending {agent->IsItemPushPending}, " +
+                       $"interaction {addon->ResultsList->IsItemInteractionEnabled}, " +
+                       $"click {addon->ResultsList->IsItemClickEnabled}, " +
                        $"proxy item {(proxy == null ? 0 : proxy->SearchItemId)}, " +
                        $"awaiting listings {(proxy != null && proxy->WaitingForListings)}";
             }
         }
 
-        public IReadOnlyList<MarketSearchRow> ReadRows()
+        public IReadOnlyList<MarketSearchRow> ReadRows(uint expectedItemId, string expectedItemName)
         {
             var addon = owner.gameGui.GetAddonByName<AddonItemSearch>("ItemSearch");
             var agent = AgentItemSearch.Instance();
             if (addon == null || !addon->IsVisible || addon->ResultsList == null ||
-                agent == null || agent->ItemBuffer == null || agent->IsPartialSearching || agent->IsItemPushPending)
+                agent == null)
                 return [];
-            // Name searches populate ItemBuffer/ItemCount. ListingPageItemIds
-            // belongs to category pages and can be empty or left over from browsing.
-            var ids = agent->ItemBuffer;
-            var count = Math.Min((int)Math.Min(agent->ItemCount, 100u), addon->ResultsList->GetItemCount());
-            var rows = new List<MarketSearchRow>();
-            for (var i = 0; i < count; i++)
-                rows.Add(new(i, ids[i], !addon->ResultsList->GetItemDisabledState(i)));
-            return rows;
+
+            var renderedCount = Math.Clamp(addon->ResultsList->GetItemCount(), 0, 100);
+            if (renderedCount == 0 || agent->IsPartialSearching || agent->IsItemPushPending) return [];
+
+            // ItemBuffer is a transient name-match work buffer. On a slower frame
+            // cadence it can already be empty while the exact row remains rendered.
+            // ListingPageItemIds is the durable index-to-item mapping used by the
+            // visible list, so prefer it and use ItemBuffer only as early evidence.
+            var transientCount = agent->ItemBuffer == null
+                ? 0
+                : Math.Min((int)Math.Min(agent->ItemCount, 100u), renderedCount);
+            var transientIds = new uint[transientCount];
+            for (var i = 0; i < transientCount; i++) transientIds[i] = agent->ItemBuffer[i];
+
+            var pageCount = Math.Min((int)Math.Min(agent->ListingPageItemCount, 100u), renderedCount);
+            var pageIds = agent->ListingPageItemIds;
+            var durableIds = new uint[pageCount];
+            for (var i = 0; i < pageCount; i++) durableIds[i] = pageIds[i];
+
+            var disabled = new bool[renderedCount];
+            for (var i = 0; i < renderedCount; i++)
+                disabled[i] = addon->ResultsList->GetItemDisabledState(i);
+
+            var exact = MarketSearchRowResolver.FindExact(
+                expectedItemId,
+                expectedItemName,
+                ReadSearchText(addon, agent, expectedItemName),
+                renderedCount,
+                transientIds,
+                durableIds,
+                disabled,
+                !agent->IsPartialSearching && !agent->IsItemPushPending,
+                addon->Mode == AddonItemSearch.SearchMode.Normal);
+            return exact is null ? [] : [exact];
         }
 
-        public bool ActivateRow(int index, uint itemId)
+        public bool ActivateRow(int index, uint itemId, string itemName)
         {
             // Re-read the exact identity immediately before crossing the native boundary.
-            if (!ReadRows().Any(x => x.Index == index && x.ItemId == itemId && x.Enabled)) return false;
+            if (!ReadRows(itemId, itemName).Any(x => x.Index == index && x.ItemId == itemId && x.Enabled)) return false;
             var addon = owner.gameGui.GetAddonByName<AddonItemSearch>("ItemSearch");
             if (addon == null || addon->ResultsList == null ||
                 (!addon->ResultsList->IsItemInteractionEnabled && !addon->ResultsList->IsItemClickEnabled)) return false;
@@ -305,6 +340,24 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService, IDisp
             addon->ResultsList->SelectItem(index, true);
             addon->ResultsList->DispatchItemEvent(index, AtkEventType.ListItemClick);
             return true;
+        }
+
+        private static string ReadSearchText(
+            AddonItemSearch* addon,
+            AgentItemSearch* agent,
+            string? expectedItemName = null)
+        {
+            var inputText = string.Empty;
+            if (addon != null && addon->SearchTextInput != null)
+            {
+                inputText = addon->SearchTextInput->AtkComponentInputBase.EvaluatedString.ToString();
+                if (string.Equals(inputText, expectedItemName, StringComparison.Ordinal)) return inputText;
+            }
+            var agentText = agent != null && agent->StringData != null
+                ? agent->StringData->SearchParam.ToString()
+                : string.Empty;
+            if (string.Equals(agentText, expectedItemName, StringComparison.Ordinal)) return agentText;
+            return string.IsNullOrEmpty(inputText) ? agentText : inputText;
         }
 
         public MarketSearchResult ReadResult()

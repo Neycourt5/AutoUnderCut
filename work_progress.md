@@ -4,10 +4,31 @@ Running record of what changed and why, so another agent (or a later session) ca
 pick up without re-deriving the history. Newest first. `PLAN.md` holds the current
 task plan; this file holds the trail.
 
-Build: use `C:/Users/Acour/.dotnet/dotnet.exe` (SDK 10.0.301), **not** the PATH
+Build: use `C:/Users/Acour/.dotnet/dotnet.exe` (SDK 10.0.400), **not** the PATH
 `dotnet`, which is runtime-only and fails with NETSDK1045. Set
 `DOTNET_ROOT=C:\Users\Acour\.dotnet`. `gh` is not installed; verify releases with
 `curl` against the GitHub REST API. Publishing is pre-authorized (see `AGENTS.md`).
+
+---
+## v1.0.0.61 - restore the visible market-search row mapping
+
+The v1.0.0.60 diagnostic resolved the repeated Item Search timeout. Every exact
+Gemdraught search rendered one visible row while `AgentItemSearch.ItemCount` was
+already zero. Since v1.0.0.36, `ReadRows` bounded the visible list by that
+transient counter, returned no rows, and therefore never called `ActivateRow`.
+The three outer retries and move to the next item were consequences, not three
+failed server requests. Display scale is not involved; frame cadence can change
+whether the transient buffer survives the fixed delay.
+
+- Prefer durable `ListingPageItemIds`, bounded by `ListingPageItemCount` and the
+  rendered list count; use `ItemBuffer` only if the durable ids are absent.
+- Require the exact expected id and an enabled, settled row. A fallback for an
+  empty native mapping is limited to one row plus exact full query and normal mode.
+- Revalidate id/name at activation. Retry one unacknowledged native click after
+  1.2 seconds, but never retry after the target proxy or response acknowledges it.
+- Expanded diagnostics now distinguish durable, transient and rendered counts.
+- 276 Release tests pass and the API 15 plugin builds with zero warnings/errors.
+  Publication and public artifact verification are pending.
 
 ---
 ## v1.0.0.58 - portfolio quality replaces slot filling (published)

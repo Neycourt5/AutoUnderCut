@@ -51,13 +51,42 @@ public sealed class MarketSearchSessionTests
     }
 
     [Fact]
-    public void SlowServerDoesNotCauseRepeatedRowClicks()
+    public void AcknowledgedSlowServerDoesNotCauseRepeatedRowClicks()
     {
         var ui = new SearchUi { Rows = [new(0, 42, true)] };
         var clock = new Clock();
         var session = Started(ui, clock);
+        clock.Advance(500);
+        session.Poll(42);
+        // The proxy adopting our target is acknowledgement even before its
+        // waiting bit or first response packet becomes observable.
+        ui.Result = new(false, 42, false, false);
         for (var i = 0; i < 20; i++) { clock.Advance(1000); Assert.False(session.Poll(42)); }
         Assert.Single(ui.Activations);
+    }
+
+    [Fact]
+    public void DroppedRowActivationIsRevalidatedAndRetriedOnce()
+    {
+        var ui = new SearchUi { Rows = [new(0, 42, true)] };
+        var clock = new Clock();
+        var session = Started(ui, clock);
+        clock.Advance(500);
+        session.Poll(42);
+        Assert.Single(ui.Activations);
+
+        clock.Advance(1_199);
+        Assert.False(session.Poll(42));
+        Assert.Single(ui.Activations);
+
+        clock.Advance(1);
+        Assert.False(session.Poll(42));
+        Assert.Equal(2, ui.Activations.Count);
+        Assert.Contains("Retried", session.Status);
+
+        clock.Advance(10_000);
+        Assert.False(session.Poll(42));
+        Assert.Equal(2, ui.Activations.Count);
     }
 
     [Fact]
@@ -274,8 +303,8 @@ public sealed class MarketSearchSessionTests
             Submissions++;
             return true;
         }
-        public IReadOnlyList<MarketSearchRow> ReadRows() => Rows;
-        public bool ActivateRow(int index, uint id) { Activations.Add((index, id)); return AcceptRow; }
+        public IReadOnlyList<MarketSearchRow> ReadRows(uint expectedItemId, string expectedItemName) => Rows;
+        public bool ActivateRow(int index, uint id, string itemName) { Activations.Add((index, id)); return AcceptRow; }
         public MarketSearchResult ReadResult() => Result;
         public void CloseResult() { ClosedResults++; Result = new(false, 0, false); }
         public void ClearSearch() { Calls.Add("clear"); Result = new(false, 0, false); }

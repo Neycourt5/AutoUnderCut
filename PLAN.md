@@ -1,4 +1,66 @@
-# Active: v1.0.0.60 restore market-board search confidence
+# Active: v1.0.0.61 open the rendered market-search row
+
+User report against v1.0.0.60: Item Search types each configured name, visibly
+renders the exact **First Letter Match** row, retries three times, then advances
+without ever opening the price/listings window. The laptop is not using a
+coordinate path, so display resolution and UI scale are not direct inputs.
+
+## Root cause established from the live client
+
+The v1.0.0.60 diagnostics added for the previous report captured the decisive
+state on every attempt in `session-20260908-222704.log` and
+`session-20260908-223547.log`:
+
+    agent rows 0, list rows 1, mode Normal
+
+The visible row exists, but `ReadRows()` bounded the rendered list by the
+transient `AgentItemSearch.ItemCount`. That makes the count `min(0, 1) = 0`, so
+`ActivateRow()` is never called. Commit `d40e302` / v1.0.0.36 introduced this by
+replacing the durable visible-page mapping (`ListingPageItemIds` and
+`ListingPageItemCount`) with the transient `ItemBuffer` and `ItemCount`. The
+v1.0.0.36 native path was not exercised in game, and the new v1.0.0.60 evidence
+disproves that change's assumption. A laptop's different frame cadence can make
+the transient buffer drain before the fixed 500 ms sample more consistently.
+
+## Repair
+
+- Reconcile the rendered rows through `ListingPageItemIds` first, bounded to the
+  actual list count, and accept only the exact expected item id on an enabled,
+  settled row. Use the transient buffer only if the durable mapping has no ids.
+- If both native id sources are empty, permit only one fail-closed fallback: one
+  rendered enabled row, normal mode, a settled search, and an exact full item-name
+  query. Every later result, listing read, and purchase guard still independently
+  requires the expected item id.
+- Pass the expected id and name through both row reads so the identity is
+  revalidated immediately before the native click.
+- Treat row activation as dispatched rather than acknowledged. If neither the
+  target proxy nor the results window acknowledges it within 1.2 seconds,
+  revalidate and retry the click once inside the same search. Never click again
+  after target acknowledgement.
+- Expand the stall diagnostic with durable/transient counts and first ids, query,
+  pending flags, and list interaction state.
+
+## Work checklist
+
+- [x] Read the v1.0.0.60 session and Dalamud logs and reproduce the zero-transient /
+      one-rendered-row contradiction.
+- [x] Trace the regression to `d40e302` / v1.0.0.36.
+- [x] Add the durable row resolver, fail-closed singleton fallback, native adapter
+      integration, and bounded activation acknowledgement retry.
+- [x] Add regression and safety tests for durable/transient precedence, conflicting
+      ids, disabled and unsettled rows, singleton guards, bounds, and dropped click.
+- [x] 276 Release tests pass; the API 15 plugin builds with 0 warnings and errors.
+- [ ] Commit and push v1.0.0.61, publish the annotated tag, wait for both workflows,
+      and verify public `repo.json` and `SmartUndercutBot.zip`.
+
+## Validation boundary
+
+The exact live failure is evidenced by the v1.0.0.60 game logs, and the corrected
+native adapter compiles against the installed API 15 structs. This work session
+has not exercised the new click in FFXIV, so native success must not be claimed
+until the user runs the published build.
+
+# Completed: v1.0.0.60 restore market-board search confidence
 
 User report against 1.0.0.58: the market board opened the Gemdraught of Mind
 search repeatedly and never showed the price listings.

@@ -14,8 +14,8 @@ public interface IMarketSearchUi
     string? RowDiagnostics => null;
     bool PrepareSearch(string itemName);
     bool SubmitSearch(string itemName);
-    IReadOnlyList<MarketSearchRow> ReadRows();
-    bool ActivateRow(int index, uint itemId);
+    IReadOnlyList<MarketSearchRow> ReadRows(uint expectedItemId, string expectedItemName);
+    bool ActivateRow(int index, uint itemId, string itemName);
     MarketSearchResult ReadResult();
     void CloseResult();
     void ClearSearch();
@@ -30,7 +30,9 @@ public sealed class MarketSearchSession(IMarketSearchUi ui, TimeProvider? clock 
     private string itemName = string.Empty;
     private bool submitted;
     private bool selected;
+    private int activationAttempts;
     private DateTimeOffset nextActionAt;
+    private const int MaximumActivationAttempts = 2;
     public string Status { get; private set; } = "No item search is active.";
 
     public bool Request(uint id, string name)
@@ -95,10 +97,22 @@ public sealed class MarketSearchSession(IMarketSearchUi ui, TimeProvider? clock 
         // "waiting for the matching item row" until it timed out, every time.
         if (time.GetUtcNow() < nextActionAt) return false;
 
-        // A slow server may not open the results window for several seconds.
-        // Keep waiting after our one click; the route owns bounded read retries.
-        if (selected) return false;
-        var rows = ui.ReadRows();
+        // Selecting a freshly populated row can be dropped while its native list is
+        // still settling. Once the proxy acknowledges our target, wait for the
+        // results window; otherwise revalidate and resend one click after a short
+        // acknowledgement deadline. The route still owns the overall timeout.
+        if (selected)
+        {
+            if (result.ItemId == itemId)
+            {
+                Status = $"The listing request for {itemName} was accepted; waiting for its results window.";
+                return false;
+            }
+            if (time.GetUtcNow() < nextActionAt || activationAttempts >= MaximumActivationAttempts)
+                return false;
+            selected = false;
+        }
+        var rows = ui.ReadRows(itemId, itemName);
         var row = rows.FirstOrDefault(x => x.ItemId == itemId && x.Enabled);
         if (row is null)
         {
@@ -108,15 +122,18 @@ public sealed class MarketSearchSession(IMarketSearchUi ui, TimeProvider? clock 
                 : $"Waiting for the exact {itemName} row; {rows.Count} other/disabled row(s) are visible.";
             return false;
         }
-        if (!ui.ActivateRow(row.Index, itemId))
+        if (!ui.ActivateRow(row.Index, itemId, itemName))
         {
             Status = $"The search row for {itemName} changed; waiting for it to stabilize.";
             nextActionAt = time.GetUtcNow().AddMilliseconds(500);
             return false;
         }
+        activationAttempts++;
         selected = true;
-        nextActionAt = time.GetUtcNow();
-        Status = $"Opened the {itemName} row; waiting for live listings.";
+        nextActionAt = time.GetUtcNow().AddMilliseconds(1_200);
+        Status = activationAttempts == 1
+            ? $"Opened the {itemName} row; waiting for live listings."
+            : $"Retried the {itemName} row; waiting for live listings.";
         return false;
     }
 
@@ -126,6 +143,7 @@ public sealed class MarketSearchSession(IMarketSearchUi ui, TimeProvider? clock 
         itemId = 0;
         itemName = string.Empty;
         submitted = selected = false;
+        activationAttempts = 0;
         nextActionAt = default;
         Status = "No item search is active.";
     }
