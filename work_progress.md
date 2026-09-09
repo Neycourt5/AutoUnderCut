@@ -10,6 +10,80 @@ Build: use `C:/Users/Acour/.dotnet/dotnet.exe` (SDK 10.0.301), **not** the PATH
 `curl` against the GitHub REST API. Publishing is pre-authorized (see `AGENTS.md`).
 
 ---
+## v1.0.0.58 - portfolio quality replaces slot filling (published)
+
+User: the plugin got good at travelling, scouting and restocking, but it
+over-optimizes for occupying sale slots and buys cheap dyes because their ROI
+percentage is acceptable. Change the objective to "maintain a high-quality
+trading portfolio first, then use remaining capacity for secondary
+opportunities"; an empty slot beats a slot of junk.
+
+Root cause: `Allocate` compared complete plans with `OrderByDescending(Orders.Count)`
+first, so slot occupancy was the primary objective, and `TopUpEmptySaleSlots`
+re-ran the entire buyable list at `ProcurementFillRoiPercent` (10%). ROI and
+minimum profit per unit were the only quality gates, so absolute value per
+occupied slot was never compared at all.
+
+- `PortfolioPolicy` + `PortfolioTier`: Core is `ProcurementRule.PreferredStock`
+  (the six curated consumables, pinned by config migration and by
+  `CreateFavoriteRules`), Secondary is unpinned stock clearing the liquidity
+  floors, Opportunistic is everything else. `StockExposure` carries a tier so
+  listed and bagged stock counts toward the percentages; the denominator is the
+  whole portfolio (`PortfolioCapacitySlots`), not one shopping run.
+- Metrics per sale slot: expected resale value, expected profit, sales velocity,
+  `EstimatedDaysToSell` (quantity / salesPerDay, clamped to 0.25-30 days so a tiny
+  listing cannot manufacture a score) and `ProfitVelocity`. ROI is kept as a
+  safety guard and is now only a display/tie value.
+- `Allocate` compares plans lexicographically: core deficit, opportunistic cap,
+  core+secondary profit velocity, absolute profit, then slot occupancy. Every
+  greedy ordering is tier-major, so opportunistic stock cannot displace core.
+- `TopUpEmptySaleSlots` runs with `OpportunisticMaximumPercent = 0` and filters
+  its result; `PollListings` also refuses an opportunistic fill order and any
+  opportunistic buy once the cap is reached. The lower margin cannot buy junk.
+- Secondary value floor is 150,000 gil per slot. The first draft used 20,000,
+  which let a 40,000-gil dye stack reach Secondary and take three slots in the
+  realistic review; curated stacks carry 1.2-4.4M per slot.
+- Market intelligence is separated from purchase authorization.
+  `IMarketStatisticsProvider` / `MarketDiscoveryPolicy` propose rules from cached
+  statistics, validated against Lumina (exists, tradable, HQ capability,
+  food/medicine category). `SaddlebagStatisticsProvider` posts to
+  `docs.saddlebagexchange.com/api/ffxivrawstats` and is cached 24h; it is optional
+  and a failure never interrupts curated shopping. Scout routing moved to
+  Universalis `/api/v2/aggregated/{scope}/{ids}` (100 ids per request) instead of
+  a `listings=100&entries=100` sweep of the region - fewer requests and far less
+  payload, not more retries. Cached observations are `MarketPriceHint`, a separate
+  type from `ProcurementMarketListing`, so they cannot become a buy candidate.
+  Aggregate velocity is deliberately not merged into home demand: it is the whole
+  region's rate and would inflate home-world shopping priority.
+- Config version 36: `PreferredPortfolioTargetPercent` 75,
+  `OpportunisticPortfolioMaximumPercent` 10, `ProcurementMinimumProfitPerSaleSlot`
+  2,500, `MarketDiscoveryEnabled`, `MarketDiscoveryCacheHours` 24. Existing
+  curated rules get `PreferredStock`. `PortfolioGates.Unrestricted` is the request
+  default so a caller that has not opted in keeps plain profitability behaviour.
+- Observability: `ProcurementPlan` carries a summary and per-item decisions;
+  logs read `Caramel Popcorn HQ CORE 400 units/day, 633,501 expected profit, 53%
+  ROI, estimated turnover 0.25 days; selected: core portfolio below target`, with
+  `Preferred 11/45 target | Secondary 2 | Opportunistic 3/6 cap` on Home and a
+  decision table under Shopping.
+- Realistic twelve-slot review: nine core stacks, two high-value tinctures, one
+  dye; 19,763,100 gil for 8,206,641 expected profit, versus 7,455,699 for the old
+  slot-filling objective on the same board. 180-212% ROI dyes lose to 37-53% ROI
+  consumables.
+- Three existing tests encoded the old objective and were updated deliberately: a
+  one-unit "exceptional" flip is no longer worth a slot, and the velocity test now
+  compares profit velocity between two genuinely tradeable items. All other
+  procurement safety tests are untouched. 258 tests pass.
+- Published: commit cfd52f6, tag v1.0.0.58, Actions 34305093661 (release) and
+  34305091103 (build) both succeeded. Public latest `repo.json` and update ZIP
+  verified: installer, packaged manifest and plugin assembly all 1.0.0.58, API 15,
+  both DLLs present, ZIP 538,800 bytes. Installer URL unchanged.
+
+No FFXIV client session was exercised by this work. The Universalis aggregate and
+Saddlebag raw-statistics response shapes were confirmed against the live endpoints
+on 2026-09-08; native purchase behavior was not tested.
+
+---
+
 
 ## v1.0.0.57 - actual sales/day priority and cached shopping recovery (published)
 

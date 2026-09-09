@@ -1,4 +1,4 @@
-# Active: v1.0.0.58 portfolio-quality procurement
+# Completed: v1.0.0.58 portfolio-quality procurement
 
 The economic objective changes from "fill as many retainer slots as possible" to
 "maintain a high-quality trading portfolio first, then use remaining capacity for
@@ -89,8 +89,9 @@ reached through a stale plan.
 New Core abstractions keep cached statistics away from purchase decisions:
 
 - `IMarketStatisticsProvider` - per-item aggregates (median price, units/day).
-  Implementations: `UniversalisStatisticsProvider` (aggregated endpoint),
-  `SaddlebagStatisticsProvider` (optional, daily raw stats).
+  `SaddlebagStatisticsProvider` implements it (optional, daily raw stats).
+  `UniversalisAggregatedParser.ParseStatistics` produces the same shape from the
+  aggregate endpoint, which `UniversalisService` reads for scout hints.
 - `MarketDiscoveryService` - turns statistics into candidate rules, validated
   against local Lumina data (exists, tradable, HQ capability, food/medicine
   category), cached for `MarketDiscoveryCacheHours` (24h).
@@ -101,10 +102,11 @@ New Core abstractions keep cached statistics away from purchase decisions:
   `HomePriceMaxAgeMinutes`, and every existing guard.
 
 Universalis: `GET /api/v2/aggregated/{scope}/{ids}` (100 ids per request) replaces
-the `listings=100&entries=100` regional sweep used only for scout routing, and
-supplies velocity where the home scan has none. The home scan still uses the full
-endpoint because it needs real competing listings and sale history. This removes
-requests and payload rather than adding retries.
+the `listings=100&entries=100` regional sweep used only for scout routing. The
+home scan still uses the full endpoint because it needs real competing listings
+and sale history. This removes requests and payload rather than adding retries.
+Aggregate velocity is deliberately *not* merged into home demand: it is the whole
+region's rate, and shopping priority is judged on home-world sales.
 
 Saddlebag Exchange (`POST https://docs.saddlebagexchange.com/api/ffxivrawstats`,
 verified 2026-09-08: returns `medianNQ/HQ`, `averageNQ/HQ`, `quantitySoldNQ/HQ`,
@@ -139,7 +141,11 @@ Preferred 41/45 target | Secondary 8 | Opportunistic 5/6 cap
 - [x] Observability: logs and compact dashboard summary.
 - [x] 258 tests pass, including the ten required behaviours.
 - [x] Release build 1.0.0.58 passes with zero warnings and errors.
-- [ ] Commit, push main, tag v1.0.0.58, verify published repo.json/zip.
+- [x] Commit cfd52f6 pushed to main with annotated v1.0.0.58.
+- [x] Release Actions 34305093661 and Build 34305091103 succeeded.
+- [x] Downloaded public latest repo.json and update ZIP: installer, packaged
+      manifest and plugin assembly all 1.0.0.58, API 15; both DLLs present.
+      ZIP 538,800 bytes. Existing in-game installer URL is unchanged.
 
 ## Realistic planner review
 A twelve-slot run with four curated consumables, one unpinned high-value tincture,
