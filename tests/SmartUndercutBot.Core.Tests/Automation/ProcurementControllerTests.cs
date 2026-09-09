@@ -1384,6 +1384,49 @@ public sealed class ProcurementControllerTests
     }
 
     [Fact]
+    public void ARareDyeFlaggedForSnipingIsPricedOnEveryWorldDespiteThinHomeSales()
+    {
+        // Jet Black and Pure White barely trade at home, so the volume ordering and
+        // the rotation both bury them - yet a far world underpricing one is exactly
+        // the deal worth catching. AlwaysScout puts them in the per-world block
+        // without making them core portfolio stock.
+        using var run = new Route(priority: true);
+        run.Game.AutomaticWorldArrival = true;
+        run.Config.Current.PriorityWorldsPerTrip = 31;
+        // The fake board answers far slower per search than the live client, so a
+        // full-width stop would exhaust the trip clock around world 23. Four items
+        // a stop still carries the whole two-item block plus rotation.
+        run.Config.Current.PriorityMinutesPerTrip = 480;
+        run.Config.Current.PriorityItemsPerWorld = 4;
+        run.Config.Current.ProcurementRules.Clear();
+        run.Config.Current.ProcurementRules.Add(new()
+        {
+            ItemId = 1, ItemName = "Gemdraught", PreferredStock = true, HuntOnTour = true, AlwaysScout = true,
+        });
+        run.Config.Current.ProcurementRules.Add(new()
+        {
+            ItemId = 2, ItemName = "General-purpose Jet Black Dye", HuntOnTour = true, AlwaysScout = true,
+            MinimumWeeklyUnitsSold = 5_000,
+        });
+        run.Config.Current.ProcurementRules.AddRange(Enumerable.Range(3, 40)
+            .Select(i => new ProcurementRule { ItemId = (uint)i, ItemName = $"Materia {i}" }));
+        run.Game.DemandMarkets = Enumerable.Range(1, 42).Select(i => new ProcurementMarketItem((uint)i, $"Item {i}", [],
+            [new(2000, 100, false, DateTimeOffset.UtcNow)])).ToArray();
+        run.Game.LiveProvider = (_, item) => [new(0, item, 10, 20, 2000, 99, false, 0)];
+        run.Controller.RunNow();
+        for (var i = 0; i < 20_000 && run.Controller.IsActive; i++) run.Tick(2);
+
+        var away = run.Game.Searches.Where(x => x.World != "Siren").GroupBy(x => x.World).ToArray();
+        // Every away world, and both block items on each of them.
+        Assert.Equal(31, away.Length);
+        Assert.All(away, world =>
+        {
+            Assert.Contains(1u, world.Select(x => x.Item));
+            Assert.Contains(2u, world.Select(x => x.Item));
+        });
+    }
+
+    [Fact]
     public void UnansweredSearchRetriesWithinSecondsAndCanRecoverWithoutAPurchase()
     {
         using var run = new Route(priority: true);
@@ -1473,6 +1516,10 @@ public sealed class ProcurementControllerTests
             // for" thresholds. The holds have their own tests; opt these out.
             Config.Current.ShoppingTripMinimumFreeSaleSlots = 0;
             Config.Current.ShoppingTripMinimumGil = 0;
+            // Most cases here exercise trip mechanics, not circuit length, and the
+            // shipped default now sweeps all 31 away worlds. Tests that assert a
+            // full circuit set this back explicitly.
+            Config.Current.PriorityWorldsPerTrip = 8;
             Config.Current.ProcurementRules.Add(new()
             {
                 ItemId = 1, ItemName = "Popcorn", AllowHighQuality = true, RequireHighQuality = true, HuntOnTour = true,

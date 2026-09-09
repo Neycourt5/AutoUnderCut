@@ -7,7 +7,7 @@ namespace SmartUndercutBot;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 39;
+    public int Version { get; set; } = 40;
     public bool AutomationEnabled { get; set; }
     public bool ProcessAllRetainers { get; set; } = true;
     public bool RepeatBellRuns { get; set; }
@@ -54,8 +54,11 @@ public sealed class Configuration : IPluginConfiguration
     public bool MarketDiscoveryEnabled { get; set; }
     public int MarketDiscoveryCacheHours { get; set; } = 24;
     public string MarketDiscoveryRegion { get; set; } = "NA";
-    public int PriorityWorldsPerTrip { get; set; } = 8;
-    public int PriorityMinutesPerTrip { get; set; } = 45;
+    // One circuit covers every away world. Cross-data-center travel is the
+    // expensive part of a trip, so a thorough sweep beats four shallow ones; the
+    // route still returns early when the bags or the wallet run out.
+    public int PriorityWorldsPerTrip { get; set; } = 31;
+    public int PriorityMinutesPerTrip { get; set; } = 180;
     // The same freshness limit applies to reusing a quote and approving a buy.
     public int HomePriceMaxAgeMinutes { get; set; } = 30;
     // The home price is the resale anchor, so it is kept fresh - and a retainer pass
@@ -88,9 +91,10 @@ public sealed class Configuration : IPluginConfiguration
     public string PriorityNextWorld { get; set; } = string.Empty;
     public uint PriorityNextItem { get; set; }
     public List<string> PriorityScoutRoute { get; set; } = [];
-    // Six of these are the reserved food and potion block, so the rest is what is
-    // left for rotating the secondary lines. Eight left only two.
-    public int PriorityItemsPerWorld { get; set; } = 12;
+    // Eight of these are the reserved snipe block - six consumables and the two
+    // rare dyes - so the rest is what is left for the busiest lines and the
+    // rotation. Eight per stop left none at all.
+    public int PriorityItemsPerWorld { get; set; } = 14;
     // Empty means "use the market-board command", which is the original behaviour.
     public string SummoningBellTravelCommand { get; set; } = string.Empty;
     public bool LiveWorldStockHuntEnabled { get; set; } = true;
@@ -141,6 +145,13 @@ public sealed class Configuration : IPluginConfiguration
 
     // "General-purpose" and "Wide-Spectrum" are the high-volume lines; both are
     // written with and without a hyphen in the game's own text.
+    // Rare dyes whose away-world listings are occasionally far below the home
+    // price. Low volume, so the rotation reaches them seldom; worth pricing every
+    // stop precisely because the good listings are rare and disappear fast.
+    public static bool IsSnipeDyeName(string name) =>
+        name.Contains("Jet Black Dye", StringComparison.OrdinalIgnoreCase) ||
+        name.Contains("Pure White Dye", StringComparison.OrdinalIgnoreCase);
+
     private static bool IsMassMarketDyeName(string name) =>
         name.EndsWith(" Dye", StringComparison.OrdinalIgnoreCase) &&
         (name.StartsWith("General-purpose ", StringComparison.OrdinalIgnoreCase) ||
@@ -484,7 +495,24 @@ public sealed class Configuration : IPluginConfiguration
             ShoppingTripMinimumGil = 1_000_000;
             Version = 39;
         }
-        Version = Math.Max(Version, 39);
+        if (Version < 40)
+        {
+            // Price the lines worth sniping on every world instead of waiting for
+            // the rotation, and walk the whole circuit rather than two stops per
+            // data center, so a deal on a far world is actually found.
+            foreach (var rule in ProcurementRules.Where(x => x.ItemId != 0 && !x.LiquidateOnly))
+                if (rule.PreferredStock || ResaleStockPolicy.IsCuratedConsumable(rule.ItemName) ||
+                    IsSnipeDyeName(rule.ItemName))
+                    (rule.AlwaysScout, rule.HuntOnTour) = (true, true);
+            if (PriorityItemsPerWorld == 12)
+                PriorityItemsPerWorld = 14;
+            if (PriorityWorldsPerTrip == 8)
+                PriorityWorldsPerTrip = 31;
+            if (PriorityMinutesPerTrip == 45)
+                PriorityMinutesPerTrip = 180;
+            Version = 40;
+        }
+        Version = Math.Max(Version, 40);
         PreferredPortfolioTargetPercent = Math.Clamp(PreferredPortfolioTargetPercent, 0m, 100m);
         OpportunisticPortfolioMaximumPercent = Math.Clamp(OpportunisticPortfolioMaximumPercent, 0m, 100m);
         ProcurementMinimumProfitPerSaleSlot = Math.Min(ProcurementMinimumProfitPerSaleSlot, 100_000_000u);

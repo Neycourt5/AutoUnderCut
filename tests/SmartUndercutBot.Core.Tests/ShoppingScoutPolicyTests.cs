@@ -100,6 +100,40 @@ public sealed class ShoppingScoutPolicyTests
         Assert.Equal(8, selected.Count);
     }
 
+    private static readonly string[] NorthAmerica =
+    [
+        "Adamantoise", "Cactuar", "Faerie", "Gilgamesh", "Jenova", "Midgardsormr", "Sargatanas", "Siren",
+        "Behemoth", "Excalibur", "Exodus", "Famfrit", "Hyperion", "Lamia", "Leviathan", "Ultros",
+        "Balmung", "Brynhildr", "Coeurl", "Diabolos", "Goblin", "Malboro", "Mateus", "Zalera",
+        "Cuchulainn", "Golem", "Halicarnassus", "Kraken", "Maduin", "Marilith", "Rafflesia", "Seraph",
+    ];
+
+    [Fact]
+    public void OneCircuitReachesEveryAwayWorldExactlyOnce()
+    {
+        // The reported miss: only a couple of Primal and Crystal worlds were ever
+        // visited, so a deal on a far world could not be found at all.
+        var route = ShoppingScoutPolicy.BuildRoute(NorthAmerica, "Siren", new Dictionary<string, decimal>());
+
+        Assert.Equal(31, route.Count);
+        Assert.Equal(31, route.Distinct(StringComparer.OrdinalIgnoreCase).Count());
+        Assert.DoesNotContain("Siren", route);
+        Assert.All(NorthAmerica.Where(w => w != "Siren"), w => Assert.Contains(w, route));
+    }
+
+    [Fact]
+    public void AShortenedCircuitStillSamplesAllFourDataCenters()
+    {
+        // A trip ends early whenever the bags or the wallet run out, so the worlds
+        // reached first must not all come from one data center - otherwise the
+        // deals compared before buying are drawn from a single corner of the region.
+        var route = ShoppingScoutPolicy.BuildRoute(NorthAmerica, "Siren", new Dictionary<string, decimal>());
+        var centreOf = NorthAmerica.Select((w, i) => (w, dc: i / 8))
+            .ToDictionary(x => x.w, x => x.dc, StringComparer.OrdinalIgnoreCase);
+
+        Assert.Equal([0, 1, 2, 3], route.Take(8).Select(w => centreOf[w]).Distinct().Order());
+    }
+
     [Fact]
     public void ItemsAreNeverPricedTwiceOnOneWorld()
     {

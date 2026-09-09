@@ -96,6 +96,11 @@ public sealed class ProcurementRule
     // worlds visited - so only stock explicitly marked for it is walked, in order.
     public bool HuntOnTour { get; set; }
     public int TourPriority { get; set; } = 5;
+    // Priced on every world of the circuit rather than waiting for the rotation to
+    // reach it. For the lines worth sniping: the curated consumables, and the rare
+    // dyes whose away-world listings are occasionally far below the home price.
+    // Unlike PreferredStock this says nothing about portfolio tiering or budget.
+    public bool AlwaysScout { get; set; }
     public ProcurementRule Clone() => (ProcurementRule)MemberwiseClone();
 }
 

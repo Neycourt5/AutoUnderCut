@@ -1780,6 +1780,14 @@ public sealed partial class ProcurementController : IDisposable
     private bool IsPreferredStock(uint itemId) => configuration.Current.ProcurementRules
         .Any(x => x.ItemId == itemId && x.PreferredStock && !x.LiquidateOnly);
 
+    /// <summary>
+    /// Priced on every world of the circuit: the preferred stock plus anything
+    /// flagged for sniping, such as the rare dyes. This only decides what gets
+    /// looked at - tiering and the spending cap still follow PreferredStock alone.
+    /// </summary>
+    private bool IsAlwaysScouted(uint itemId) => configuration.Current.ProcurementRules
+        .Any(x => x.ItemId == itemId && (x.PreferredStock || x.AlwaysScout) && !x.LiquidateOnly);
+
     // Stock the planner must count against its per-item limits: stacks already
     // listed on the retainers plus everything held in the bags. Without this a
     // cheap item is re-bought every trip until it crowds out everything else.

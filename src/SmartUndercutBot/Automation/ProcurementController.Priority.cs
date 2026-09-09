@@ -108,11 +108,11 @@ public sealed partial class ProcurementController
         stockHuntWorlds = new[] { homeWorld }.Concat(config.PriorityScoutRoute.Skip(Math.Max(0, resume))).ToList();
         scoutItems.Clear();
         var limit = Math.Max(1, config.PriorityItemsPerWorld);
-        // The food and potion block is checked on every world; only the secondary
-        // lines rotate. Rotating the whole list is what let the window walk past
-        // the gemdraughts entirely by the third stop of a circuit.
-        var preferredItems = stockHuntRules.Where(r => r.PreferredStock).Select(r => r.ItemId).ToArray();
-        var secondaryItems = stockHuntRules.Where(r => !r.PreferredStock).Select(r => r.ItemId).ToArray();
+        // The snipe block - food, potions and the rare dyes - is checked on every
+        // world; only the secondary lines rotate. Rotating the whole list is what
+        // let the window walk past the gemdraughts by the third stop of a circuit.
+        var preferredItems = stockHuntRules.Where(IsScoutBlock).Select(r => r.ItemId).ToArray();
+        var secondaryItems = stockHuntRules.Where(r => !IsScoutBlock(r)).Select(r => r.ItemId).ToArray();
         for (var i = 0; i < config.PriorityScoutRoute.Count; i++)
         {
             var world = config.PriorityScoutRoute[i];
@@ -132,8 +132,8 @@ public sealed partial class ProcurementController
         stockHuntWorlds = new[] { homeWorld }.Concat(stockHuntWorlds.Skip(1)
             .Where(w => scoutItems[w].Any(item => !ScoutKnowledgeIsFresh(w, item)))).ToList();
         log.Add(AutomationLogLevel.Information,
-            $"REGIONAL SCOUT: compared {hints.Length} cached offers; {preferredItems.Length} food and potion line(s) " +
-            $"are priced on every world. First stops " +
+            $"REGIONAL SCOUT: compared {hints.Length} cached offers; {preferredItems.Length} snipe line(s) " +
+            $"are priced on every world. {stockHuntWorlds.Count - 1} world(s) this circuit, starting " +
             $"{string.Join(" > ", stockHuntWorlds.Skip(1).Take(config.PriorityWorldsPerTrip))}. " +
             "Cached offers only choose where to look; purchasing requires live observations.");
         configuration.Save();
@@ -145,14 +145,18 @@ public sealed partial class ProcurementController
     private TimeSpan ScoutKnowledgeLife =>
         TimeSpan.FromHours(Math.Max(1, configuration.Current.ScoutKnowledgeMaxAgeHours));
 
+    /// <summary>Rules priced on every world rather than waiting for the rotation.</summary>
+    private static bool IsScoutBlock(ProcurementRule rule) => rule.PreferredStock || rule.AlwaysScout;
+
     /// <summary>
-    /// Food and potions are re-read on every visit. They are what the portfolio is
-    /// built on and their prices move, so a day-old reading is not a reason to skip
-    /// them - and because every world's scan carries the block, no world is dropped
-    /// from the circuit for being "already known".
+    /// The snipe block is re-read on every visit. It is what the portfolio is built
+    /// on plus the rare dyes worth catching, their prices move, and a good listing
+    /// disappears fast - so a day-old reading is not a reason to skip them. Because
+    /// every world's scan carries the block, no world is dropped from the circuit
+    /// for being "already known" either.
     /// </summary>
     private bool ScoutKnowledgeIsFresh(string world, uint item) =>
-        !IsPreferredStock(item) &&
+        !IsAlwaysScouted(item) &&
         scoutObservedAt.TryGetValue((world, item), out var at) &&
         timeProvider.GetUtcNow() - at <= ScoutKnowledgeLife;
 
@@ -293,9 +297,10 @@ public sealed partial class ProcurementController
         var config = configuration.Current;
         stockHuntRules = config.ProcurementRules.Where(x => x.Enabled && x.ItemId != 0 && !x.LiquidateOnly)
             .DistinctBy(x => x.ItemId)
-            // Preferred food and potions are never dropped for a thin sales week.
+            // The snipe block is never dropped for a thin sales week - a rare dye
+            // barely trades at home yet is exactly what a far world underprices.
             // Everything else has to show the demand to earn a price check.
-            .Where(rule => rule.PreferredStock || new[] { false, true }.Any(quality =>
+            .Where(rule => IsScoutBlock(rule) || new[] { false, true }.Any(quality =>
                 ResaleStockPolicy.BuyableQuality(rule, quality, config.BuyHighQualityOnly) &&
                 markets.Where(m => m.ItemId == rule.ItemId).SelectMany(m => m.RecentSales)
                     .Where(s => s.IsHighQuality == quality && s.PricePerUnit > 0 &&
@@ -303,7 +308,7 @@ public sealed partial class ProcurementController
                     .Sum(s => (long)s.Quantity) >= Math.Max(1, rule.MinimumWeeklyUnitsSold)))
             // The scan walks this order, so the block comes first on every world:
             // a trip cut short by the clock or a bad board still priced the food.
-            .OrderBy(x => x.PreferredStock ? 0 : 1)
+            .OrderBy(x => IsScoutBlock(x) ? 0 : 1)
             .ThenByDescending(RuleSalesPerDay)
             .ThenBy(x => x.TourPriority)
             .ThenBy(x => x.ItemName, StringComparer.OrdinalIgnoreCase).ToList();
@@ -343,8 +348,8 @@ public sealed partial class ProcurementController
         market.CloseRetainerList();
         log.Add(AutomationLogLevel.Information,
             $"PRIORITY SHOPPING: check {stockHuntRules.Count} flips on {homeWorld}, then Aether -> Primal -> Crystal -> Dynamis. " +
-            $"Check the {stockHuntRules.Count(r => r.PreferredStock)} food and potion line(s) on every world plus " +
-            $"rotating flips, up to {config.PriorityItemsPerWorld} items per away world, two worlds per data center. " +
+            $"Check the {stockHuntRules.Count(IsScoutBlock)} snipe line(s) on every world plus " +
+            $"rotating flips, up to {config.PriorityItemsPerWorld} items per away world, two stops per data center per wave. " +
             $"Compare after {config.PriorityWorldsPerTrip} worlds or {config.PriorityMinutesPerTrip} minutes; buy early only at 100%+ net ROI.");
         TravelToCurrentWorld();
     }

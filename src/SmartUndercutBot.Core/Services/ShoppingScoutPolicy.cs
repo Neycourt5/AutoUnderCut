@@ -4,11 +4,20 @@ namespace SmartUndercutBot.Core.Services;
 
 public static class ShoppingScoutPolicy
 {
-    // Two stops per data center per wave: reach all four before working through
-    // the remaining worlds. Every world still appears exactly once per circuit.
+    /// <summary>
+    /// One circuit, every away world, exactly once. Two stops per data center per
+    /// wave, so the four are reached in turn before the remaining worlds.
+    ///
+    /// The interleave is deliberate and worth its cross-data-center travel: a trip
+    /// ends early whenever the bags or the wallet run out, and when that happens
+    /// the deals compared are still drawn from all four data centers rather than
+    /// from whichever one the sweep happened to start in.
+    /// </summary>
     public static IReadOnlyList<string> BuildRoute(IReadOnlyList<string> worlds, string home,
         IReadOnlyDictionary<string, decimal> scores)
     {
+        ArgumentNullException.ThrowIfNull(worlds);
+        ArgumentNullException.ThrowIfNull(scores);
         var centers = worlds.Chunk(8).Select(dc => dc
             .Where(w => !w.Equals(home, StringComparison.OrdinalIgnoreCase))
             .OrderByDescending(w => scores.GetValueOrDefault(w)).ToArray()).ToArray();

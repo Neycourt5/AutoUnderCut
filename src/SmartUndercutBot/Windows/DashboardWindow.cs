@@ -118,7 +118,7 @@ public sealed class DashboardWindow : Window
         var config = configuration.Current;
         ImGui.TextWrapped("Check retainers > fill from bags > buy good deals > return home and list > repeat.");
         if (config.PriorityShoppingEnabled)
-            ImGui.TextWrapped("Shopping: compare regional prices, then scout two worlds each on Aether > Primal > Crystal > Dynamis. " +
+            ImGui.TextWrapped("Shopping: compare regional prices, then sweep every world, two stops at a time across Aether > Primal > Crystal > Dynamis. " +
                               $"Every stop prices the food and potions first, then rotating flips, up to {config.PriorityItemsPerWorld} items. " +
                               "Compare ordinary deals before buying; 100%+ expected return after fees can buy immediately. " +
                               "Return home to list and collect, then resume the remaining worlds. Use nearby boards and bells before teleporting.");
@@ -907,7 +907,7 @@ public sealed class DashboardWindow : Window
         if (configuration.Current.PriorityShoppingEnabled)
             ImGui.TextWrapped("Scout first: compare regional prices, then price the curated food and potions on every world - they are " +
                 $"never rotated out - plus promising or rotating flips, up to {configuration.Current.PriorityItemsPerWorld} items per world. " +
-                "Two stops per data center: Aether > Primal > Crystal > Dynamis. Ordinary deals are compared before a buying pass; " +
+                "One circuit covers every world, two stops at a time across Aether > Primal > Crystal > Dynamis, so a shortened trip still compares all four. Ordinary deals are compared before a buying pass; " +
                 "only deals with at least 100% expected return after fees are bought immediately. All purchases still need live price, demand, stock and budget checks. " +
                 $"Next route stop: {((string.IsNullOrEmpty(configuration.Current.PriorityNextWorld)) ? "Aether" : configuration.Current.PriorityNextWorld)}.");
         DrawPortfolioSummary();

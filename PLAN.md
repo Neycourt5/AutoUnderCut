@@ -1,4 +1,48 @@
-# Current: v1.0.0.63 hold for a worthwhile trip, and fix the net worth graph
+# Current: v1.0.0.64 sweep every world, and snipe the rare dyes
+
+User report against v1.0.0.63: only a couple of Primal and Crystal worlds were
+visited. Every server should be checked so a far-world deal can be sniped, and
+Jet Black and Pure White dye should be searched because they occasionally list
+far below the home price.
+
+## What was actually wrong
+
+`BuildRoute` was never the problem: its wave interleave already covers all 31
+away worlds exactly once per circuit. `PriorityWorldsPerTrip` was 8, so a trip
+stopped after two stops per data center and the saved cursor resumed there next
+time. Four trips covered the region, which with the new trip holds could be a
+very long time.
+
+Both dyes were already configured, enabled and on the tour. They are low volume,
+so the volume ordering and the rotation buried them: `MinimumWeeklyUnitsSold`
+could also drop them from the hunt list entirely on a thin week.
+
+## Work checklist
+
+- [x] `PriorityWorldsPerTrip` 8 -> 31 and `PriorityMinutesPerTrip` 45 -> 180, so
+      one circuit sweeps every away world. The trip still returns early when the
+      bags or the wallet run out, and the cursor still resumes.
+- [x] New `AlwaysScout` rule flag: priced on every world of the circuit and never
+      dropped for a thin sales week. Unlike `PreferredStock` it says nothing about
+      portfolio tiering or the spending cap.
+- [x] Migration seeds it for the curated consumables and for Jet Black and Pure
+      White dye, and turns their tour flag on.
+- [x] `PriorityItemsPerWorld` 12 -> 14, because the block is now eight items.
+- [x] Considered grouping the route by data center to save cross-region travel,
+      and rejected it: a trip that ends early on bag space would then compare
+      deals from only the data center it started in. The interleave is kept.
+- [x] 298 Release tests pass; the API 15 plugin builds with 0 warnings, 0 errors.
+- [ ] Commit and push v1.0.0.64, publish the annotated tag, wait for both
+      workflows, and verify public `repo.json` and `SmartUndercutBot.zip`.
+
+## Validation boundary
+
+A full 31-world circuit has not been run in game. The fake board answers far
+slower per search than the live client, so the circuit test lowers the per-stop
+width to finish inside the trip clock; live timing is ~1.5-4 minutes per world,
+which fits 180 minutes with headroom but has not been observed end to end.
+
+# Completed: v1.0.0.63 hold for a worthwhile trip, and fix the net worth graph
 
 User direction while watching v1.0.0.62: diversification matters less now that
 undercutting runs every 5-10 minutes, so do not take a trip for a couple of
@@ -29,8 +73,9 @@ and back on every bag pass.
       stops sawtoothing, and the graph gained a Clear history button because an
       existing history keeps its bad points.
 - [x] 295 Release tests pass; the API 15 plugin builds with 0 warnings, 0 errors.
-- [ ] Commit and push v1.0.0.63, publish the annotated tag, wait for both
-      workflows, and verify public `repo.json` and `SmartUndercutBot.zip`.
+- [x] Commit d3c642c pushed to main with annotated v1.0.0.63. Release Actions
+      34389308832 and Build 34389302721 both succeeded. Public latest repo.json
+      and ZIP verified at 1.0.0.63, API 15, both DLLs present, ZIP 548,144 bytes.
 
 ## Validation boundary
 
