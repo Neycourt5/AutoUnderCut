@@ -122,17 +122,38 @@ public sealed class ShoppingScoutPolicyTests
     }
 
     [Fact]
-    public void AShortenedCircuitStillSamplesAllFourDataCenters()
+    public void EachDataCenterIsFinishedBeforeTheNextOneIsEntered()
     {
-        // A trip ends early whenever the bags or the wallet run out, so the worlds
-        // reached first must not all come from one data center - otherwise the
-        // deals compared before buying are drawn from a single corner of the region.
+        // Crossing data centers means a trip out through character selection, so the
+        // circuit pays that three times rather than once every other world.
         var route = ShoppingScoutPolicy.BuildRoute(NorthAmerica, "Siren", new Dictionary<string, decimal>());
-        var centreOf = NorthAmerica.Select((w, i) => (w, dc: i / 8))
-            .ToDictionary(x => x.w, x => x.dc, StringComparer.OrdinalIgnoreCase);
+        var visited = route.Select(w => CentreOf[w]).ToArray();
 
-        Assert.Equal([0, 1, 2, 3], route.Take(8).Select(w => centreOf[w]).Distinct().Order());
+        Assert.Equal(4, visited.Distinct().Count());
+        Assert.Equal(3, visited.Zip(visited.Skip(1)).Count(x => x.First != x.Second));
+        // The character's own data center costs no transfer, so it goes first.
+        Assert.Equal(0, visited[0]);
     }
+
+    [Fact]
+    public void TheDataCentersWorthTheTripAreVisitedFirst()
+    {
+        // Within the home data center and between the away ones, the cached hints
+        // decide the order, so an early finish has spent its stops on the margin.
+        var route = ShoppingScoutPolicy.BuildRoute(NorthAmerica, "Siren",
+            new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["Seraph"] = 900m, ["Coeurl"] = 500m, ["Faerie"] = 50m,
+            });
+
+        Assert.Equal("Faerie", route[0]);
+        Assert.Equal([0, 3, 2, 1], route.Select(w => CentreOf[w]).Distinct());
+        Assert.Equal("Seraph", route[7]);
+    }
+
+    private static readonly Dictionary<string, int> CentreOf = NorthAmerica
+        .Select((w, i) => (w, dc: i / 8))
+        .ToDictionary(x => x.w, x => x.dc, StringComparer.OrdinalIgnoreCase);
 
     [Fact]
     public void ItemsAreNeverPricedTwiceOnOneWorld()

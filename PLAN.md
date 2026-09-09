@@ -1,4 +1,66 @@
-# Current: v1.0.0.64 sweep every world, and snipe the rare dyes
+# Current: v1.0.0.65 skip congested worlds, and tour one data center at a time
+
+User report against v1.0.0.64: the circuit still seemed to reach only a couple of
+servers per data center, "obviously sometimes a world can be congested, just skip
+it if that's the case, otherwise visit every world to check prices". Then, once
+coverage looked right: it makes "weird data center jumps rather than just do the
+whole data center one at a time".
+
+## What was actually wrong
+
+Every travel failure was funnelled into `SkipStockHuntWorld`, which counts toward
+`StopUnproductiveTour`. Two worlds in a row that could not be reached - exactly
+what congestion looks like, and congestion clusters - ended the entire circuit,
+however many worlds were left. Worse, that stop happened *before* the world index
+advanced, so `PriorityNextWorld` still pointed at the world that had just failed:
+the next trip resumed onto it, failed there again, and stalled at the same wall
+for good. A refused visit also burned the full ten-minute travel deadline first.
+
+The data center jumps were the wave interleave in `BuildRoute` (two stops per
+data center, four waves). It was deliberate - a trip that ends early then still
+compares deals region-wide - but a crossing every second world goes out through
+character selection each time, and that is most of the trip's clock.
+
+## Work checklist
+
+- [x] New `SkipUnreachableWorld`: congestion, a full world, a refused visit and an
+      excluded world skip the stop and carry on. They never count toward
+      `StopUnproductiveTour`, which now only measures worlds that were *reached*
+      and returned no completed item search.
+- [x] Each unreachable world is queued once behind the rest of the circuit (in the
+      saved route as well), so a world that was busy at 8pm is still priced later
+      in the same circuit rather than waiting for the next one.
+- [x] A guard against the other failure: `UnreachableWorldLimit` = 6 in a row means
+      world travel itself is unavailable. In priority mode that still finishes
+      through `FinishPriorityScouting`, so the trip buys what it did find.
+- [x] Recognise a refused visit in about a minute - Lifestream idle, character
+      loaded, still on the world we left - instead of waiting out the 600s travel
+      deadline for every congested destination.
+- [x] The cursor now advances past a failed world *before* the tour may stop, in
+      both `SkipStockHuntWorld` and `FinishStockHuntWorld`. That is the stall fix.
+- [x] `BuildRoute` groups the circuit by data center: the character's own first
+      (no transfer), then the rest in cached-hint score order, worlds inside each
+      ordered the same way. Three crossings per circuit instead of ~15.
+- [x] Config migration 41 clears the saved route and cursor, because a stored
+      route is only rebuilt when its set of worlds changes and would otherwise
+      keep the old interleave for the rest of the circuit.
+- [x] 301 Release tests pass; the API 15 plugin builds with 0 warnings, 0 errors.
+- [ ] Commit and push v1.0.0.65, publish the annotated tag, wait for the release
+      workflow, and verify public `repo.json` and `SmartUndercutBot.zip`.
+
+## Trade-off accepted
+
+Grouping by data center is what the user asked for and it buys back most of the
+travel time, but a trip that ends early on bag space now compares deals from the
+data centers it reached rather than a sample of all four. Ordering the away data
+centers by hint score keeps the early stops on the worlds worth visiting.
+
+## Validation boundary
+
+No native game actions were exercised this session; congestion is simulated in
+the fixtures (travel accepted, character never leaves) rather than observed.
+
+# Completed: v1.0.0.64 sweep every world, and snipe the rare dyes
 
 User report against v1.0.0.63: only a couple of Primal and Crystal worlds were
 visited. Every server should be checked so a far-world deal can be sniped, and
@@ -32,7 +94,7 @@ could also drop them from the hunt list entirely on a thin week.
       and rejected it: a trip that ends early on bag space would then compare
       deals from only the data center it started in. The interleave is kept.
 - [x] 298 Release tests pass; the API 15 plugin builds with 0 warnings, 0 errors.
-- [ ] Commit and push v1.0.0.64, publish the annotated tag, wait for both
+- [x] Commit and push v1.0.0.64, publish the annotated tag, wait for both
       workflows, and verify public `repo.json` and `SmartUndercutBot.zip`.
 
 ## Validation boundary

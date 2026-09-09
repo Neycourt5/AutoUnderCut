@@ -134,7 +134,7 @@ public sealed partial class ProcurementController
         log.Add(AutomationLogLevel.Information,
             $"REGIONAL SCOUT: compared {hints.Length} cached offers; {preferredItems.Length} snipe line(s) " +
             $"are priced on every world. {stockHuntWorlds.Count - 1} world(s) this circuit, starting " +
-            $"{string.Join(" > ", stockHuntWorlds.Skip(1).Take(config.PriorityWorldsPerTrip))}. " +
+            $"{string.Join(" > ", stockHuntWorlds.Skip(1).Take(6))}{(stockHuntWorlds.Count > 7 ? " > ..." : string.Empty)}. " +
             "Cached offers only choose where to look; purchasing requires live observations.");
         configuration.Save();
     }
@@ -334,6 +334,8 @@ public sealed partial class ProcurementController
         purchasedSlotsByItem.Clear();
         stockHuntWorldIndex = stockHuntRuleIndex = 0;
         successfulLiveScans = failedLiveScans = consecutiveFailedWorlds = worldSuccessfulScans = 0;
+        consecutiveUnreachableWorlds = 0;
+        deferredWorlds.Clear();
         priorityWorldsCompleted = 0;
         priorityDepartedAt = timeProvider.GetUtcNow();
         currentStockHuntRule = null;
@@ -347,9 +349,10 @@ public sealed partial class ProcurementController
         ownsRetainerPause = true;
         market.CloseRetainerList();
         log.Add(AutomationLogLevel.Information,
-            $"PRIORITY SHOPPING: check {stockHuntRules.Count} flips on {homeWorld}, then Aether -> Primal -> Crystal -> Dynamis. " +
+            $"PRIORITY SHOPPING: check {stockHuntRules.Count} flips on {homeWorld}, then one data center at a time, " +
+            "starting with this character's own. " +
             $"Check the {stockHuntRules.Count(IsScoutBlock)} snipe line(s) on every world plus " +
-            $"rotating flips, up to {config.PriorityItemsPerWorld} items per away world, two stops per data center per wave. " +
+            $"rotating flips, up to {config.PriorityItemsPerWorld} items per away world. " +
             $"Compare after {config.PriorityWorldsPerTrip} worlds or {config.PriorityMinutesPerTrip} minutes; buy early only at 100%+ net ROI.");
         TravelToCurrentWorld();
     }

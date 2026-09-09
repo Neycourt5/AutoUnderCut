@@ -5,23 +5,29 @@ namespace SmartUndercutBot.Core.Services;
 public static class ShoppingScoutPolicy
 {
     /// <summary>
-    /// One circuit, every away world, exactly once. Two stops per data center per
-    /// wave, so the four are reached in turn before the remaining worlds.
+    /// One circuit, every away world, exactly once, one data center at a time.
     ///
-    /// The interleave is deliberate and worth its cross-data-center travel: a trip
-    /// ends early whenever the bags or the wallet run out, and when that happens
-    /// the deals compared are still drawn from all four data centers rather than
-    /// from whichever one the sweep happened to start in.
+    /// A hop inside a data center is a short transfer; a hop between them goes out
+    /// through character selection and back. Finishing each data center before
+    /// moving on pays that three times per circuit instead of once every other
+    /// world. The character's own data center goes first because it costs no
+    /// transfer at all, the rest follow in the order the cached hints rate them,
+    /// and the worlds inside each one are ordered the same way - so a trip that
+    /// ends early on bag space has still spent its stops where the value was.
     /// </summary>
     public static IReadOnlyList<string> BuildRoute(IReadOnlyList<string> worlds, string home,
         IReadOnlyDictionary<string, decimal> scores)
     {
         ArgumentNullException.ThrowIfNull(worlds);
         ArgumentNullException.ThrowIfNull(scores);
-        var centers = worlds.Chunk(8).Select(dc => dc
-            .Where(w => !w.Equals(home, StringComparison.OrdinalIgnoreCase))
-            .OrderByDescending(w => scores.GetValueOrDefault(w)).ToArray()).ToArray();
-        return Enumerable.Range(0, 4).SelectMany(wave => centers.SelectMany(dc => dc.Skip(wave * 2).Take(2))).ToArray();
+        return worlds.Chunk(8)
+            .Select(dc => (
+                Home: dc.Any(w => w.Equals(home, StringComparison.OrdinalIgnoreCase)),
+                Worlds: dc.Where(w => !w.Equals(home, StringComparison.OrdinalIgnoreCase))
+                    .OrderByDescending(w => scores.GetValueOrDefault(w)).ToArray()))
+            .OrderByDescending(dc => dc.Home)
+            .ThenByDescending(dc => dc.Worlds.Sum(w => scores.GetValueOrDefault(w)))
+            .SelectMany(dc => dc.Worlds).ToArray();
     }
 
     /// <summary>

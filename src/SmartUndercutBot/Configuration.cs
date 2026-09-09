@@ -7,7 +7,7 @@ namespace SmartUndercutBot;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 40;
+    public int Version { get; set; } = 41;
     public bool AutomationEnabled { get; set; }
     public bool ProcessAllRetainers { get; set; } = true;
     public bool RepeatBellRuns { get; set; }
@@ -512,7 +512,18 @@ public sealed class Configuration : IPluginConfiguration
                 PriorityMinutesPerTrip = 180;
             Version = 40;
         }
-        Version = Math.Max(Version, 40);
+        if (Version < 41)
+        {
+            // The circuit now finishes a data center before crossing to the next.
+            // A saved route holds the old interleave and is only rebuilt when its
+            // set of worlds changes, so drop it - and the cursor into it - and let
+            // the next trip lay out a fresh circuit.
+            PriorityScoutRoute?.Clear();
+            PriorityNextWorld = string.Empty;
+            PriorityNextItem = 0;
+            Version = 41;
+        }
+        Version = Math.Max(Version, 41);
         PreferredPortfolioTargetPercent = Math.Clamp(PreferredPortfolioTargetPercent, 0m, 100m);
         OpportunisticPortfolioMaximumPercent = Math.Clamp(OpportunisticPortfolioMaximumPercent, 0m, 100m);
         ProcurementMinimumProfitPerSaleSlot = Math.Min(ProcurementMinimumProfitPerSaleSlot, 100_000_000u);

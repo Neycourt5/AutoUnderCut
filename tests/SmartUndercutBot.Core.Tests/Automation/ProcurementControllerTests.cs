@@ -850,15 +850,17 @@ public sealed class ProcurementControllerTests
     }
 
     [Fact]
-    public void PriorityShoppingComparesAcrossDataCentersBeforeReturningForAnOrdinaryBuy()
+    public void PriorityShoppingComparesTheWholeTripBeforeReturningForAnOrdinaryBuy()
     {
         using var run = new Route(priority: true);
         run.Game.AutomaticWorldArrival = run.Game.AutomaticPurchaseConfirmation = true;
         run.Controller.RunNow();
         for (var i = 0; i < 300 && run.Game.Purchases == 0; i++) run.Tick(2);
         Assert.Equal(("Siren", 1u), run.Game.Searches.First());
-        Assert.Equal(new[] { "/li Cactuar", "/li Adamantoise", "/li Behemoth", "/li Excalibur",
-            "/li Balmung", "/li Brynhildr", "/li Cuchulainn", "/li Golem", "/li Cactuar" }, run.Game.Commands);
+        // Aether in full - the character's own data center, so no transfer - and
+        // then across to Primal, rather than a crossing every second world.
+        Assert.Equal(new[] { "/li Cactuar", "/li Adamantoise", "/li Faerie", "/li Gilgamesh",
+            "/li Jenova", "/li Midgardsormr", "/li Sargatanas", "/li Behemoth", "/li Cactuar" }, run.Game.Commands);
         Assert.Equal(("Cactuar", 1u, 99u), Assert.Single(run.Game.Bought));
         run.Tick(2);
         Assert.Equal(99u, Assert.Single(run.Ledger.Snapshot()).PendingQuantity);
@@ -916,7 +918,7 @@ public sealed class ProcurementControllerTests
             Assert.Equal(trip + 1, run.Repricing.Starts);
         }
         var worlds = run.Game.Commands.Where(x => x != "/li Siren").Select(x => x[4..]).ToArray();
-        Assert.Equal(new[] { "Cactuar", "Adamantoise", "Behemoth", "Excalibur", "Balmung", "Brynhildr", "Cuchulainn", "Golem" }, worlds.Take(8));
+        Assert.Equal(new[] { "Cactuar", "Adamantoise", "Faerie", "Gilgamesh", "Jenova", "Midgardsormr", "Sargatanas", "Behemoth" }, worlds.Take(8));
         Assert.Equal(new[] {
             "Adamantoise", "Cactuar", "Faerie", "Gilgamesh", "Jenova", "Midgardsormr", "Sargatanas",
             "Behemoth", "Excalibur", "Exodus", "Famfrit", "Hyperion", "Lamia", "Leviathan", "Ultros",
@@ -990,9 +992,57 @@ public sealed class ProcurementControllerTests
             Assert.Equal(166_320u, run.Controller.Status.GilSpent);
             Assert.Single(run.Ledger.Snapshot());
             Assert.Equal(10m, run.Config.Current.PerItemRules[1].MinimumMarginPercent);
-            Assert.Contains(("Golem", 1u), run.Game.Searches);
+            Assert.Contains(("Behemoth", 1u), run.Game.Searches);
         }
         else Assert.Empty(run.Ledger.Snapshot());
+    }
+
+    [Fact]
+    public void CongestedWorldsAreSkippedAndRetriedAtTheEndOfTheCircuit()
+    {
+        using var run = new Route(priority: true);
+        run.Config.Current.PriorityWorldsPerTrip = 31;
+        run.Config.Current.PriorityMinutesPerTrip = 480;
+        run.Game.AutomaticWorldArrival = true;
+        // The first two stops of the circuit are busy. Before, the two refusals in a
+        // row read as a broken tour and ended it two worlds into a 31-world sweep.
+        run.Game.CongestedWorlds.Add("Adamantoise");
+        run.Game.CongestedWorlds.Add("Cactuar");
+        run.Game.LiveProvider = (_, item) => [new(0, item, 10, 20, 2000, 99, true, 0)];
+        run.Controller.RunNow();
+        for (var i = 0; i < 6000 && run.Controller.IsActive; i++) run.Tick(2);
+        Assert.Equal(ProcurementState.Completed, run.Controller.State);
+        Assert.DoesNotContain(run.Log.Messages, m => m.Contains("consecutive worlds"));
+        // Every world that could be reached was priced: 29 away worlds plus home.
+        Assert.Equal(30, run.Game.Searches.Select(x => x.World).Distinct().Count());
+        Assert.DoesNotContain(run.Game.Searches, x => x.World is "Adamantoise" or "Cactuar");
+        var hops = run.Game.Commands.Where(c => c.StartsWith("/li ") && c != "/li mb").ToList();
+        Assert.Equal(2, hops.Count(c => c == "/li Adamantoise"));
+        Assert.Equal(2, hops.Count(c => c == "/li Cactuar"));
+        // The retry happens behind the rest of the circuit, not on the spot.
+        Assert.True(hops.LastIndexOf("/li Adamantoise") > hops.LastIndexOf("/li Seraph"));
+        Assert.Contains(run.Log.Messages, m => m.Contains("Adamantoise moves to the end of the circuit"));
+    }
+
+    [Fact]
+    public void AStoppedTourResumesPastTheWorldThatFailedRatherThanRepeatingIt()
+    {
+        using var run = new Route(priority: true);
+        run.Game.AutomaticWorldArrival = true;
+        run.Game.BrokenBoardWorlds.Add("Adamantoise");
+        run.Game.BrokenBoardWorlds.Add("Cactuar");
+        run.Game.LiveProvider = (_, item) => [new(0, item, 10, 20, 2000, 99, true, 0)];
+        run.Controller.RunNow();
+        for (var i = 0; i < 600 && run.Controller.IsActive; i++) run.Tick(2);
+        Assert.Equal(ProcurementState.Completed, run.Controller.State);
+        Assert.Contains(run.Log.Messages, m => m.Contains("two consecutive worlds were reached"));
+        // The cursor is past both, so the next trip does not restart into the wall.
+        Assert.Equal("Faerie", run.Config.Current.PriorityNextWorld);
+        run.Game.Commands.Clear();
+        run.Repricing.IsActive = false;
+        run.Controller.RunNow();
+        for (var i = 0; i < 600 && run.Controller.IsActive; i++) run.Tick(2);
+        Assert.Equal("/li Faerie", run.Game.Commands.First(c => c.StartsWith("/li ") && c != "/li mb"));
     }
 
     [Fact]
@@ -1276,7 +1326,7 @@ public sealed class ProcurementControllerTests
     }
 
     [Fact]
-    public void ABetterNormalDealOnCrystalBeatsTheEarlierAetherOffer()
+    public void ABetterNormalDealOnPrimalBeatsTheEarlierAetherOffer()
     {
         using var run = new Route(priority: true);
         run.Game.AutomaticWorldArrival = run.Game.AutomaticPurchaseConfirmation = true;
@@ -1284,13 +1334,13 @@ public sealed class ProcurementControllerTests
         {
             "Siren" => [new(0, item, 11, 21, 2000, 99, true, 0)],
             "Cactuar" => [new(0, item, 10, 20, 1200, 99, true, 5940)],
-            "Balmung" => [new(0, item, 12, 22, 1000, 99, true, 4950)],
+            "Behemoth" => [new(0, item, 12, 22, 1000, 99, true, 4950)],
             _ => [],
         };
         run.Controller.RunNow();
         for (var i = 0; i < 500 && run.Game.Purchases == 0; i++) run.Tick(2);
-        Assert.Equal(("Balmung", 1u, 99u), Assert.Single(run.Game.Bought));
-        Assert.Contains(("Golem", 1u), run.Game.Searches); // Dynamis was checked before buying
+        Assert.Equal(("Behemoth", 1u, 99u), Assert.Single(run.Game.Bought));
+        Assert.Contains(("Sargatanas", 1u), run.Game.Searches); // The trip finished Aether before buying
         Assert.Equal(1, run.Game.Purchases);
     }
 
@@ -1330,7 +1380,7 @@ public sealed class ProcurementControllerTests
     }
 
     [Fact]
-    public void LargeItemListGetsShortAwayScansAcrossAllFourDataCenters()
+    public void LargeItemListGetsShortAwayScansOnEveryWorldOfTheTrip()
     {
         using var run = new Route(priority: true);
         run.Game.AutomaticWorldArrival = true;
@@ -1348,9 +1398,9 @@ public sealed class ProcurementControllerTests
         Assert.Equal(8, away.Length);
         var perWorld = run.Config.Current.PriorityItemsPerWorld;
         Assert.All(away, world => Assert.Equal(perWorld, world.Count()));
+        // Seven Aether worlds, then the first stop on Primal.
+        Assert.Contains(away, w => w.Key == "Sargatanas");
         Assert.Contains(away, w => w.Key == "Behemoth");
-        Assert.Contains(away, w => w.Key == "Balmung");
-        Assert.Contains(away, w => w.Key == "Cuchulainn");
     }
 
     [Fact]
@@ -1456,7 +1506,7 @@ public sealed class ProcurementControllerTests
         {
             "Siren" => [new(0, item, 11, 21, 2000, 99, true, 0)],
             "Cactuar" => [new(0, item, 10, 20, 100, 11, true, 55)],
-            "Balmung" => [new(0, item, 12, 22, 1000, 99, true, 4950)],
+            "Behemoth" => [new(0, item, 12, 22, 1000, 99, true, 4950)],
             _ => [],
         };
         run.Controller.RunNow();
@@ -1572,6 +1622,11 @@ public sealed class ProcurementControllerTests
         public bool OpenBoardOnLocalTravel { get; set; } = true;
         public bool InteractionSucceeds { get; set; } = true;
         public bool AutomaticWorldArrival { get; set; }
+        // A congested world refuses the visit: travel ends with the character still
+        // standing where it started, which is what the plugin has to recognise.
+        public HashSet<string> CongestedWorlds { get; } = new(StringComparer.OrdinalIgnoreCase);
+        // A world that can be reached but whose Market Board never opens.
+        public HashSet<string> BrokenBoardWorlds { get; } = new(StringComparer.OrdinalIgnoreCase);
         public bool AutomaticPurchaseConfirmation { get; set; }
         public bool ThrowAfterPurchaseSubmission { get; set; }
         public bool ListingsReady { get; set; } = true;
@@ -1606,8 +1661,12 @@ public sealed class ProcurementControllerTests
         {
             Commands.Add(command);
             if (command.StartsWith("/li tp ")) { ObjectDistance = 1; return true; }
-            if (command == "/li mb" && OpenBoardOnLocalTravel) BoardOpen = true;
-            else if (AutomaticWorldArrival && command.StartsWith("/li ")) World = command[4..];
+            if (command == "/li mb")
+            {
+                if (OpenBoardOnLocalTravel && !BrokenBoardWorlds.Contains(World)) BoardOpen = true;
+            }
+            else if (AutomaticWorldArrival && command.StartsWith("/li ") && !CongestedWorlds.Contains(command[4..]))
+                World = command[4..];
             return true;
         }
         public bool ChangeWorld(string world) => true;
@@ -1665,7 +1724,7 @@ public sealed class ProcurementControllerTests
         {
             if (!InteractionSucceeds) return false;
             if (objectName == "Summoning Bell") BellOpen = true;
-            else BoardOpen = true;
+            else if (!BrokenBoardWorlds.Contains(World)) BoardOpen = true;
             return true;
         }
         public bool RequestListings(uint itemId) { Searches.Add((World, itemId)); return true; }

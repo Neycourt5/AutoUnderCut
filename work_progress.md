@@ -10,6 +10,31 @@ Build: use `C:/Users/Acour/.dotnet/dotnet.exe` (SDK 10.0.400), **not** the PATH
 `curl` against the GitHub REST API. Publishing is pre-authorized (see `AGENTS.md`).
 
 ---
+## v1.0.0.65 - congested worlds are skipped, and the circuit tours by data center
+
+User against v1.0.0.64: still only a couple of servers per data center; a world
+can be congested, so skip it and visit every other one. Then, with coverage
+looking right: stop making weird data center jumps and do a whole one at a time.
+
+- Travel failures no longer count as tour failures. `SkipUnreachableWorld` handles
+  a refused or timed-out visit, and `StopUnproductiveTour` now only counts worlds
+  that were reached and returned no completed item search. Two congested worlds in
+  a row used to end the circuit outright.
+- The stall behind the report: that stop fired before the world index advanced, so
+  the saved cursor still named the failed world and every later trip resumed onto
+  it. The cursor now moves past a world before the tour is allowed to stop.
+- An unreachable world is queued once at the end of the circuit for a second
+  attempt, and a refused visit is recognised in ~60s instead of 600s.
+- Six unreachable worlds in a row is treated as world travel being unavailable; in
+  priority mode the trip still finishes through the comparison and buys what it
+  found rather than discarding the trip.
+- `BuildRoute` now finishes a data center before crossing to the next: home data
+  center first, then the others by cached-hint score. Migration 41 clears the
+  saved route and cursor so the change takes effect on the next trip.
+- 301 Release tests pass and the API 15 plugin builds with zero warnings/errors.
+  Publication and public artifact verification follow.
+
+---
 ## v1.0.0.61 - restore the visible market-search row mapping
 
 The v1.0.0.60 diagnostic resolved the repeated Item Search timeout. Every exact

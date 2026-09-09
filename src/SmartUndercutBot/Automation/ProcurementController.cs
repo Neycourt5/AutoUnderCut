@@ -115,6 +115,11 @@ public sealed partial class ProcurementController : IDisposable
     private int skippedPurchases;
     private string routeOutcome = string.Empty;
     private int consecutiveFailedWorlds;
+    private int consecutiveUnreachableWorlds;
+    private DateTimeOffset travelAbandonedAt = DateTimeOffset.MaxValue;
+    // Worlds this circuit could not travel to. Each is queued once behind the rest
+    // of the circuit, so a world that was busy earlier is still priced later on.
+    private readonly HashSet<string> deferredWorlds = new(StringComparer.OrdinalIgnoreCase);
     private int worldSuccessfulScans;
     private readonly Dictionary<uint, int> purchasedSlotsByItem = [];
     private IReadOnlyList<PortfolioDecision> portfolioDecisions = [];
@@ -449,8 +454,16 @@ public sealed partial class ProcurementController : IDisposable
             case ProcurementState.WaitingForWorld:
                 if (IsOnWorld(WorldName) && !lifestream.IsBusy)
                     Delay(ProcurementState.WaitingAfterWorldArrival, "Destination world loaded; allowing the character to settle.", 8_000);
+                else if (stockHuntScanning && playerState.IsLoaded && !lifestream.IsBusy &&
+                         timeProvider.GetUtcNow() >= travelAbandonedAt)
+                    // Lifestream has stopped and we are still standing on the world
+                    // we left. A refused visit - a congested or full destination -
+                    // looks exactly like this, and waiting out the ten-minute travel
+                    // deadline for each one is what ate the circuit.
+                    SkipUnreachableWorld($"{WorldName} could not be visited; world travel ended without leaving " +
+                        $"{playerState.CurrentWorld.Value.Name}. The world is most likely congested; skipping it.");
                 else if (stockHuntScanning && timeProvider.GetUtcNow() >= deadline)
-                    SkipStockHuntWorld($"LIVE TOUR timed out travelling to {WorldName}; skipping that world.");
+                    SkipUnreachableWorld($"LIVE TOUR timed out travelling to {WorldName}; skipping that world.");
                 else
                     CheckTimeout($"Timed out travelling to {WorldName}.");
                 break;
@@ -686,6 +699,8 @@ public sealed partial class ProcurementController : IDisposable
         failedLiveScans = 0;
         routeOutcome = string.Empty;
         consecutiveFailedWorlds = 0;
+        consecutiveUnreachableWorlds = 0;
+        deferredWorlds.Clear();
         worldSuccessfulScans = 0;
         purchasedSlotsByItem.Clear();
         stockHuntListings.Clear();
@@ -832,6 +847,11 @@ public sealed partial class ProcurementController : IDisposable
         var destination = returningHome ? homeWorld : WorldName;
         if (!returningHome && !ProcurementTravelPolicy.CanShopOnWorld(destination))
         {
+            if (stockHuntScanning)
+            {
+                SkipUnreachableWorld($"Shopping on {destination} is excluded; skipping that world.");
+                return;
+            }
             FinishShopping($"Shopping on {destination} is excluded; returning home.");
             return;
         }
@@ -848,12 +868,16 @@ public sealed partial class ProcurementController : IDisposable
         {
             if (stockHuntScanning)
             {
-                SkipStockHuntWorld($"Lifestream could not visit {WorldName}; skipping that world.");
+                SkipUnreachableWorld($"Lifestream could not visit {WorldName}; skipping that world.");
                 return;
             }
             FailDestination("The /li world-travel command was not accepted.");
             return;
         }
+        // Travel is under way. Give it a minute to actually begin before an idle
+        // Lifestream counts as a refusal; a cross-data-center hop runs as one busy
+        // task through character selection, so it never trips this.
+        travelAbandonedAt = timeProvider.GetUtcNow().AddSeconds(60);
         Wait(returningHome ? ProcurementState.WaitingForHomeWorld : ProcurementState.WaitingForWorld,
             $"Travelling to {destination} with Lifestream{(viaLimsa ? " via Limsa" : string.Empty)}.", 600);
     }
@@ -1004,9 +1028,8 @@ public sealed partial class ProcurementController : IDisposable
             return;
         }
         consecutiveFailedWorlds = worldSuccessfulScans == 0 ? consecutiveFailedWorlds + 1 : 0;
+        consecutiveUnreachableWorlds = 0;
         worldSuccessfulScans = 0;
-        if (StopUnproductiveTour())
-            return;
         market.CloseMarketBoard();
         stockHuntWorldIndex++;
         stockHuntRuleIndex = 0;
@@ -1020,12 +1043,20 @@ public sealed partial class ProcurementController : IDisposable
                 if (resumeItem >= 0) stockHuntRuleIndex = resumeItem;
             }
             else priorityWorldsCompleted++;
+            SavePriorityCursor();
+        }
+        // The cursor moves past this world before the tour is allowed to stop.
+        // Otherwise a world that cannot be read becomes a wall: the next trip
+        // resumed onto it, failed there again, and the circuit never advanced.
+        if (StopUnproductiveTour())
+            return;
+        if (priorityShopping)
+        {
             if (stockHuntWorldIndex >= stockHuntWorlds.Count)
             {
                 CompleteStockHuntScan();
                 return;
             }
-            SavePriorityCursor();
             if (PriorityTripShouldReturn()) return;
         }
         log.Add(AutomationLogLevel.Information,
@@ -1041,13 +1072,66 @@ public sealed partial class ProcurementController : IDisposable
         market.CloseMarketBoard();
         stockHuntListings.RemoveAll(x => string.Equals(x.WorldName, WorldName, StringComparison.OrdinalIgnoreCase));
         consecutiveFailedWorlds++;
+        consecutiveUnreachableWorlds = 0;
         worldSuccessfulScans = 0;
-        if (StopUnproductiveTour())
-            return;
         stockHuntWorldIndex++;
         stockHuntRuleIndex = 0;
         currentStockHuntRule = null;
         SavePriorityCursor();
+        if (StopUnproductiveTour())
+            return;
+        TravelToCurrentWorld();
+    }
+
+    /// <summary>
+    /// A world the character could not travel to at all. Congestion, a full world
+    /// and a refused visit all land here, and none of them mean anything is wrong
+    /// with this plugin, so they never count toward <see cref="StopUnproductiveTour"/>:
+    /// the circuit skips the world and carries on to the next one. Congestion also
+    /// clears, so the world is queued once behind the rest of the circuit and gets
+    /// a second attempt there before its prices are given up on for this circuit.
+    /// </summary>
+    private void SkipUnreachableWorld(string reason)
+    {
+        var world = WorldName;
+        log.Add(AutomationLogLevel.Warning, reason);
+        lifestream.Abort();
+        vnavmesh.Stop();
+        market.CloseMarketBoard();
+        stockHuntListings.RemoveAll(x => string.Equals(x.WorldName, world, StringComparison.OrdinalIgnoreCase));
+        consecutiveUnreachableWorlds++;
+        worldSuccessfulScans = 0;
+        stockHuntWorldIndex++;
+        stockHuntRuleIndex = 0;
+        currentStockHuntRule = null;
+        SavePriorityCursor();
+        if (priorityShopping && stockHuntWorldIndex < stockHuntWorlds.Count && deferredWorlds.Add(world))
+        {
+            stockHuntWorlds.Add(world);
+            var route = configuration.Current.PriorityScoutRoute;
+            if (route.RemoveAll(x => x.Equals(world, StringComparison.OrdinalIgnoreCase)) > 0)
+            {
+                route.Add(world);
+                configuration.Save();
+            }
+            log.Add(AutomationLogLevel.Information,
+                $"{world} moves to the end of the circuit for a second attempt once the other worlds are done.");
+        }
+        if (consecutiveUnreachableWorlds >= UnreachableWorldLimit)
+        {
+            var stop = $"{consecutiveUnreachableWorlds} worlds in a row could not be travelled to. That is world " +
+                "travel being unavailable rather than a busy evening; check Lifestream and whether the character " +
+                "may visit other worlds.";
+            // Whatever the circuit did read is still worth acting on, so the trip
+            // ends the way a normal checkpoint does rather than throwing it away.
+            if (priorityShopping)
+            {
+                log.Add(AutomationLogLevel.Warning, stop);
+                FinishPriorityScouting("Stopped early: world travel is unavailable.");
+            }
+            else FinishShopping(stop);
+            return;
+        }
         TravelToCurrentWorld();
     }
 
@@ -1957,11 +2041,23 @@ public sealed partial class ProcurementController : IDisposable
     private static IReadOnlyList<ProcurementMarketItem> ShoppingMarkets(IReadOnlyList<ProcurementMarketItem> items) =>
         items.Select(x => x with { Listings = x.Listings.Where(y => ProcurementTravelPolicy.CanShopOnWorld(y.WorldName)).ToArray() }).ToArray();
 
+    // Congestion clusters - a whole data center can be busy at prime time - so a run
+    // of unreachable worlds is normal and the circuit keeps going. Six in a row is
+    // not a busy evening: world travel itself is unavailable, and nothing later in
+    // the circuit will fare any better.
+    private const int UnreachableWorldLimit = 6;
+
+    /// <summary>
+    /// Stops a tour that keeps arriving somewhere and reading nothing, which means
+    /// the market-search path is broken rather than a destination being busy. A
+    /// world that could not be reached at all goes through
+    /// <see cref="SkipUnreachableWorld"/> and never reaches this counter.
+    /// </summary>
     private bool StopUnproductiveTour()
     {
         if (consecutiveFailedWorlds < 2)
             return false;
-        FinishShopping("Live tour stopped: two consecutive worlds returned no completed item searches. Check the market-search and travel log before restarting.");
+        FinishShopping("Live tour stopped: two consecutive worlds were reached but returned no completed item searches. Check the market-search log before restarting.");
         return true;
     }
 
