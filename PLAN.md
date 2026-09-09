@@ -1,4 +1,52 @@
-# Active: v1.0.0.61 open the rendered market-search row
+# Current: v1.0.0.62 price food and potions on every world
+
+User report against 1.0.0.61, watching a live circuit: the bot travelled to a
+world and never checked food or potion prices.
+
+## What the session log actually shows
+
+`session-20260909-125235.log`, items priced per away world:
+
+- Midgardsormr: 3 gemdraughts, popcorn, potage, then 2 materia.
+- Gilgamesh: 1 gemdraught, popcorn, potage, then 5 materia.
+- Lamia, Exodus, Malboro: no food or potions at all. 8 materia and dye lines
+  each, home sales of 14-140 units/day against gemdraughts at 840-1000.
+- Mateus: 1 gemdraught, then 7 materia and dye.
+
+## Cause
+
+`PrepareScoutRoute` rotated the scout window across the whole rule list:
+`offset = i * (limit / 2) % stockHuntRules.Count`. With 52 rules and 8 items per
+stop the window had walked past every gemdraught by the third world. The
+preferred flag existed and the planner already ranked core stock first, but the
+items were never priced, so no core candidate ever reached the planner.
+
+## Work checklist
+
+- [x] Reproduce from the live log: which items were priced on which world.
+- [x] `ShoppingScoutPolicy.SelectWorldItems` reserves the preferred food and
+      potion block on every world; only the secondary lines rotate.
+- [x] Preferred stock leads the scan order, so a trip cut short by the clock or a
+      bad board has still priced the food.
+- [x] Preferred stock is never dropped from the hunt list for a thin sales week.
+- [x] Preferred observations are always re-read, so no world is skipped as
+      "already known" and every world in the circuit is visited.
+- [x] Preferred stock is exempt from the bag-buffer gil cap, so gil can keep
+      going into food and potions while the cap still restrains everything else.
+- [x] `PriorityItemsPerWorld` 8 -> 12 with a migration, so the 6-item block does
+      not squeeze out the rotation.
+- [x] 289 Release tests pass; the API 15 plugin builds with 0 warnings, 0 errors.
+- [ ] Commit and push v1.0.0.62, publish the annotated tag, wait for both
+      workflows, and verify public `repo.json` and `SmartUndercutBot.zip`.
+
+## Validation boundary
+
+Oceania was already excluded and needed no change: the 32-world route is North
+America only, and `ProcurementTravelPolicy` strips the Oceania/Materia scope and
+the five Oceanian worlds. Scan composition is covered by unit tests against the
+real controller; no in-game circuit has been run on this build.
+
+# Completed: v1.0.0.61 root cause and design notes
 
 User report against v1.0.0.60: Item Search types each configured name, visibly
 renders the exact **First Letter Match** row, retries three times, then advances
@@ -39,6 +87,8 @@ the transient buffer drain before the fixed 500 ms sample more consistently.
   after target acknowledgement.
 - Expand the stall diagnostic with durable/transient counts and first ids, query,
   pending flags, and list interaction state.
+
+# Completed: v1.0.0.61 open the market-search row the game rendered
 
 ## Work checklist
 

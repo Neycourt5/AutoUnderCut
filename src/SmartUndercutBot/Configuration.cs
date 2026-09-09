@@ -7,7 +7,7 @@ namespace SmartUndercutBot;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 37;
+    public int Version { get; set; } = 38;
     public bool AutomationEnabled { get; set; }
     public bool ProcessAllRetainers { get; set; } = true;
     public bool RepeatBellRuns { get; set; }
@@ -80,7 +80,9 @@ public sealed class Configuration : IPluginConfiguration
     public string PriorityNextWorld { get; set; } = string.Empty;
     public uint PriorityNextItem { get; set; }
     public List<string> PriorityScoutRoute { get; set; } = [];
-    public int PriorityItemsPerWorld { get; set; } = 8;
+    // Six of these are the reserved food and potion block, so the rest is what is
+    // left for rotating the secondary lines. Eight left only two.
+    public int PriorityItemsPerWorld { get; set; } = 12;
     // Empty means "use the market-board command", which is the original behaviour.
     public string SummoningBellTravelCommand { get; set; } = string.Empty;
     public bool LiveWorldStockHuntEnabled { get; set; } = true;
@@ -456,7 +458,16 @@ public sealed class Configuration : IPluginConfiguration
             ProcurementRules.RemoveAll(x => x.DiscoveredAutomatically);
             Version = 37;
         }
-        Version = Math.Max(Version, 37);
+        if (Version < 38)
+        {
+            // Food and potions are now checked on every world. At eight items per
+            // stop the block would leave almost no room for the rotating lines, so
+            // widen a config still sitting on the old default.
+            if (PriorityItemsPerWorld == 8)
+                PriorityItemsPerWorld = 12;
+            Version = 38;
+        }
+        Version = Math.Max(Version, 38);
         PreferredPortfolioTargetPercent = Math.Clamp(PreferredPortfolioTargetPercent, 0m, 100m);
         OpportunisticPortfolioMaximumPercent = Math.Clamp(OpportunisticPortfolioMaximumPercent, 0m, 100m);
         ProcurementMinimumProfitPerSaleSlot = Math.Min(ProcurementMinimumProfitPerSaleSlot, 100_000_000u);

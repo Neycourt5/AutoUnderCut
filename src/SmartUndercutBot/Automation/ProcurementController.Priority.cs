@@ -108,6 +108,11 @@ public sealed partial class ProcurementController
         stockHuntWorlds = new[] { homeWorld }.Concat(config.PriorityScoutRoute.Skip(Math.Max(0, resume))).ToList();
         scoutItems.Clear();
         var limit = Math.Max(1, config.PriorityItemsPerWorld);
+        // The food and potion block is checked on every world; only the secondary
+        // lines rotate. Rotating the whole list is what let the window walk past
+        // the gemdraughts entirely by the third stop of a circuit.
+        var preferredItems = stockHuntRules.Where(r => r.PreferredStock).Select(r => r.ItemId).ToArray();
+        var secondaryItems = stockHuntRules.Where(r => !r.PreferredStock).Select(r => r.ItemId).ToArray();
         for (var i = 0; i < config.PriorityScoutRoute.Count; i++)
         {
             var world = config.PriorityScoutRoute[i];
@@ -116,18 +121,18 @@ public sealed partial class ProcurementController
             var hinted = hints.Where(x => x.Hint.WorldName.Equals(world, StringComparison.OrdinalIgnoreCase) && x.Score > 0)
                 .OrderByDescending(x => HomeSalesPerDay(x.Hint.ItemId, x.Hint.IsHighQuality))
                 .ThenByDescending(x => x.Score).Select(x => x.Hint.ItemId).Distinct().Take(Math.Max(1, limit / 2));
-            var offset = i * Math.Max(1, limit / 2) % stockHuntRules.Count;
-            var rotated = stockHuntRules.Skip(offset).Concat(stockHuntRules.Take(offset)).Select(r => r.ItemId);
             var resumed = world.Equals(config.PriorityNextWorld, StringComparison.OrdinalIgnoreCase) && config.PriorityNextItem != 0
                 ? new[] { config.PriorityNextItem } : [];
-            scoutItems[world] = resumed.Concat(hinted).Concat(rotated).Distinct().Take(limit).ToHashSet();
+            scoutItems[world] = ShoppingScoutPolicy
+                .SelectWorldItems(preferredItems, secondaryItems, resumed, hinted, i, limit).ToHashSet();
         }
         // A fresh cached world needs no physical visit. Without this, "skip known
         // prices" travelled to empty scans and then treated them as server failures.
         stockHuntWorlds = new[] { homeWorld }.Concat(stockHuntWorlds.Skip(1)
             .Where(w => scoutItems[w].Any(item => !ScoutKnowledgeIsFresh(w, item)))).ToList();
         log.Add(AutomationLogLevel.Information,
-            $"REGIONAL SCOUT: compared {hints.Length} cached offers; first stops " +
+            $"REGIONAL SCOUT: compared {hints.Length} cached offers; {preferredItems.Length} food and potion line(s) " +
+            $"are priced on every world. First stops " +
             $"{string.Join(" > ", stockHuntWorlds.Skip(1).Take(config.PriorityWorldsPerTrip))}. " +
             "Cached offers only choose where to look; purchasing requires live observations.");
         configuration.Save();
@@ -139,7 +144,14 @@ public sealed partial class ProcurementController
     private TimeSpan ScoutKnowledgeLife =>
         TimeSpan.FromHours(Math.Max(1, configuration.Current.ScoutKnowledgeMaxAgeHours));
 
+    /// <summary>
+    /// Food and potions are re-read on every visit. They are what the portfolio is
+    /// built on and their prices move, so a day-old reading is not a reason to skip
+    /// them - and because every world's scan carries the block, no world is dropped
+    /// from the circuit for being "already known".
+    /// </summary>
     private bool ScoutKnowledgeIsFresh(string world, uint item) =>
+        !IsPreferredStock(item) &&
         scoutObservedAt.TryGetValue((world, item), out var at) &&
         timeProvider.GetUtcNow() - at <= ScoutKnowledgeLife;
 
@@ -280,13 +292,18 @@ public sealed partial class ProcurementController
         var config = configuration.Current;
         stockHuntRules = config.ProcurementRules.Where(x => x.Enabled && x.ItemId != 0 && !x.LiquidateOnly)
             .DistinctBy(x => x.ItemId)
-            .Where(rule => new[] { false, true }.Any(quality =>
+            // Preferred food and potions are never dropped for a thin sales week.
+            // Everything else has to show the demand to earn a price check.
+            .Where(rule => rule.PreferredStock || new[] { false, true }.Any(quality =>
                 ResaleStockPolicy.BuyableQuality(rule, quality, config.BuyHighQualityOnly) &&
                 markets.Where(m => m.ItemId == rule.ItemId).SelectMany(m => m.RecentSales)
                     .Where(s => s.IsHighQuality == quality && s.PricePerUnit > 0 &&
                         s.SoldAt >= timeProvider.GetUtcNow().AddDays(-7) && s.SoldAt <= timeProvider.GetUtcNow())
                     .Sum(s => (long)s.Quantity) >= Math.Max(1, rule.MinimumWeeklyUnitsSold)))
-            .OrderByDescending(RuleSalesPerDay)
+            // The scan walks this order, so the block comes first on every world:
+            // a trip cut short by the clock or a bad board still priced the food.
+            .OrderBy(x => x.PreferredStock ? 0 : 1)
+            .ThenByDescending(RuleSalesPerDay)
             .ThenBy(x => x.TourPriority)
             .ThenBy(x => x.ItemName, StringComparer.OrdinalIgnoreCase).ToList();
         if (stockHuntRules.Count == 0 || ShoppingWaitReason is not null)
@@ -325,7 +342,8 @@ public sealed partial class ProcurementController
         market.CloseRetainerList();
         log.Add(AutomationLogLevel.Information,
             $"PRIORITY SHOPPING: check {stockHuntRules.Count} flips on {homeWorld}, then Aether -> Primal -> Crystal -> Dynamis. " +
-            $"Scout up to {config.PriorityItemsPerWorld} items per away world, two worlds per data center. " +
+            $"Check the {stockHuntRules.Count(r => r.PreferredStock)} food and potion line(s) on every world plus " +
+            $"rotating flips, up to {config.PriorityItemsPerWorld} items per away world, two worlds per data center. " +
             $"Compare after {config.PriorityWorldsPerTrip} worlds or {config.PriorityMinutesPerTrip} minutes; buy early only at 100%+ net ROI.");
         TravelToCurrentWorld();
     }

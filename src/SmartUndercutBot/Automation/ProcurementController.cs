@@ -1720,7 +1720,12 @@ public sealed partial class ProcurementController : IDisposable
         var config = configuration.Current;
         var available = ResaleStockPolicy.SpendableGil(market.Gil, config.ProcurementTravelReserve,
             config.ReinvestAvailableGil, config.ProcurementBudget, newTrip ? 0 : gilSpent);
-        var bags = CollectBagStock();
+        // The buffer cap exists to stop a bag full of low-value stock being re-bought
+        // trip after trip. Preferred food and potions are the portfolio rather than
+        // the hoard, so they count towards neither the coverage test nor the
+        // exposure: gil can keep going into them while the cap still restrains
+        // everything else.
+        var bags = CollectBagStock().Where(x => !IsPreferredStock(x.ItemId)).ToArray();
         if (Math.Min(repricing.LastKnownFreeSaleSlots ?? 0, config.ProcurementTargetSaleSlots) > bags.Sum(x => x.SaleSlots))
             return available;
 
@@ -1729,6 +1734,14 @@ public sealed partial class ProcurementController : IDisposable
             (ulong)item.Quantity * config.GetEffectiveRule(item.ItemId).CostBasis);
         return Math.Min(available, ResaleStockPolicy.BufferSpendableGil(wallet, bufferCost, config.ProcurementBufferGilPercent));
     }
+
+    /// <summary>
+    /// The curated food and potions, plus anything discovery pinned alongside them.
+    /// This is the stock the portfolio is built on, so it leads every scan, is
+    /// re-read on every world and is exempt from the buffer spending cap.
+    /// </summary>
+    private bool IsPreferredStock(uint itemId) => configuration.Current.ProcurementRules
+        .Any(x => x.ItemId == itemId && x.PreferredStock && !x.LiquidateOnly);
 
     // Stock the planner must count against its per-item limits: stacks already
     // listed on the retainers plus everything held in the bags. Without this a

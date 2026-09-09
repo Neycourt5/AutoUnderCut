@@ -1294,10 +1294,41 @@ public sealed class ProcurementControllerTests
         Assert.Equal(51, run.Game.Searches.Count(x => x.World == "Siren"));
         var away = run.Game.Searches.Where(x => x.World != "Siren").GroupBy(x => x.World).ToArray();
         Assert.Equal(8, away.Length);
-        Assert.All(away, world => Assert.Equal(8, world.Count()));
+        var perWorld = run.Config.Current.PriorityItemsPerWorld;
+        Assert.All(away, world => Assert.Equal(perWorld, world.Count()));
         Assert.Contains(away, w => w.Key == "Behemoth");
         Assert.Contains(away, w => w.Key == "Balmung");
         Assert.Contains(away, w => w.Key == "Cuchulainn");
+    }
+
+    [Fact]
+    public void EveryAwayWorldPricesTheFoodAndPotionBlockNotJustTheFirstStop()
+    {
+        // The live 1.0.0.61 failure: with fifty-odd rules the scout window rotated
+        // off the preferred stock, so the third world onwards priced only materia
+        // and dye. The food block must appear on every stop of the circuit.
+        using var run = new Route(priority: true);
+        run.Game.AutomaticWorldArrival = true;
+        run.Config.Current.ProcurementRules.Clear();
+        run.Config.Current.ProcurementRules.AddRange(Enumerable.Range(1, 6)
+            .Select(i => new ProcurementRule
+            {
+                ItemId = (uint)i, ItemName = $"Gemdraught {i}", PreferredStock = true, HuntOnTour = true,
+            }));
+        run.Config.Current.ProcurementRules.AddRange(Enumerable.Range(7, 45)
+            .Select(i => new ProcurementRule { ItemId = (uint)i, ItemName = $"Materia {i}" }));
+        run.Game.DemandMarkets = Enumerable.Range(1, 51).Select(i => new ProcurementMarketItem((uint)i, $"Item {i}", [],
+            [new(2000, 100, false, DateTimeOffset.UtcNow)])).ToArray();
+        run.Game.LiveProvider = (_, item) => [new(0, item, 10, 20, 2000, 99, false, 0)];
+        run.Controller.RunNow();
+        for (var i = 0; i < 1000 && run.Controller.IsActive; i++) run.Tick(2);
+
+        var away = run.Game.Searches.Where(x => x.World != "Siren").GroupBy(x => x.World).ToArray();
+        Assert.Equal(8, away.Length);
+        Assert.All(away, world => Assert.All(Enumerable.Range(1, 6),
+            food => Assert.Contains((uint)food, world.Select(x => x.Item))));
+        // The rotation still runs: the secondary lines are not all the same eight.
+        Assert.True(away.SelectMany(w => w.Select(x => x.Item)).Where(x => x > 6).Distinct().Count() > 8);
     }
 
     [Fact]
