@@ -282,9 +282,17 @@ public sealed class UniversalisService : IUniversalisService, IDisposable
         return hints;
     }
 
+    // The sheet handle is resolved once. Discovery calls this in a loop, and it is
+    // the only place the plugin reads game data away from the framework thread, so
+    // it stays as small and as infrequent as possible.
+    private Lumina.Excel.ExcelSheet<Item>? itemSheet;
+
     public MarketItemFacts? LookupItem(uint itemId)
     {
-        if (itemId == 0 || dataManager.GetExcelSheet<Item>().GetRowOrDefault(itemId) is not { } row)
+        if (itemId == 0)
+            return null;
+        itemSheet ??= dataManager.GetExcelSheet<Item>();
+        if (itemSheet.GetRowOrDefault(itemId) is not { } row)
             return null;
         var name = row.Name.ToString();
         if (string.IsNullOrWhiteSpace(name))

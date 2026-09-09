@@ -1112,7 +1112,7 @@ public sealed class DashboardWindow : Window
                 config.MarketDiscoveryEnabled = discovery;
                 configurationDirty = true;
             }
-            ImGui.TextDisabled("Uses a daily market-statistics feed to suggest additional flips, validated against the game's own item data. Suggestions only: every purchase still needs fresh live prices and all the usual checks. The six curated items stay pinned whether or not this is on.");
+            ImGui.TextDisabled("Off unless you switch it on. Uses a daily market-statistics feed to suggest additional flips, validated against the game's own item data. Suggestions only: every purchase still needs fresh live prices and all the usual checks. The six curated items stay pinned whether or not this is on, and the portfolio rules work exactly the same either way.");
             var discoveryHours = config.MarketDiscoveryCacheHours;
             if (InputInt("Refresh discovery every (hours)", ref discoveryHours, 1, 168))
             {

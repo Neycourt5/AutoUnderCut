@@ -119,6 +119,8 @@ public sealed partial class ProcurementController : IDisposable
     private readonly Dictionary<uint, int> purchasedSlotsByItem = [];
     private IReadOnlyList<PortfolioDecision> portfolioDecisions = [];
     private readonly MarketDiscoveryService? discovery;
+    private PortfolioAllocationSummary? portfolioSummary;
+    private DateTimeOffset portfolioSummaryAt;
 
     public ProcurementController(
         IFramework framework,
@@ -1330,6 +1332,8 @@ public sealed partial class ProcurementController : IDisposable
                 pricingRule.MinimumMarginPercent, configuration.Current.ProcurementMinimumProfitPerUnit));
         actual = actual with { TargetSalePrice = Math.Max(actual.TargetSalePrice, pricingRule.MinimumPrice) };
         ledger.RecordPurchase(actual, stackSize);
+        // Owned stock just changed, so the next cap check must not use the cache.
+        portfolioSummary = null;
         configuration.Current.PerItemRules[actual.ItemId] = pricingRule;
         configuration.Save();
         gilSpent += (uint)Math.Min(purchaseCost, uint.MaxValue - gilSpent);
@@ -1766,14 +1770,24 @@ public sealed partial class ProcurementController : IDisposable
         configuration.Current.ProcurementTargetSaleSlots,
         (repricing.LastKnownFreeSaleSlots ?? 0) + repricing.ListedStock.Sum(x => x.SaleSlots));
 
-    /// <summary>What the current portfolio looks like against its targets.</summary>
+    /// <summary>
+    /// What the current portfolio looks like against its targets. Computing this
+    /// reads the bags and prices every holding, so it is cached: the dashboard draws
+    /// every frame and the purchase guard runs every tick, and neither needs a fresh
+    /// bag scan at that rate.
+    /// </summary>
     public PortfolioAllocationSummary PortfolioSummary
     {
         get
         {
+            var now = timeProvider.GetUtcNow();
+            if (portfolioSummary is { } cached && now - portfolioSummaryAt < TimeSpan.FromSeconds(2))
+                return cached;
             var owned = CollectOwnedStock().GroupBy(x => x.Tier)
                 .ToDictionary(x => x.Key, x => x.Sum(y => y.SaleSlots));
-            return PortfolioPolicy.Summarize(owned, 0, PortfolioCapacitySlots(), configuration.Current.PortfolioGates);
+            portfolioSummaryAt = now;
+            return portfolioSummary = PortfolioPolicy.Summarize(
+                owned, 0, PortfolioCapacitySlots(), configuration.Current.PortfolioGates);
         }
     }
 

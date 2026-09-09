@@ -58,26 +58,30 @@ public sealed class MarketDiscoveryService
             if (LastAttemptAt is { } attempted && timeProvider.GetUtcNow() - attempted < CacheLifetime)
                 return;
             LastAttemptAt = timeProvider.GetUtcNow();
-            running = Task.Run(RefreshAsync);
+            // Snapshot the configuration here, on the framework thread. The rule list
+            // is mutated by the controller and the dashboard; enumerating it from the
+            // background task would be a race.
+            var configured = configuration.Current.ProcurementRules
+                .Where(x => x.ItemId != 0 && !x.DiscoveredAutomatically)
+                .Select(x => x.ItemId)
+                .ToHashSet();
+            var region = configuration.Current.MarketDiscoveryRegion;
+            running = Task.Run(() => RefreshAsync(configured, region));
         }
     }
 
-    private async Task RefreshAsync()
+    private async Task RefreshAsync(IReadOnlySet<uint> configured, string region)
     {
         try
         {
             var statistics = await provider
-                .GetStatisticsAsync([], configuration.Current.MarketDiscoveryRegion, CancellationToken.None)
+                .GetStatisticsAsync([], region, CancellationToken.None)
                 .ConfigureAwait(false);
             if (statistics.Count == 0)
             {
                 Status = $"{provider.Name} returned no usable statistics. Curated rules are unaffected.";
                 return;
             }
-            var configured = configuration.Current.ProcurementRules
-                .Where(x => x.ItemId != 0 && !x.DiscoveredAutomatically)
-                .Select(x => x.ItemId)
-                .ToHashSet();
             var proposals = MarketDiscoveryPolicy.Propose(statistics, lookup, configured);
             lock (sync)
                 pending = proposals;

@@ -36,6 +36,50 @@ public sealed class MarketDiscoveryTests
     private static MarketItemFacts Food(uint id, string name) => new(id, name, true, true, true, 99);
 
     [Fact]
+    public void ExternalDiscoveryIsOptInAndIsDisarmedByTheUpgrade()
+    {
+        // Nothing external is contacted unless the setting is switched on.
+        var fresh = new Configuration();
+        fresh.Normalize();
+        Assert.False(fresh.MarketDiscoveryEnabled);
+
+        // A 1.0.0.58 configuration that had it on is disarmed on upgrade, and the
+        // rules it suggested are retired rather than left behind.
+        var upgraded = new Configuration { Version = 36, MarketDiscoveryEnabled = true };
+        upgraded.ProcurementRules.Add(new() { ItemId = 42, ItemName = "Discovered Stew", DiscoveredAutomatically = true });
+        upgraded.ProcurementRules.Add(new() { ItemId = 1, ItemName = "Caramel Popcorn", PreferredStock = true });
+        upgraded.Normalize();
+        Assert.False(upgraded.MarketDiscoveryEnabled);
+        Assert.DoesNotContain(upgraded.ProcurementRules, x => x.DiscoveredAutomatically);
+        // The curated portfolio is untouched by the rollback.
+        Assert.Contains(upgraded.ProcurementRules, x => x.ItemId == 1 && x.PreferredStock);
+    }
+
+    [Fact]
+    public void RankingHappensBeforeAnyGameDataIsRead()
+    {
+        // A whole-region dataset is ~17,000 items. Resolving every one of them in
+        // the game's own data, off the framework thread, for a dozen results is not
+        // acceptable: the numeric shortlist has to come first.
+        var looked = new List<uint>();
+        var statistics = Enumerable.Range(1, 5_000)
+            .Select(i => new MarketStatistic((uint)i, $"Item {i}", 10, (uint)i, 5m, 100m, DateTimeOffset.UtcNow))
+            .ToArray();
+
+        var proposed = MarketDiscoveryPolicy.Propose(statistics, id =>
+        {
+            looked.Add(id);
+            return Food(id, $"Item {id}");
+        }, new HashSet<uint>(), maximumRules: 12, maximumLookups: 500);
+
+        Assert.Equal(500, looked.Count);
+        Assert.Equal(12, proposed.Count);
+        // The shortlist keeps the most valuable items, not an arbitrary 500.
+        Assert.Contains(5_000u, looked);
+        Assert.DoesNotContain(1u, looked);
+    }
+
+    [Fact]
     public void DiscoveryProposesHighValueFoodAndRejectsEverythingElse()
     {
         var facts = new Dictionary<uint, MarketItemFacts>
@@ -148,6 +192,7 @@ public sealed class MarketDiscoveryTests
         var statistics = new FakeStatistics([], fails: true);
         using var run = new ProcurementControllerTests.Route(priority: true, statistics);
         run.Config.Current.EnableStockAutomation();
+        run.Config.Current.MarketDiscoveryEnabled = true;
         run.Game.AutomaticWorldArrival = run.Game.AutomaticPurchaseConfirmation = true;
 
         run.Controller.RunNow();
@@ -169,6 +214,7 @@ public sealed class MarketDiscoveryTests
         var statistics = new FakeStatistics([Stat(42, "Discovered Stew", hq: 9_000, hqPerDay: 900m)]);
         using var run = new ProcurementControllerTests.Route(priority: true, statistics);
         run.Config.Current.EnableStockAutomation();
+        run.Config.Current.MarketDiscoveryEnabled = true;
         run.Game.AutomaticWorldArrival = run.Game.AutomaticPurchaseConfirmation = true;
         run.Game.DemandMarkets = [
             new(1, "Popcorn", [], [new(2_000, 99, true, DateTimeOffset.UtcNow)]),
@@ -199,6 +245,7 @@ public sealed class MarketDiscoveryTests
     {
         var statistics = new FakeStatistics([Stat(42, "Discovered Stew")]);
         using var run = new ProcurementControllerTests.Route(priority: true, statistics);
+        run.Config.Current.MarketDiscoveryEnabled = true;
         run.Config.Current.MarketDiscoveryCacheHours = 24;
         var discovery = run.Discovery!;
 

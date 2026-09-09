@@ -21,21 +21,36 @@ public static class MarketDiscoveryPolicy
     /// </summary>
     public const int MaximumDiscoveredRules = 12;
 
+    /// <summary>
+    /// How many items may be looked up in the game's own data. A whole-region
+    /// dataset is around seventeen thousand items, and resolving every one of them
+    /// means that many Excel sheet reads off the framework thread for the sake of a
+    /// dozen results. Rank on the numbers first, which needs no game data at all,
+    /// and only inspect the plausible head of the list.
+    /// </summary>
+    public const int MaximumItemLookups = 500;
+
     public static IReadOnlyList<ProcurementRule> Propose(
         IReadOnlyList<MarketStatistic> statistics,
         Func<uint, MarketItemFacts?> lookup,
         IReadOnlySet<uint> alreadyConfigured,
-        int maximumRules = MaximumDiscoveredRules)
+        int maximumRules = MaximumDiscoveredRules,
+        int maximumLookups = MaximumItemLookups)
     {
         ArgumentNullException.ThrowIfNull(statistics);
         ArgumentNullException.ThrowIfNull(lookup);
         ArgumentNullException.ThrowIfNull(alreadyConfigured);
 
+        var shortlist = statistics
+            .Where(x => x.ItemId != 0 && !alreadyConfigured.Contains(x.ItemId) &&
+                        x.BestPrice > 0 && x.BestUnitsSoldPerDay >= MinimumUnitsSoldPerDay)
+            .OrderByDescending(x => x.BestPrice * x.BestUnitsSoldPerDay)
+            .Take(Math.Max(0, maximumLookups))
+            .ToArray();
+
         var proposals = new List<(ProcurementRule Rule, decimal Score)>();
-        foreach (var statistic in statistics)
+        foreach (var statistic in shortlist)
         {
-            if (statistic.ItemId == 0 || alreadyConfigured.Contains(statistic.ItemId))
-                continue;
             // Local game data is the authority on what the item actually is. A
             // remote source may name an untradable, non-existent or wrong-category
             // id, and none of those may become a buy candidate.

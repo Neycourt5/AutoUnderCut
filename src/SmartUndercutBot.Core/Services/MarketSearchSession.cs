@@ -8,6 +8,10 @@ public interface IMarketSearchUi
     // Names the exact precondition that refused the last call, so a stalled search
     // reports why on screen instead of leaving the route to guess.
     string? LastBlocker => null;
+    // "No results are visible yet" has several very different causes: the window
+    // closed, the game is still streaming rows, or the server genuinely returned
+    // nothing. Without this the log cannot tell them apart after the fact.
+    string? RowDiagnostics => null;
     bool PrepareSearch(string itemName);
     bool SubmitSearch(string itemName);
     IReadOnlyList<MarketSearchRow> ReadRows();
@@ -98,7 +102,9 @@ public sealed class MarketSearchSession(IMarketSearchUi ui, TimeProvider? clock 
         var row = rows.FirstOrDefault(x => x.ItemId == itemId && x.Enabled);
         if (row is null)
         {
-            Status = rows.Count == 0 ? $"Waiting for search rows for {itemName}; no results are visible yet."
+            Status = rows.Count == 0
+                ? $"Waiting for search rows for {itemName}; no results are visible yet" +
+                  (ui.RowDiagnostics is { Length: > 0 } why ? $" ({why})." : ".")
                 : $"Waiting for the exact {itemName} row; {rows.Count} other/disabled row(s) are visible.";
             return false;
         }

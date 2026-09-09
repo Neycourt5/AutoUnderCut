@@ -252,6 +252,31 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService, IDisp
                     input->RawString.StringPtr, input->EvaluatedString.StringPtr, input->CallbackEventKind);
         }
 
+        // Reports which of ReadRows' preconditions is actually refusing, and the
+        // counts when none of them is. A stalled search then names its own cause in
+        // the session log instead of only saying that nothing is visible.
+        public string? RowDiagnostics
+        {
+            get
+            {
+                var addon = owner.gameGui.GetAddonByName<AddonItemSearch>("ItemSearch");
+                if (addon == null) return "the Item Search window is not loaded";
+                if (!addon->IsVisible) return "the Item Search window is not visible";
+                if (!addon->IsReady) return "the Item Search window is still initialising";
+                if (addon->ResultsList == null) return "the results list is missing";
+                var agent = AgentItemSearch.Instance();
+                if (agent == null) return "the item search agent is unavailable";
+                if (agent->ItemBuffer == null) return "the item search agent has no result buffer";
+                if (agent->IsPartialSearching) return "the game is still running a partial search";
+                if (agent->IsItemPushPending) return "the game is still pushing result rows";
+                var proxy = InfoProxyItemSearch.Instance();
+                return $"agent rows {agent->ItemCount}, list rows {addon->ResultsList->GetItemCount()}, " +
+                       $"mode {addon->Mode}, filter {addon->SelectedFilter}, " +
+                       $"proxy item {(proxy == null ? 0 : proxy->SearchItemId)}, " +
+                       $"awaiting listings {(proxy != null && proxy->WaitingForListings)}";
+            }
+        }
+
         public IReadOnlyList<MarketSearchRow> ReadRows()
         {
             var addon = owner.gameGui.GetAddonByName<AddonItemSearch>("ItemSearch");

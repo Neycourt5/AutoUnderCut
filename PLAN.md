@@ -1,3 +1,69 @@
+# Active: v1.0.0.59 restore market-board search confidence
+
+User report against 1.0.0.58: the market board opened the Gemdraught of Mind
+search repeatedly and never showed the price listings.
+
+## What the session log actually shows
+
+`session-20260908-220912.log` and `dalamud.log` for 22:09-22:12:
+
+- Repricing worked: 13 price updates submitted and server-verified across three
+  retainers. Bag listing worked: 11 stacks listed.
+- Shopping failed at the name search only. `MARKET SEARCH submitted 'Grade 4
+  Gemdraught of Mind'` then `Waiting for search rows; no results are visible yet`
+  for three attempts, then the same for Gemdraught of Dexterity, then the user
+  stopped it.
+- No exceptions. Only two hitches from this plugin all session, 161.9 ms and
+  83.4 ms, neither during a search. Thread starvation is not the cause.
+- `git diff --name-only v1.0.0.57..v1.0.0.58` does not include
+  `MarketPurchaseService.cs`, `MarketSearchSession.cs`, `MarketResponseTracker.cs`
+  or `RetainerListingService.cs`. The native search path is unchanged from .57.
+
+So the evidence neither convicts nor clears .58. `ReadRows()` returns an empty
+list for six different reasons and the log cannot distinguish them.
+
+## Changes
+
+1. **Name the cause.** `IMarketSearchUi.RowDiagnostics` reports which precondition
+   is refusing - window not loaded/visible/ready, missing results list, agent
+   unavailable, no result buffer, partial search still running, rows still being
+   pushed - and otherwise the actual counts (agent rows, list rows, mode, filter,
+   proxy item, awaiting-listings). The next stalled search names its own cause.
+2. **Remove the new runtime surface.** `MarketDiscoveryEnabled` now defaults off
+   and config version 37 disarms it on upgrade and retires its suggested rules.
+   It was the only part of .58 that added behaviour outside the planner: it
+   downloaded a 16,822-item region dataset on the first scan after every load.
+   The portfolio objective is unaffected - it is pure planner logic.
+3. **Make discovery safe for when it is switched back on.** The configured rule
+   ids and region are snapshotted on the framework thread instead of being
+   enumerated from the background task while the controller mutates them.
+   `MarketDiscoveryPolicy` ranks numerically first and looks up at most 500 items
+   in the game's data instead of all 16,822. `LookupItem` resolves the Excel sheet
+   handle once.
+4. **Stop the per-frame portfolio recomputation.** `PortfolioSummary` read the
+   bags and priced every holding on every dashboard frame and every purchase tick.
+   It is now cached for two seconds and invalidated after a confirmed purchase.
+
+## Work checklist
+- [x] Read the session and Dalamud logs; establish what is and is not evidenced.
+- [x] Confirm the native search path is unchanged since .57.
+- [x] Add row diagnostics to the stalled-search path.
+- [x] Default discovery off, migrate 36 -> 37, retire discovered rules.
+- [x] Fix the cross-thread config read and the 16,822 off-thread item lookups.
+- [x] Cache the portfolio summary.
+- [x] 260 tests pass; Release build 1.0.0.59 clean.
+- [ ] Commit, push main, tag v1.0.0.59, verify published repo.json/zip.
+
+## What the user should do
+Update to .59 and run one shopping pass. If the search still stalls, the log line
+now says why, and that names the actual defect. Market discovery can be switched
+back on afterwards under Shopping > Shopping limits.
+
+## Validation boundary
+No FFXIV client session was exercised by this work. The diagnostics and the
+opt-in change are compile- and unit-tested only; whether they resolve the
+in-game search stall is not established and must not be claimed.
+
 # Completed: v1.0.0.58 portfolio-quality procurement
 
 The economic objective changes from "fill as many retainer slots as possible" to

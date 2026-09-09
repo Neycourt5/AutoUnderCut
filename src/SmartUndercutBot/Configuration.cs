@@ -7,7 +7,7 @@ namespace SmartUndercutBot;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 36;
+    public int Version { get; set; } = 37;
     public bool AutomationEnabled { get; set; }
     public bool ProcessAllRetainers { get; set; } = true;
     public bool RepeatBellRuns { get; set; }
@@ -48,7 +48,10 @@ public sealed class Configuration : IPluginConfiguration
     public uint ProcurementMinimumProfitPerSaleSlot { get; set; } = 2_500;
     // Optional external market discovery. Recommendations only: every purchase
     // still needs a fresh live board reading and all existing safety checks.
-    public bool MarketDiscoveryEnabled { get; set; } = true;
+    // Off by default: it downloads a whole-region dataset and is the only part of
+    // the portfolio work that adds runtime behaviour outside the planner, so it
+    // stays opt-in until the live market-board search is confirmed healthy.
+    public bool MarketDiscoveryEnabled { get; set; }
     public int MarketDiscoveryCacheHours { get; set; } = 24;
     public string MarketDiscoveryRegion { get; set; } = "NA";
     public int PriorityWorldsPerTrip { get; set; } = 8;
@@ -443,7 +446,17 @@ public sealed class Configuration : IPluginConfiguration
                 rule.PreferredStock = true;
             Version = 36;
         }
-        Version = Math.Max(Version, 36);
+        if (Version < 37)
+        {
+            // 1.0.0.58 shipped discovery on, which downloads a whole-region dataset
+            // on the first scan after every load. A live market-board search failure
+            // was reported on that build, so the new external call is disarmed and
+            // its suggestions are retired until it is switched back on deliberately.
+            MarketDiscoveryEnabled = false;
+            ProcurementRules.RemoveAll(x => x.DiscoveredAutomatically);
+            Version = 37;
+        }
+        Version = Math.Max(Version, 37);
         PreferredPortfolioTargetPercent = Math.Clamp(PreferredPortfolioTargetPercent, 0m, 100m);
         OpportunisticPortfolioMaximumPercent = Math.Clamp(OpportunisticPortfolioMaximumPercent, 0m, 100m);
         ProcurementMinimumProfitPerSaleSlot = Math.Min(ProcurementMinimumProfitPerSaleSlot, 100_000_000u);
