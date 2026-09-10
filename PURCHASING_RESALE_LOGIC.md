@@ -1,20 +1,23 @@
 # AutoUndercutter — Purchasing, Resale & Prioritization Logic
 
-**Scope:** a factual map of the economic decision system as implemented at commit `ad1fa36`
-(config schema `Version = 42`). No application code was changed to produce this document.
+**Scope:** a factual map of the economic decision system as currently implemented
+(config schema `Version = 43`), after the profit-optimization rework described in
+`PROFIT_OPTIMIZATION_IMPLEMENTATION.md`.
 
 **How to read this document.** Claims are tagged:
 
 - **[IMPL]** — current implemented behaviour, verified by reading the code.
 - **[CFG]** — behaviour that only occurs under a particular configuration.
 - **[DEAD]** — code that exists but cannot execute in the default/shipped configuration.
-- **[OBS]** — my observation or inference, not a direct code statement.
+- **[OBS]** — an observation or inference, not a direct code statement.
 
-References use `path/to/File.cs -> Type.Member` with line numbers as of commit `ad1fa36`.
+References use `path/to/File.cs -> Type.Member` with line numbers as of the current tree.
 
-> **Terminology.** "Sale slot" = one of the 20 market-board slots a retainer has; with 3 retainers
-> that is 60, the shipped `ProcurementTargetSaleSlots` default. "Landed cost" = purchase price plus
-> the 5% market-board buyer fee. "Home world" = the character's own world, where everything is resold.
+> **Terminology.** "Sale slot" = one of the 20 market-board slots a retainer has; with 3
+> retainers that is 60, the shipped `ProcurementTargetSaleSlots` default. "Landed cost" =
+> purchase price plus the buyer fee. "Home world" = the character's own world, where
+> everything is resold. "Coverage" = how many days of a market's own observed demand the
+> current holdings represent.
 
 ---
 
@@ -34,79 +37,89 @@ Retainer pass (reprice + collect gil)  ──►  List bag stock  ──►  Sho
 `StockAutomationController` arms the sub-controllers; `ProcurementController` owns shopping,
 `AutomationController` owns repricing, `BagListingController` owns listing bag stock.
 
+### The objective
+
+> **Maximise long-run realised gil by keeping capital deployed in high-value, high-volume
+> markets that reliably sell.**
+
+ROI is a **safety floor**, not a ranking key. Once a listing clears its margin bar, candidates
+compete on expected gil per day, absolute profit, liquidity and how much of the market's own
+demand is already held.
+
 ### What it considers
 
-Only items with an **enabled `ProcurementRule`**. There is no open-ended market scan in the buying
-path. Rules come from five seeded sets plus optional discovery
-(`src/SmartUndercutBot/Services/UniversalisService.cs`, L73–150):
+Only items with an **enabled `ProcurementRule`**. There is no open-ended market scan in the
+buying path. Rules come from five seeded sets plus optional discovery
+(`src/SmartUndercutBot/Services/UniversalisService.cs`):
 
 | Set | Seeded as | Bought? |
 |---|---|---|
-| 6 curated consumables (4 Grade 4 Gemdraughts, Caramel Popcorn, Popoto Potage) — `CreateFavoriteRules` L73 | `PreferredStock=true`, `TourPriority=0`, HQ-required, 8 slots | Yes — the portfolio core |
-| `General-Purpose *` / `Wide-Spectrum *` dyes — `CreateBuyableDyeRules` L114 | `TourPriority=1`, stack 20, 2 slots, min 50/wk | Yes |
-| Materia grades **XI/XII** — `CreateTradeableMateriaRules` L142 | `TourPriority=2`, stack 20, **1 slot**, min 50/wk | Yes |
-| All other dyes, all ethers, older materia — `CreateLiquidationRules` L100 | `LiquidateOnly=true` | **Never** — sold from bags only |
-| 8 named tomestone materials — `CreateTomeMaterialRules` L130 | `LiquidateOnly=true` | **Never** |
+| 6 curated consumables (4 Grade 4 Gemdraughts, Caramel Popcorn, Popoto Potage) — `CreateFavoriteRules` | `PreferredStock=true`, `TourPriority=0`, HQ-required, stack 99, 8 slots | Yes — the portfolio core |
+| `General-Purpose *` / `Wide-Spectrum *` dyes — `CreateBuyableDyeRules` | `TourPriority=1`, stack 20, 2 slots, min 50/wk | Yes |
+| Materia grades **XI/XII** — `CreateTradeableMateriaRules` | `TourPriority=2`, stack 20, 1 slot, min 50/wk | Yes |
+| All other dyes, all ethers, older materia — `CreateLiquidationRules` | `LiquidateOnly=true` | **Never** — sold from bags only |
+| 8 named tomestone materials — `CreateTomeMaterialRules` | `LiquidateOnly=true` | **Never** |
+| Discovered food/medicine — `MarketDiscoveryPolicy.Propose` **[CFG, off by default]** | `Confidence=Candidate`, `PreferredStock=false`, `TourPriority=3` | Yes, as ordinary stock |
 
-### What it ignores
-
-`LiquidateOnly` rules are filtered out at the top of both planners
-(`ProcurementPlannerService.cs -> BuildPlan` L24, `BuildLiveMarketPlan` L146) and again in the
-pre-purchase guard. Items with no rule are invisible to the buying path entirely.
+Note that `MaximumSaleSlots` on these rules is now a **floor**, not a ceiling — see §5.2.
 
 ### When something is "profitable"
 
-Profitability is enforced **as a price ceiling**, not as a post-hoc score. For each item/quality the
-planner computes the highest price it could pay and still clear both the ROI floor and the flat
-per-unit profit floor, then considers only listings at or below it. **The ROI floor itself is
-velocity-tiered**: anything selling ≥10 units/day at home is held to the lower "fast mover" bar
-(10% by default) instead of the standard bar (20%). See §4.
+Profitability is enforced **as a price ceiling**, not as a post-hoc score. For each
+item/quality the planner computes the highest price it could pay and still clear both the ROI
+floor and the flat per-unit profit floor, then considers only listings at or below it. The ROI
+floor is drawn from a **four-rung margin ladder** keyed on velocity *and* value per slot, with
+an absolute floor beneath everything. See §4.
 
 ### When it buys
 
-Two paths:
-
-1. **Immediate ("exceptional")** — during scouting, if net expected profit ≥ 100% of landed cost
-   (`ShoppingScoutPolicy.IsExceptional` L74), it buys on the spot.
-2. **Deferred (normal)** — everything else is remembered and compared at the end of the circuit
-   (`ProcurementController.Priority.cs -> FinishPriorityScouting` L195), then the winners are
-   revisited and re-validated live before purchase.
+**One path.** Every observation is remembered and compared at the end of the circuit
+(`ProcurementController.Priority.cs -> FinishPriorityScouting` L197), then the winners are
+revisited and re-validated live before purchase. The old immediate-buy path for ≥100% ROI
+listings has been removed; `ShoppingScoutPolicy.BuysBeforeComparison` is a documented `false`.
+[IMPL]
 
 ### How much it buys
 
 **It does not choose a quantity.** It buys whole existing listings, filtered to
-`listing.Quantity <= rule.TargetStackSize`. Volume is controlled by *how many listings* it takes,
-via sale-slot caps, per-item caps, a weekly market-share cap, and budget. See §8.
+`listing.Quantity <= rule.TargetStackSize`. Volume is controlled by *how many listings* it
+takes, which is governed primarily by **inventory coverage** — days of the market's own demand
+already held — plus budget, slots and concentration limits. See §8.
 
 ### When and at what price it resells
 
 Everything is listed on the home world and repriced every retainer pass. Pricing is
-**lowest competitor − 1 gil**, floored at `max(MinimumPrice, costBasis × (1 + margin%))`. See §6.
+**depth-adjusted lowest competitor − 1 gil**, floored at
+`max(MinimumPrice, AcquisitionFloor, costBasis × (1 + margin%))`. See §6.
 
 ### How it chooses between competing opportunities
 
-Not a scalar score. A **three-tier portfolio model** plus a **lexicographic objective over five
-candidate plans**. Tier dominates everything: a Core item always outranks a Secondary item, which
-always outranks an Opportunistic one, regardless of ROI or profit. See §3.
+A **single scalar score** plus a greedy pass:
+
+```
+AllocationScore = ExpectedGilPerDay × tierWeight        (Core 1.25, Secondary 1.0, Opportunistic 0.6)
+```
+
+ordered by score, then absolute profit, then liquidity, then capital deployed. Tier is a
+weight, not a sort key: an extraordinary non-Core opportunity can beat a poor Core one. [IMPL]
 
 ### Role of ROI vs absolute gil vs velocity
 
-- **ROI** is a *gate only* (a price ceiling), never a ranking key. `ProcurementOrder.RoiPercent` is
-  documented in-code as "kept as a safety guard rather than the objective".
-- **Absolute gil profit** is objective #4 in the plan comparison, and the primary key of strategy 2.
-- **Sales velocity** (units/day) is the most pervasive signal: it sets tier eligibility, **lowers the
-  ROI gate** for fast movers, drives `ProfitVelocity` (objective #3), and orders the scan.
+- **ROI** is a *gate only* (a price ceiling), never a ranking key.
+- **Expected gil per day** is the primary ranking signal.
+- **Absolute gil profit** is the first tie-break.
+- **Sales velocity** is the most pervasive signal: it sets the margin bar, sizes inventory via
+  coverage, derives the per-item slot cap, drives `ExpectedGilPerDay`, shapes the resale anchor
+  through market depth, and orders the scan.
 
 ### Emergent strategy
 
-> Hold ~75% of retainer slots in pinned high-value consumables. Allow a minority of slots for
-> genuinely liquid, high-value secondary stock. Cap cheap arbitrage at ~10% of slots no matter how
-> good its percentage return. Accept a thin margin on stock that turns over daily, because idle gil
-> earns nothing. Undercut aggressively but never below landed cost.
+> Size every position against what the market actually absorbs, not against a slot count.
+> Accept a thin margin on stock that turns over daily, because the gil comes straight back.
+> Rank on gil per day, so a 400% return on a trinket loses to a 15% return on a stack of raid
+> food. Cap cheap arbitrage at a tenth of the portfolio and half a day of its own demand.
+> Deploy capital until nothing qualifying is left — but never spend merely to be invested.
 > **An empty slot is explicitly preferred to a slot of junk.**
-
-[OBS] The system is deliberately engineered *against* the classic "high ROI on cheap items" trap.
-§9 examines how well that holds.
 
 ---
 
@@ -114,94 +127,90 @@ always outranks an Opportunistic one, regardless of ROI or profit. See §3.
 
 ### 2.1 Trip-level gates (before any item is examined)
 
-`src/SmartUndercutBot/Automation/ProcurementController.cs -> TryAutomaticStart` (L1700)
+`ProcurementController.cs -> TryAutomaticStart`
 
 ```
 IF IsStartBlocked OR !AllowAutomaticPurchases OR !AutomaticProcurementEnabled
    OR !IsRetainerListOpen OR repricing.IsActive OR repricing.RequiresManualRestart
    OR !playerState.IsLoaded                                     -> RETURN
 IF repricing.LastKnownFreeSaleSlots is null                     -> RETURN   (no verified capacity yet)
-IF SpendableGil(wallet, travelReserve, reinvest:true, 0) == 0   -> RETURN
-IF LiveWorldStockHuntEnabled                                    -> live-hunt branch, then RETURN
+IF SpendableGil(...) == 0                                       -> RETURN
+IF LiveWorldStockHuntEnabled                                    -> live-hunt branch  [DEAD in shipped config]
 IF !newlyAvailableCapacity AND !incomeArrived AND now < nextAutomaticScan -> RETURN
 IF HoldingForSaleSlots OR HoldingForGil                         -> RETURN
 -> StartScan(AutomaticPurchase)
 ```
 
-Two "hold" gates keep it home (`ProcurementController.cs` L188, L196):
-
 | Gate | Condition | Meaning |
 |---|---|---|
-| `HoldingForSaleSlots` | `FreeSaleSlots < ShoppingTripMinimumFreeSaleSlots` (10) | Not enough empty slots to justify a trip |
-| `HoldingForGil` | `ShoppingBudget < ShoppingTripMinimumGil` (1,000,000) | Travelling with pocket change wastes the trip |
+| `HoldingForSaleSlots` (L188) | `FreeSaleSlots < ShoppingTripMinimumFreeSaleSlots` (10) | Not enough empty slots to justify a trip |
+| `HoldingForGil` (L196) | `ShoppingBudget < ShoppingTripMinimumGil` (1,000,000) | Travelling with pocket change wastes the trip |
+
+`StartScan` (L307) first calls **`ReconcilePositionCosts()`** (L1948), which retires tracked
+cost basis for stock that has since sold. See §6.4.
 
 ### 2.2 The circuit
 
-`ProcurementController.Priority.cs -> BeginPriorityShopping` (L296)
+`ProcurementController.Priority.cs -> BeginPriorityShopping` (L304)
 
 1. Filter rules: enabled, non-liquidate, **and** either in the "snipe block"
    (`PreferredStock || AlwaysScout`) or showing ≥ `MinimumWeeklyUnitsSold` in 7-day home sales.
 2. Order: snipe-block first → descending home sales/day → `TourPriority` → name.
 3. Scan the **home world** first to establish resale anchors.
 4. Travel the circuit one data center at a time (`ShoppingScoutPolicy.BuildRoute`), home DC first.
-5. Per away world, price up to `PriorityItemsPerWorld` (14) items: the snipe block **always**, plus
-   hinted bargains (¼ of the stop), plus busiest secondary lines, plus a rotation
-   (`ShoppingScoutPolicy.SelectWorldItems`).
+5. Per away world, price up to `PriorityItemsPerWorld` (14) items: the snipe block **always**,
+   plus hinted bargains, plus busiest secondary lines, plus a rotation.
+6. **Nothing is bought during scouting.** `ObservePriorityItem` (L478) records the observation,
+   logs the economics, and advances.
 
 ### 2.3 Per-item pipeline — one item, discovery → BUY/REJECT
 
-`src/SmartUndercutBot.Core/Services/ProcurementPlannerService.cs -> BuildPlan` (L13–132)
+`SmartUndercutBot.Core/Services/ProcurementPlannerService.cs -> BuildPlan` (L22)
 
 ```
-STEP 0  Request sanity                                     [L16-19]
+STEP 0  Request sanity                                     [L26-29]
         GilBudget==0 OR FreeSaleSlots<=0 OR FreeInventorySlots<=0
-        OR MarketTaxPercent  outside [0,100]
-        OR BuyerFeePercent   outside [0,100]
+        OR !FeeModel.IsValid  (tax [0,100), fee [0,100])
         OR MinimumRoiPercent outside [0,1000]
-        OR FastMoverRoiPercent > 1000
         OR MaximumWeeklySalesSharePercent outside (0,100]      -> EMPTY PLAN
 
-STEP 1  Rule lookup                                        [L24]
+STEP 1  Rule lookup                                        [L38]
         !Enabled OR ItemId==0 OR LiquidateOnly                  -> REJECT
 
-STEP 2  Quality eligibility        ResaleStockPolicy.BuyableQuality [L67]
+STEP 2  Quality eligibility        ResaleStockPolicy.BuyableQuality
         BuyHighQualityOnly=true and item HAS an HQ form -> NQ rejected
         item has NO HQ form (dyes)                      -> NQ allowed
 
-STEP 3  Demand gate                                        [L43]
+STEP 3  Demand gate                                        [L48]
         sales = home 7-day sales, matching quality, price>0, qty>0
         SUM(quantity) < rule.MinimumWeeklyUnitsSold             -> REJECT
 
-STEP 4  Weekly market-share cap                            [L50-56]
-        observedLimit = MAX(rule.TargetStackSize,
-                            FLOOR(weeklyUnits × MaximumWeeklySalesSharePercent/100))
-        remaining     = MAX(0, observedLimit − ownedUnits)
-        (recorded here, enforced later in Allocate)
+STEP 4  Owned units + weekly-share backstop                [L52-63]
+        ownedUnits = listed + bagged + already planned
+        observedLimit = MAX(TargetStackSize, FLOOR(weeklyUnits × share%))
+        (recorded; only enforced when coverage cannot size a position — see STEP 10)
 
-STEP 5  Resale anchor                                      [L58-76]
+STEP 5  Depth-adjusted resale anchor                       [L65-83]
         targetSalePrice = MEDIAN(home 7-day sale prices)
         IF HomeWorld set:
             homeListings = home-world listings, same quality, not our retainers
-            homeLowest   = MIN(HomePriceReference.WithoutOutliers(homeListings))   [L69]
-            targetSalePrice = MIN(targetSalePrice, homeLowest − 1)                 [L73]
-        targetSalePrice == 0                                    -> REJECT          [L75]
+            homeLowest   = HomePriceReference.DepthAdjustedLowest(
+                               homeListings, salesPerDay, AnchorAbsorptionDays)
+            targetSalePrice = MIN(targetSalePrice, homeLowest − 1)
+        targetSalePrice == 0                                    -> REJECT
 
-STEP 6  Price ceiling — the ROI + profit gate              [L78-93]
-        netUnitProceeds = FLOOR(targetSalePrice × (1 − MarketTax/100))     ; tax = 5
-        buyerFeeMult    = 1 + BuyerFee/100                                 ; fee = 5
-        salesPerDay     = SalesVelocityPolicy.DailyUnits(market, quality)  [L80]
-        requiredRoi     = PortfolioPolicy.RequiredRoiPercent(              [L81]
-                              MinimumRoiPercent, FastMoverRoiPercent, salesPerDay)
-                        = (FastMoverRoi >= 0 AND salesPerDay >= 10)
-                              ? MIN(MinimumRoi, FastMoverRoi)      ; 10% by default
-                              : MinimumRoi                         ; 20% by default
-        roiCeiling      = FLOOR(netUnitProceeds / (1+requiredRoi/100) / buyerFeeMult)
-        profitCeiling   = FLOOR(MAX(0, netUnitProceeds − minProfitPerUnit) / buyerFeeMult)
-        ceiling         = MIN(roiCeiling, profitCeiling)
+STEP 6  Margin bar + price ceiling                         [L154-171]
+        stackSize             = MAX(1, rule.TargetStackSize)
+        referenceValuePerSlot = targetSalePrice × stackSize     ; the MARKET's value, not the listing's
+        reliableHistory       = (recent 7-day sale entries >= 3)
+        requiredRoi = PortfolioPolicy.RequiredRoiPercent(policy, rule.PreferredStock,
+                                                        salesPerDay, referenceValuePerSlot)
+        IF !reliableHistory: requiredRoi = MAX(requiredRoi, StandardRoiPercent)
+        ceiling = FeeModel.MaximumUnitPrice(targetSalePrice, requiredRoi, minProfitPerUnit)
         IF rule.MaximumUnitPrice > 0: ceiling = MIN(ceiling, rule.MaximumUnitPrice)
-        ceiling == 0                                            -> REJECT          [L92]
+        ceiling == 0                                            -> REJECT
 
-STEP 7  Per-listing filter                                 [L95-102]
+STEP 7  Per-listing filter                                 [L173-180]
         REJECT listing IF  ItemId mismatch
                         OR PricePerUnit == 0
                         OR PricePerUnit > ceiling            <-- ROI/profit enforced HERE
@@ -209,309 +218,370 @@ STEP 7  Per-listing filter                                 [L95-102]
                         OR WorldName blank
                         OR Quantity == 0
                         OR IsHighQuality != quality
-                        OR Quantity > MAX(1, rule.TargetStackSize)
+                        OR Quantity > stackSize
 
-STEP 8  Profit computation                                 [L104-107]
-        totalCost = PurchaseCost = CEIL(price × qty × buyerFeeMult)        [L396]
-        totalNet  = (ulong)(uint)netUnitProceeds × qty                     [L105]
-        totalNet <= totalCost                                   -> REJECT
-        expectedProfit = totalNet − totalCost
+STEP 8  Costing                                            [L182-189]
+        landedCost  = FeeModel.LandedCost(price, qty)      = CEIL(price × qty × 1.05)
+        netProceeds = FeeModel.NetProceeds(anchor, qty)    = FLOOR(anchor × 0.95) × qty
+        REJECT IF netProceeds <= landedCost
+        REJECT IF NetRoiPercent(netProceeds, landedCost) < requiredRoi     <-- belt and braces
+        REJECT IF netProceeds − landedCost < minProfitPerUnit × qty
+        expectedProfit = netProceeds − landedCost
 
-STEP 9  Tier + slot-value gate      AddCandidate            [L233-244]
-        tier = PortfolioPolicy.ClassifyCandidate(...)                      [L73]
+STEP 9  Tier + slot-value gate      AddCandidate           [L219-242]
+        tier = PortfolioPolicy.ClassifyCandidate(...)
         IF tier != Core AND ExpectedProfitPerSaleSlot < gates.MinimumProfitPerSaleSlot
-                                                                -> REJECT  [L239]
-        else -> CANDIDATE
+                                                                -> REJECT "insufficient slot value"
+        AllocationScore = ExpectedGilPerDay × policy.ScoreWeightFor(tier)
+        -> CANDIDATE
 
-STEP 10 Allocation across 5 strategies  Allocate            [L254-339]
-        per-strategy skip conditions, in order:
-          orders.Count >= slotLimit                          -> skip
-          Opportunistic AND tierSlots+slots > OpportunisticCap -> skip     [L303]
-          itemSlots[item] >= rule.MaximumSaleSlots            -> skip
-          spent + cost > budget                              -> skip
-          boughtUnits + qty > weeklyShareLimit                -> skip
-        -> else ADD to that plan
+STEP 10 Allocation — one greedy pass  Allocate             [L258-369]
+        order by: AllocationScore desc, ExpectedProfit desc, EstimatedDaysToSell asc,
+                  CapitalAtRisk desc, TourPriority asc, ItemId, ListingId
+        skip conditions, in order:
+          orders.Count >= slotLimit                          -> "no free sale slot remains"
+          Opportunistic AND tierSlots + slots > OpportunisticCap -> "opportunistic portfolio cap reached"
+          Opportunistic AND oppSpent + cost > budget × Opportunistic% -> "opportunistic capital cap reached"
+          itemSlots[item] >= EffectiveMaximumSlots(policy, rule, candidate) -> "already holding N of M sale slots"
+          spent + cost > budget                              -> "remaining budget does not cover this stack"
+          coverage > 0 AND !InventoryCoveragePolicy.CanAdd(...) -> "demand coverage reached (X d held, Y d target)"
+          coverage == 0 AND weekly-share exceeded            -> "weekly market-share limit reached"
+        -> else ADD
 
-STEP 11 Plan selection (lexicographic)                      [L342-357]
-
-STEP 12 Live re-validation before submit  PollListings      [L1233-1392]
+STEP 11 Live re-validation before submit  PollListings      [L1238]
         -> BUY or SKIP
 ```
 
-### 2.4 Step 12 — the live pre-purchase guard, in order
+### 2.4 Step 11 — the live pre-purchase guard, in order
 
-`ProcurementController.cs -> PollListings` (L1233). **Sequential early returns; order matters.**
+`ProcurementController.cs -> PollListings` (L1238). **Sequential early returns; order matters.**
 
-| # | Check | Line | On failure |
-|---|---|---|---|
-| 1 | comparison pass under its 20-minute limit | L1236 | FinishShopping |
-| 2 | home reference still fresh (≤30 min) | L1242 | SkipCurrentOrder |
-| 3 | `AllowAutomaticPurchases` still armed | ~L1247 | FinishShopping |
-| 4 | still on the right world, board open, Lifestream idle | ~L1252 | FinishShopping |
-| 5 | fill order & empty retainer slots already covered | L1264 | Skip |
-| 6 | fill order & tier == Opportunistic | L1272 | Skip |
-| 7 | tier == Opportunistic & no cap headroom (`OpportunisticHeadroom <= 0`) | L1278 | Skip |
-| 8 | rule exists / enabled / non-liquidate / quality OK / under `MaximumSaleSlots` | L1283 | Skip |
-| 9 | clamp `MaximumAcceptableUnitPrice` and `Quantity = MIN(order.Quantity, TargetStackSize)` | L1291–1297 | — |
-| 10 | live listings ready (retry ×3 via `RetryListingRequest`) | L1299, L1304, L1486 | Skip on timeout (L1312) |
-| 11 | `TrySelectLiveListing` matches the plan | L1331 | Skip |
-| 12 | independent re-validation of the returned listing | L1340 | Skip (L1356) |
-| 13 | **profit re-check with server-reported buyer tax** | L1359-1361 | Skip |
-| 14 | slots + `ProcurementInventoryReserve` | L1366 | FinishShopping |
-| 15 | `totalCost > SpendableGil()` (if budget 0 ⇒ go home) | L1371-1376 | Skip / FinishShopping |
-| 16 | `SubmitPurchase` | — | — |
+| # | Check | On failure |
+|---|---|---|
+| 1 | comparison pass under its 20-minute limit | FinishShopping |
+| 2 | home reference still fresh (≤ `HomePriceMaxAgeMinutes`, 30) | SkipCurrentOrder |
+| 3 | `AllowAutomaticPurchases` still armed | FinishShopping |
+| 4 | still on the right world, board open, Lifestream idle | FinishShopping |
+| 5 | fill order & empty retainer slots already covered by bags | Skip |
+| 6 | fill order & tier == Opportunistic | Skip |
+| 7 | tier == Opportunistic & no cap headroom | Skip |
+| 8 | rule exists / enabled / non-liquidate / quality OK / under **`EffectiveMaximumSlots`** | Skip |
+| 9 | clamp `MaximumAcceptableUnitPrice` and `Quantity = MIN(order.Quantity, TargetStackSize)` | — |
+| 10 | live listings ready (retry ×3); **fails closed** on timeout | Skip |
+| 11 | `TrySelectLiveListing` matches the plan | Skip |
+| 12 | independent re-validation of the returned listing (item, quality, quantity, price ≤ ceiling, not our retainer) | Skip |
+| 13 | **demand-coverage re-check** against live holdings | Skip |
+| 14 | **profit re-check** with the **server-reported buyer tax** and the observed sale tax | Skip |
+| 15 | slots + `ProcurementInventoryReserve` | FinishShopping |
+| 16 | `totalCost > SpendableGil()` or `> wallet` | Skip / FinishShopping |
+| 17 | `SubmitPurchase` | — |
 
-Check 13 (L1359):
+Check 14 (L1373):
 
 ```
-expectedNetProceeds = FLOOR(TargetSalePrice × 0.95) × liveQty       ; 0.95 HARDCODED
+totalCost           = live.PricePerUnit × live.Quantity + live.TotalTax     ; SERVER-reported
+expectedNetProceeds = configuration.Current.Fees.NetProceeds(order.TargetSalePrice, live.Quantity)
 IF expectedNetProceeds < totalCost × (1 + RequiredPurchaseRoi(order)/100)
-   OR expectedNetProceeds − totalCost < minProfitPerUnit × liveQty  -> SKIP
+   OR expectedNetProceeds − totalCost < minProfitPerUnit × live.Quantity   -> SKIP
 ```
 
-`totalCost` here is `GetPurchaseCost(live)` = `price × qty + live.TotalTax`, i.e. the
-**server-reported** tax rather than the assumed 5%.
-
-`RequiredPurchaseRoi` (L1481) mirrors the planner's velocity tiering:
-
-```
-order.IsFillOrder ? ProcurementFillRoiPercent                       ; 10%
-                  : PortfolioPolicy.RequiredRoiPercent(MinimumRoi, FastMoverRoi, order.SalesPerDay)
-```
+`RequiredPurchaseRoi` (L1504) re-derives the bar from live configuration, using the **same
+reference stack value** the planner used, and — for a fill order — the **same relaxed policy**,
+so the planner and this check are mathematically identical. The bar recorded on the order is
+kept as a floor, so a stale plan can never buy under a laxer rule than the current one. [IMPL]
 
 ### 2.5 Ordering concern: could mediocre beat better?
 
-**Yes, in one specific place — and it is prevented everywhere else.** [OBS]
-
-*The immediate-buy path bypasses cross-item comparison.*
-`ProcurementController.Priority.cs -> ObservePriorityItem` (L470–545): candidates for **this one
-item** are ordered by tier → `ExpectedProfit` → `PricePerUnit` (L515–516), and if the winner clears
-`IsExceptional` (≥100% net ROI, L517) it buys **immediately**, consuming a slot and budget before any
-later world is seen. A 100%-ROI cheap item bought on world 1 can therefore block a 60%-ROI, far more
-valuable item on world 20. The slot-value gate and opportunistic cap still apply, because the order
-came out of `BuildPlan`.
-
-*Everything else is properly comparative* — the deferred path compares complete plans (§3.4).
+**No.** [OBS] There is no path that commits capital before the whole circuit has been compared.
+The only remaining ordering effect is the greedy pass itself: a higher-scoring candidate takes
+budget first, which is the intended behaviour.
 
 ---
 
 ## 3. Opportunity Scoring / Prioritization
 
-**There is no single numeric score.** Priority is (a) tier, (b) five competing allocation
-strategies, (c) a lexicographic choice between the resulting plans.
+### 3.1 The score — marginal, not standalone
 
-### 3.1 Tier assignment — the dominant signal
+The score is computed **during allocation**, not when the candidate is built, because what one
+more stack is worth depends on the inventory it will land behind.
+`ProcurementPlannerService.ScoreOf` (L255), `PortfolioPolicy.MarginalDaysToClear` (L108) and
+`PortfolioPolicy.MarginalGilPerDay` (L124):
 
-`src/SmartUndercutBot.Core/Services/PortfolioPolicy.cs -> ClassifyCandidate` (L73–89)
+```
+owned               = units listed + bagged + ALREADY COMMITTED EARLIER IN THIS PASS
+MarginalDaysToClear = CLAMP((owned + Quantity) / SalesPerDay, 0.25, 30)
+                    = 30                       when SalesPerDay <= 0 or Quantity == 0
+MarginalGilPerDay   = ExpectedProfit / MAX(1.0, MarginalDaysToClear) / Slots
+AllocationScore     = MarginalGilPerDay × ScoreWeightFor(Tier)
+```
+
+Two separate guards, against opposite failure modes: [IMPL]
+
+- The `MAX(1.0, ...)` normalisation removes the `profit × 4` bonus the original `MAX(0.25, ...)`
+  handed to any stack that would clear in under six hours. A tiny fast lot cannot manufacture a
+  profit rate out of replenishment that would need another shopping trip to realise.
+- The **marginal** numerator stops a large position claiming the rate of its first stack. Our own
+  stacks compete with each other: with 200 units of a 100/day market already listed, the next
+  stack does not finish selling for three days, and the capital is committed for all of it.
+
+Note the identity `MarginalDaysToClear(0, q, v) == DaysToSell(q, v)`. A market we hold none of is
+scored exactly as the standalone model scored it; only repeat stacks move. That is what makes an
+excellent market's attractiveness decay as its position fills, so other opportunities overtake it
+without any category quota saying that they must.
+
+`ExpectedGilPerDay` still exists as the standalone figure and is reported in the log alongside
+the marginal one, but nothing ranks on it. [IMPL]
+
+### 3.2 Derived per-order metrics
+
+`ProcurementModels.cs -> ProcurementOrder` (L232+)
+
+```
+CapitalAtRisk             = LandedCost (fee included), or FeeModel.Default.LandedCost(price, qty)
+ExpectedResaleValue       = TargetSalePrice × Quantity
+ExpectedNetProceeds       = CapitalAtRisk + ExpectedProfit
+ResaleValuePerSaleSlot    = ExpectedResaleValue / Slots
+ExpectedProfitPerSaleSlot = ExpectedProfit / Slots
+EstimatedDaysToSell       = PortfolioPolicy.DaysToSell(Quantity, SalesPerDay)
+ExpectedGilPerDay         = ExpectedProfit / MAX(1.0, EstimatedDaysToSell) / Slots   ; standalone, reported only
+MarginalDaysToClear       = see 3.1                                                  ; what the allocator uses
+MarginalGilPerDay         = see 3.1                                                  ; what the allocator ranks on
+InventoryCoverageDays     = OwnedUnitsBefore / SalesPerDay
+CoverageDaysAfterPurchase = (OwnedUnitsBefore + Quantity) / SalesPerDay
+NetRoiPercent             = (ExpectedNetProceeds − CapitalAtRisk) / CapitalAtRisk × 100
+RoiPercent                = NetRoiPercent                      ; the SAME number
+```
+
+`SalesPerDay` = `SalesVelocityPolicy.DailyUnits` — Universalis `nq/hqSaleVelocity` when it is
+**strictly positive** and ≤ 1e9, else 7-day recent sales ÷ 7. A reported `0` means "no data
+window for this quality" as often as it means "nothing sold", so it defers to recorded sales
+rather than vetoing them; with no recorded sales the answer is still zero, and one quality is
+never lent the other's rate. [IMPL]
+
+> `SalesPerDay` is the **whole home world's** rate, not our share of it. Every holding-time and
+> coverage figure is optimistic by whatever fraction of the market we actually capture. This is
+> measured-but-unapplied; see §17. [OBS]
+
+> There is exactly **one** ROI definition, on landed (post-fee) cost. The old pre-fee display
+> basis is gone. [IMPL]
+
+### 3.3 Tier assignment — a weight, not a veto
+
+`PortfolioPolicy.ClassifyCandidate` (L101)
 
 ```
 IF rule.PreferredStock            -> Core
-ELSE IF salesPerDay   >= 10                     (SecondaryMinimumSalesPerDay, L28)
-     AND valuePerSlot >= 150,000                (SecondaryMinimumValuePerSlot, L29)
-     AND profitPerSlot>= gates.MinimumProfitPerSaleSlot   (default 2,500)
+ELSE IF salesPerDay   >= policy.HighVolumeMinimumSalesPerDay      (10)
+     AND valuePerSlot >= policy.HighVolumeMinimumValuePerSlot     (150,000)
+     AND profitPerSlot>= gates.MinimumProfitPerSaleSlot           (2,500)
                                   -> Secondary
 ELSE                              -> Opportunistic
 ```
 
-For **already-owned** stock, `ClassifyHolding` (L91) omits the profit term (profit is sunk).
-An item with **no known market data** classifies as Opportunistic — so a retainer full of listed dye
-actively consumes the opportunistic cap and blocks buying more.
+For **already-owned** stock, `ClassifyHolding` (L122) omits the profit term (profit is sunk).
+An item with no known market data classifies as Opportunistic — so a retainer full of listed
+dye actively consumes the opportunistic cap and blocks buying more.
 
-`Rank` (L45): Core=0, Secondary=1, Opportunistic=2. Every allocation strategy is `OrderBy(Rank)`
-first (`Tiered()`, L375), so **tier strictly dominates all other signals**.
+Tier feeds `ScoreWeightFor` (Core 1.25 / Secondary 1.0 / Opportunistic 0.6) and
+`CoverageDaysFor` (3 / 1.5 / 0.5 days). `PortfolioPolicy.Rank` still exists and is used for
+per-item display ordering during scouting, but **not** in allocation. [IMPL]
 
-### 3.2 Derived per-order metrics
+### 3.4 The allocator — repeated selection, then a bounded repair
 
-`src/SmartUndercutBot.Core/Models/ProcurementModels.cs -> ProcurementOrder` (L188–232)
+`ProcurementPlannerService.Allocate` (L279) runs two stages.
 
-```
-Slots                     = MAX(1, SaleSlots)                        ; always 1 in practice
-ExpectedResaleValue       = TargetSalePrice × Quantity                        [L209]
-ResaleValuePerSaleSlot    = ExpectedResaleValue / Slots                       [L210]
-ExpectedProfitPerSaleSlot = ExpectedProfit / Slots                            [L211]
-EstimatedDaysToSell       = CLAMP(Quantity / SalesPerDay, 0.25, 30)           [L212, policy L57]
-ProfitVelocity            = ExpectedProfit / MAX(0.25, EstimatedDaysToSell) / Slots  [L215]
-RoiPercent                = ExpectedProfit / (PricePerUnit × Quantity) × 100  [L218]
-```
-
-`SalesPerDay` = `SalesVelocityPolicy.DailyUnits` — Universalis `nq/hqSaleVelocity` if present and in
-`[0, 1e9]`, else 7-day recent sales ÷ 7.
-
-> `RoiPercent` divides by **pre-fee** cost while the planner's ceiling uses **post-fee** cost.
-> `RoiPercent` is display/logging only; it is never used in a comparison. [IMPL]
-
-### 3.3 The five allocation strategies
-
-`ProcurementPlannerService.cs -> Allocate` (L273–277). All tier-major:
-
-| # | Ordering after tier | Line |
-|---|---|---|
-| 1 | `ProfitVelocity` desc, cost asc | L273 |
-| 2 | `ExpectedProfit` desc, cost asc | L274 |
-| 3 | `ExpectedProfit / cost` desc, cost asc ← the ROI-ish strategy | L275 |
-| 4 | `SalesPerDay` desc, `ProfitVelocity` desc, cost asc | L276 |
-| 5 | `ResaleValuePerSaleSlot` desc, `TourPriority` asc, cost asc | L277 |
-
-Each produces a full plan under all caps. `TourPriority` appears **only** in strategy 5 as a
-tie-break — manual category preference cannot outrank value or demand.
-
-### 3.4 Plan selection — the actual objective function
-
-`ProcurementPlannerService.cs -> Allocate` (L342–357), evaluated strictly in order:
+**Stage 1, `SelectGreedily` (L315).** Not a static sort. Each iteration re-scores every surviving
+candidate against the inventory that now exists — including everything committed earlier in the
+same pass — and commits the best:
 
 ```
-1. MAX  MIN(coreSlotsAdded, opening.CoreDeficit)      -- close the core deficit first
-2. MIN  MAX(0, opportunisticSlots − OpportunisticCap) -- never exceed the cheap-stock cap
-3. MAX  SUM(ProfitVelocity) over non-Opportunistic orders
-4. MAX  SUM(ExpectedProfit)
-5. MAX  order count                                   -- slot occupancy is LAST
-6. MAX  distinct item count                           -- diversification
-7. MIN  distinct world count                          -- travel cost
-8. MIN  TotalCost
+while slots remain and candidates remain:
+    for each surviving candidate:
+        apply the capacity and concentration limits    (drop permanently if failed)
+        held  <- units listed + bagged + committed so far this pass
+        score <- MarginalGilPerDay(profit, held, quantity, salesPerDay) × tierWeight
+    commit the best-scoring candidate; add its quantity to `held` for that market
 ```
 
-The in-code comment at L344 states the intent: *"Slot occupancy is deliberately last: a cheap
-low-value item must never win merely by filling one more slot."*
+Ties break, in order: `ExpectedProfit` desc, `MarginalDaysToClear` asc, `CapitalAtRisk` desc
+(deploying capital stays a late tie-break, never a reason), `TourPriority` asc, then item id,
+listing id and world name. The order is total, so allocation is deterministic.
+
+Every rejection is a **capacity or concentration limit**, not a preference; preference has
+already been expressed in the score. All of them are monotone — holdings, spend and slots only
+grow — so a candidate that fails one can never become feasible later and is dropped for good. The
+one exception is the budget check, which keeps the candidate in the pool because stage 2 may free
+the gil it needs. Complexity `O(k × n)` for `k` slots filled and `n` candidates.
+
+**Stage 2, `ImproveUnderConstrainedCapital` (L469).** Greedy takes the best stack it can afford,
+which under a tight budget can spend on one candidate worth 300k/day what would have bought two
+worth 200k/day each. The repair re-runs the *same* selection routine a few times with one
+market's slot allowance reduced, and adopts the result only on a strict improvement:
+
+```
+objective(basket) = Σ marginal, class-weighted gil/day of every stack, in selection order
+
+for at most 3 rounds:
+    if nothing was blocked on budget: stop
+    for each market in the basket, richest first, at most 8:
+        try it capped at (its stacks − 1), and at 0
+    adopt the best strictly-improving alternative, else stop
+```
+
+The neighbourhood is a **per-market slot cap**, not a banned listing: banning the listing greedy
+picked achieves nothing when the market has an interchangeable sibling, because the sibling
+simply takes the slot. Because alternatives are produced by `SelectGreedily` itself, every
+budget, sale-slot, coverage, per-item concentration, opportunistic slot and capital, quality and
+rule constraint is enforced identically — there is no second constraint implementation to drift.
+At most 48 extra selection runs, and normally **zero**: it is skipped entirely unless the budget
+actually blocked something, so a large wallet behaves exactly as plain greedy did. [IMPL]
+
+> The objective maximises gil per day, so under a tight budget it can accept **less absolute
+> profit per trip** in exchange for faster capital turnover. That is the intended trade — long-run
+> realised gil under limited capital — but it is a real one. [OBS]
 
 ### 3.5 Complete list of priority influences
 
 | Variable | Where it enters | Effect |
 |---|---|---|
-| ROI % | Step 6 price ceiling; `RequiredPurchaseRoi` | **Gate only**, never ranked |
-| Absolute gil profit | Objective 4; strategies 1–3 | Ranked |
-| Purchase price | `Cost()` tie-break (asc) in all strategies | Cheaper wins ties |
-| Expected sale price | `TargetSalePrice` → all value metrics | Ranked via value/slot |
-| Sales velocity / per day | **ROI gate tier**, portfolio tier gate, `ProfitVelocity`, strategy 4, scan order | Strongest single signal |
-| Market volume (7-day units) | Step 3 gate; Step 4 share cap | Gate |
-| Competing listings count | Only via `HomePriceReference` outlier filter | Indirect |
-| Historical sales | Median → resale anchor (Step 5) | Sets the anchor |
-| Stack size | `TargetStackSize` caps listing size; buffer slot maths | Gate |
-| Quantity available | Listing quantity; must be ≤ `TargetStackSize` | Gate |
-| Inventory slots | `slotLimit = MIN(FreeSaleSlots, FreeInventorySlots)` | Hard cap |
-| Retainer slots | `AvailablePurchaseSlots` → `PlannedSaleSlots` | Hard cap |
-| Available gil | `SpendableGil()` → budget | Hard cap |
-| Item category | Only via seeded `TourPriority` / `PreferredStock` | Tie-break / pin |
-| Item level | **Not used anywhere** | — |
-| Crafting/consumable status | Discovery only (`IsFoodOrMedicine`) | Discovery filter |
-| Materia | Seeded rules; XI/XII buyable at 1 slot, rest liquidate-only | Category rule |
-| Manual priorities | `TourPriority`, `PreferredStock`, `AlwaysScout` | Pin / tie-break |
-| Whitelist | The rule list *is* the whitelist | Absolute |
-| Blacklist | `LiquidateOnly`, `Enabled=false`, `ProcurementTravelPolicy.ExcludedWorlds` | Absolute |
-| Favorites | `CreateFavoriteRules` → `PreferredStock` | Pins to Core |
-| Max price | `rule.MaximumUnitPrice` (0 = unlimited) | Caps ceiling |
-| Min price | `PricingRule.MinimumPrice` (resale side only) | Floor |
+| ROI % | Step 6 price ceiling; Step 8 re-check; `RequiredPurchaseRoi` | **Gate only**, never ranked |
+| Expected gil/day | `AllocationScore` | **Primary ranking key** |
+| Absolute gil profit | Tie-break 2 | Ranked |
+| Holding period | Tie-break 3 | Ranked |
+| Capital deployed | Tie-break 4 | Ranked, deliberately late |
+| Sales velocity | Margin bar, tier, coverage sizing, slot cap, anchor depth, gil/day, scan order | Strongest single signal |
+| Owned units / coverage | `InventoryCoveragePolicy.CanAdd`; live re-check | Hard gate |
+| Market depth below a price | `DepthAdjustedLowest` | Sets the anchor |
+| Historical sales | Median → anchor; count ≥3 → `reliableHistory` | Anchor + margin bar |
+| Market volume (7-day units) | Step 3 gate; weekly-share backstop | Gate |
+| Value per sale slot | Margin ladder; tier | Gate |
+| Stack size | `TargetStackSize` caps listing size and the reference value | Gate |
+| Inventory / retainer slots / gil | `slotLimit`, budget | Hard caps |
+| Item category | Seeded `TourPriority` / `PreferredStock` | Tie-break / weight |
+| `PreferredStock` | Tier → weight, coverage target, margin bar | Weight, **not** a veto |
+| Whitelist / blacklist | The rule list; `LiquidateOnly`, `Enabled=false`, `ExcludedWorlds` | Absolute |
 
 ---
 
 ## 4. Profit and ROI Math
 
-### 4.1 Constants — and what is ignored
+### 4.1 The one fee model
 
-| Quantity | Value | Source | Configurable? |
-|---|---|---|---|
-| Market tax (sale) | **5%** | `ProcurementModels.cs` L156 / L180 (`MarketTaxPercent = 5m`) | **No** — no caller ever passes it |
-| Buyer fee (purchase) | **5%** | `ProcurementModels.cs` L157 / L181 (`BuyerFeePercent = 5m`) | **No** — no caller ever passes it |
-| Live pre-purchase net | **×0.95** | `ProcurementController.cs` L1359, hardcoded literal | No |
-| Resale floor gross-up | **÷0.95** | `ProcurementPriceSafety.cs` L10, hardcoded literal | No |
-| Exceptional-buy fee | **×1.05** | `ShoppingScoutPolicy.cs` L74, hardcoded literal | No |
+`SmartUndercutBot.Core/Services/MarketEconomics.cs -> FeeModel`
 
-[IMPL] Verified: `grep "MarketTaxPercent:\|BuyerFeePercent:"` across `src/` returns **no call sites**.
-Both always take their record defaults.
+| Quantity | Value | Source |
+|---|---|---|
+| Market tax (sale) | `Configuration.ObservedMarketTaxPercent`, default **5%** | **Read from the game's retainer sell window** (`AutomationController.CaptureSellerFee`) and persisted |
+| Buyer fee (purchase, planning) | **5%** | `FeeModel.Default` |
+| Buyer tax (purchase, at the board) | **server-reported** | `live.TotalTax` |
 
-**Fees the model accounts for:** the 5% market-board sale tax and a 5% purchase-side fee. At purchase
-time the *actual* server-reported tax is used (`live.TotalTax`).
+`Configuration.Fees` is the single accessor; every plan request, the live re-check, the
+displayed ROI and the resale floor read it. The scattered `0.95`, `1.05` and `÷0.95` literals
+that used to live in `ProcurementController`, `ProcurementController.Priority`,
+`ProcurementPriceSafety` and `ShoppingScoutPolicy` are gone. [IMPL]
 
-**Fees and costs ignored:** [OBS]
-
-- **Retainer venture/upkeep** — not modelled.
-- **Teleport cost** — only a flat `ProcurementTravelReserve` (5,000 gil) is withheld; actual
-  teleport fares are never deducted from expected profit. A 31-world circuit has real gil cost that
-  appears in no profit calculation.
-- **The live seller fee is read but unused in decisions.** `RetainerListingService.TryReadSellerFeePercent`
-  is read at `AutomationController.cs` L911 but flows **only** into `PortfolioListingEstimate` for the
-  Earnings display. Buy and resale maths use the hardcoded 5%.
-- **Opportunity cost of time/travel** — partially proxied by `ProfitVelocity`, never in gil.
+**Still not modelled:** teleport fares (only a flat `ProcurementTravelReserve` of 5,000 gil is
+withheld) and retainer venture costs. [OBS]
 
 ### 4.2 The formulas
 
 ```
-netUnitProceeds = FLOOR(targetSalePrice × 0.95)
-buyerFeeMult    = 1.05
-requiredRoi     = (salesPerDay >= 10) ? MIN(20, 10) = 10        ; fast mover
-                                      : 20                       ; standard
-totalCost       = CEIL(pricePerUnit × quantity × 1.05)
-totalNet        = (uint)netUnitProceeds × quantity
-expectedProfit  = totalNet − totalCost                           ; only if totalNet > totalCost
+netUnitProceeds = FLOOR(targetSalePrice × (1 − marketTax/100))
+buyerFeeMult    = 1 + buyerFee/100
+landedCost      = CEIL(pricePerUnit × quantity × buyerFeeMult)
+netProceeds     = netUnitProceeds × quantity
+expectedProfit  = netProceeds − landedCost                      ; only if netProceeds > landedCost
+NetRoiPercent   = expectedProfit / landedCost × 100
 
-roiCeiling      = FLOOR(netUnitProceeds / (1 + requiredRoi/100) / 1.05)
-profitCeiling   = FLOOR(MAX(0, netUnitProceeds − minProfitPerUnit) / 1.05)
+roiCeiling      = FLOOR(netUnitProceeds / (1 + requiredRoi/100) / buyerFeeMult)
+profitCeiling   = FLOOR(MAX(0, netUnitProceeds − minProfitPerUnit) / buyerFeeMult)
 ceiling         = MIN(roiCeiling, profitCeiling [, rule.MaximumUnitPrice])
 ```
 
-**ROI basis:** the *ceiling* is derived so that net proceeds ÷ landed cost ≥ 1 + requiredRoi — i.e.
-ROI against **landed (post-fee) cost**, computed **per unit**, applied to the **whole stack**.
-The reported `RoiPercent` uses **pre-fee** cost — a different basis (see §12).
+**Rounding:** `FLOOR` on proceeds and ceilings (conservative); `CEIL` on cost (conservative).
 
-**Rounding:** `FLOOR` on proceeds and ceilings (conservative); `CEIL` on cost (conservative);
-integer truncation when `netUnitProceeds` is cast to `uint`.
+### 4.3 The margin ladder
 
-### 4.3 Worked example — Grade 4 Gemdraught, HQ (a fast mover)
-
-Home median sale 22,000; cheapest non-self home listing 21,500; `SalesPerDay = 40`;
-`MinimumRoi=20`, `FastMoverRoi=10`, `minProfitPerUnit=100`, `TargetStackSize=99`.
+`PortfolioPolicy.RequiredRoiPercent` (L51)
 
 ```
-targetSalePrice = MIN(22,000, 21,500 − 1) = 21,499
-netUnitProceeds = FLOOR(21,499 × 0.95) = 20,424
-requiredRoi     = salesPerDay 40 >= 10  ->  MIN(20, 10) = 10        <-- fast-mover bar
-roiCeiling      = FLOOR(20,424 / 1.10 / 1.05) = FLOOR(17,683.1) = 17,683
-profitCeiling   = FLOOR((20,424 − 100) / 1.05) = FLOOR(19,356.2) = 19,356
-ceiling         = MIN(17,683, 19,356) = 17,683
+liquid   = salesPerDay          >= HighVolumeMinimumSalesPerDay        (10/day)
+valuable = referenceValuePerSlot >= HighVolumeMinimumValuePerSlot      (150,000 gil)
+
+(liquid && valuable && preferred) -> CoreHighVolumeRoiPercent          10%
+(liquid && valuable)              -> HighVolumeRoiPercent              14%
+(!valuable)                       -> LowValueRoiPercent                35%
+(valuable && !liquid)             -> StandardRoiPercent                20%
+
+required = MAX(that, AbsoluteMinimumRoiPercent)                         8%
 ```
 
-At the old 20% bar the ceiling would have been 16,209 — the fast-mover rule raises the maximum
-acceptable price by **1,474 gil per unit** for this item.
+Plus: fewer than three recent sales forces `StandardRoiPercent`. And `referenceValuePerSlot`
+uses the rule's **target stack size**, not the observed listing quantity, so a market cannot
+slide between rungs depending on which listing happened to be in front of it. [IMPL]
+
+The top-up pass (§8.4) applies `ProcurementEconomicPolicy.RelaxedTo(ProcurementFillRoiPercent)`,
+which lowers the first, second and fourth rungs to the fill percentage and leaves
+`LowValueRoiPercent` and `AbsoluteMinimumRoiPercent` untouched.
+
+### 4.4 Worked example — Grade 4 Gemdraught, HQ
+
+Home median sale 22,000; depth-adjusted cheapest non-self home listing 21,500;
+`SalesPerDay = 40`; `TargetStackSize = 99`; `minProfitPerUnit = 100`; `PreferredStock = true`.
+
+```
+targetSalePrice       = MIN(22,000, 21,500 − 1) = 21,499
+netUnitProceeds       = FLOOR(21,499 × 0.95) = 20,424
+referenceValuePerSlot = 21,499 × 99 = 2,128,401   -> valuable
+salesPerDay 40 >= 10                              -> liquid
+preferred                                         -> requiredRoi = 10%
+roiCeiling            = FLOOR(20,424 / 1.10 / 1.05) = 17,683
+profitCeiling         = FLOOR((20,424 − 100) / 1.05) = 19,356
+ceiling               = 17,683
+```
 
 A listing of 99 @ 15,000:
 
 ```
-totalCost      = CEIL(15,000 × 99 × 1.05) = 1,559,250
-totalNet       = 20,424 × 99             = 2,021,976
-expectedProfit = 462,726
-RoiPercent     = 462,726 / (15,000×99) × 100 = 31.16%     (reported; pre-fee basis)
-ResaleValuePerSaleSlot    = 21,499 × 99 = 2,128,401
-ExpectedProfitPerSaleSlot = 462,726
-DaysToSell     = CLAMP(99/40, 0.25, 30) = 2.475
-ProfitVelocity = 462,726 / 2.475 = 186,960 gil/day
+landedCost      = CEIL(15,000 × 99 × 1.05) = 1,559,250
+netProceeds     = 20,424 × 99             = 2,021,976
+expectedProfit  = 462,726
+NetRoiPercent   = 462,726 / 1,559,250 × 100 = 29.68%      (reported AND enforced)
+EstimatedDaysToSell = 99 / 40 = 2.475
+ExpectedGilPerDay   = 462,726 / 2.475 = 186,960
+AllocationScore     = 186,960 × 1.25 = 233,700
 ```
 
-Tier: `PreferredStock=true` ⇒ **Core**.
+### 4.5 Worked example — General-Purpose dye, NQ
 
-### 4.4 Worked example — General-Purpose dye, NQ
-
-Home median 7,000; cheapest home listing 6,600; `SalesPerDay = 60`; `TargetStackSize=20`.
+Home median 6,600; depth-adjusted cheapest home listing 6,600; `SalesPerDay = 31`;
+`TargetStackSize = 20`.
 
 ```
-targetSalePrice = MIN(7,000, 6,599) = 6,599
-netUnitProceeds = FLOOR(6,599 × 0.95) = 6,269
-requiredRoi     = 60 >= 10  ->  MIN(20, 10) = 10
-roiCeiling      = FLOOR(6,269 / 1.10 / 1.05) = 5,427
+targetSalePrice       = 6,599
+netUnitProceeds       = FLOOR(6,599 × 0.95) = 6,269
+referenceValuePerSlot = 6,599 × 20 = 131,980  -> BELOW the 150,000 floor
+                                              -> requiredRoi = LowValueRoiPercent = 35%
+roiCeiling            = FLOOR(6,269 / 1.35 / 1.05) = 4,422
 ```
 
 A listing of 20 @ 1,148:
 
 ```
-totalCost      = CEIL(1,148 × 20 × 1.05) = 24,108
-totalNet       = 6,269 × 20              = 125,380
-expectedProfit = 101,272
-RoiPercent     = 101,272 / 22,960 × 100  = 441%          <-- spectacular percentage
-ResaleValuePerSaleSlot = 6,599 × 20 = 131,980            <-- BELOW the 150,000 floor
+landedCost      = 24,108
+netProceeds     = 125,380
+expectedProfit  = 101,272
+NetRoiPercent   = 420.1%                          <-- spectacular percentage
+EstimatedDaysToSell = 20 / 31 = 0.645
+ExpectedGilPerDay   = 101,272 / MAX(1.0, 0.645) = 101,272     (old model: 405,088)
+Tier                = Opportunistic (131,980 < 150,000)
+AllocationScore     = 101,272 × 0.6 = 60,763
+Coverage target     = 0.5 d × 31 = 16 units  -> roughly ONE stack, ever
 ```
 
-Tier: not preferred; `valuePerSlot 131,980 < 150,000` ⇒ **Opportunistic**, despite 441% ROI.
-It is capped at ~10% of portfolio slots and can never outrank a Core gemdraught.
-
-[OBS] This is the anti-trap mechanism working as designed.
+It is bought when there is room. It receives 0.6× weight, one stack, and a tenth of the
+portfolio at most. [OBS] This is the anti-trap mechanism, now expressed as economics rather
+than as tier dominance.
 
 ---
 
@@ -519,59 +589,84 @@ It is capped at ~10% of portfolio slots and can never outrank a Core gemdraught.
 
 **H** = hard-coded, **U** = user-configurable, **C** = computed.
 
-| Setting | Default | Kind | Location | Meaning | Enforced at |
-|---|---|---|---|---|---|
-| `ProcurementMinimumRoiPercent` | 20% | U (0–1000) | Configuration.cs L92, clamp L580 | Standard ROI bar on landed cost | `BuildPlan` L81; `RequiredPurchaseRoi` L1481 |
-| `ProcurementFastMoverRoiPercent` | 10% | U (0–1000) | Configuration.cs L47, clamp L549 | Lower ROI bar for ≥10 units/day | `PortfolioPolicy.RequiredRoiPercent` L39 |
-| `ProcurementFillRoiPercent` | 10% | U (0–1000) | Configuration.cs L41 | Lower bar for the top-up pass | `TopUpEmptySaleSlots` L239 |
-| `ProcurementMinimumProfitPerUnit` | 100 | U (0–100M) | Configuration.cs L93, clamp L581 | Flat gil/unit floor | `profitCeiling` L86; `PollListings` L1361 |
-| `ProcurementMinimumProfitPerSaleSlot` | 2,500 | U (≤100M) | Configuration.cs L54 | Slot-worthiness gate | `AddCandidate` L239 |
-| `SecondaryMinimumSalesPerDay` | 10 | **H** | PortfolioPolicy.cs L28 | Velocity floor for Secondary **and** the fast-mover ROI threshold | `ClassifyCandidate` L73; `RequiredRoiPercent` L39 |
-| `SecondaryMinimumValuePerSlot` | 150,000 | **H** | PortfolioPolicy.cs L29 | Value floor for Secondary | `ClassifyCandidate/Holding` |
-| `PreferredPortfolioTargetPercent` | 75% | U (0–100) | Configuration.cs L50 | Core slot target | `PortfolioPolicy.Summarize` L102; objective 1 |
-| `OpportunisticPortfolioMaximumPercent` | 10% | U (0–100) | Configuration.cs L51 | Cheap-stock cap | `Allocate` L303; objective 2; `PollListings` |
-| `rule.MaximumUnitPrice` | 0 (off) | U | ProcurementModels.cs | Hard max price/unit | `BuildPlan` L90 |
-| `rule.TargetStackSize` | 99 / 20 / 5 | U (1–999) | — | Max listing size bought; resale stack | `BuildPlan` L101; `PollListings` L1297 |
-| `rule.MaximumSaleSlots` | 8 / 2 / 1 / 5 | U (1–60) | — | Max slots per item | `Allocate`; `CollectBagStock` L2003 |
-| `rule.MinimumWeeklyUnitsSold` | 20 / 50 / 0 | U (0–1M) | — | Demand gate | `BuildPlan` L43 |
-| `ProcurementWeeklySalesSharePercent` | 25% | U (1–100) | Configuration.cs L85 | Max share of weekly volume held | `BuildPlan` L50 → `Allocate` |
-| `ProcurementBudget` | 5,000,000 | U (1k–100M) | Configuration.cs L32 | Per-trip cap **when reinvest off** | `ResaleStockPolicy.SpendableGil` L77 |
-| `ReinvestAvailableGil` | true | U | Configuration.cs L33 | Ignore per-trip cap, spend wallet | same |
-| `ProcurementTravelReserve` | 5,000 | U (≤100M) | Configuration.cs L84 | Always withheld | same |
-| `ProcurementBufferGilPercent` | 20% | U (0–100) | Configuration.cs L83 | Cap on spend once bags cover slots | `BufferSpendableGil` L85 |
-| `ProcurementBufferValueTarget` | 1,000,000 | U (≤999,999,999) | Configuration.cs L38 | Buffer must be worth this | `BufferIsComfortable` L52 |
-| `ProcurementBagBufferStacks` | 5 | U (0–50) | Configuration.cs L35 | Spare stacks when not "continue stocked" | `PlannedSaleSlots` L2019 |
-| `ProcurementTargetSaleSlots` | 60 | U (1–200) | Configuration.cs L90 | Portfolio size | slot maths |
-| `ProcurementInventoryReserve` | 10 | U (1–100) | Configuration.cs L91 | Bag slots kept free | planner; `PollListings` L1366 |
-| `ShoppingTripMinimumFreeSaleSlots` | 10 | U (0–60) | Configuration.cs L78 | Won't travel below this | `HoldingForSaleSlots` L188 |
-| `ShoppingTripMinimumGil` | 1,000,000 | U (≤100M) | Configuration.cs L81 | Won't travel below this | `HoldingForGil` L196 |
-| `HomePriceMaxAgeMinutes` | 30 | U (5–30) | Configuration.cs L69 | Resale-anchor staleness | `HomeReferenceMaxAge` L456 |
-| `ScoutKnowledgeMaxAgeHours` | 24 | U (1–168) | Configuration.cs L73 | Away-observation reuse | `ScoutKnowledgeIsFresh` L158 |
-| `MarketRequestTimeoutSeconds` | 6 | U (2–60) | Configuration.cs L20 | Live board wait | `MarketDataService` |
-| `MarketRequestRetryCount` | 2 | U (0–5) | Configuration.cs L22 | Retries | `AutomationController` |
-| listing search retries | 3 | **H** | ProcurementController.cs L1486 | `RetryListingRequest` | shopping |
-| `MaximumUpdatesPerSession` | 200 | U (1–200) | Configuration.cs L24 | Reprice writes per session | `EvaluateCurrentListing` L1115 |
-| `MaximumListingPrice` | 999,999,999 | **H** | PricingStrategyService.cs L12 | Game cap | pricing |
-| `MaximumCuratedUnitPrice` | 1,000,000 | **H** | MarketPriceSafety.cs L13 | Curated sanity ceiling | bag listing |
-| `OutlierFractionOfMedian` | 0.5 | **H** | HomePriceReference.cs L23 | Anchor outlier cut | `WithoutOutliers` L30 |
-| `MinimumDaysToSell` / `MaximumDaysToSell` | 0.25 / 30 | **H** | PortfolioPolicy.cs L16-17 | Velocity clamps | `DaysToSell` L57 |
-| `PriorityWorldsPerTrip` | 31 | U (1–40) | Configuration.cs L66 | Worlds per circuit | `PriorityTripShouldReturn` |
-| `PriorityMinutesPerTrip` | 180 | U (5–480) | Configuration.cs L67 | Time away | same |
-| comparison pass limit | 20 min | **H** | ProcurementController.cs L1236 | Buying phase time box | `PollListings` |
-| `PriorityItemsPerWorld` | 14 | U (1–40) | Configuration.cs L103 | Items priced per world | `SelectWorldItems` |
-| `MinimumStackValue` (discovery) | 150,000 | **H** | MarketDiscoveryPolicy.cs L15 | Discovery value floor | `Propose` |
-| `MinimumUnitsSoldPerDay` (discovery) | 50 | **H** | MarketDiscoveryPolicy.cs L16 | Discovery velocity floor | `Propose` |
-| `MaximumDiscoveredRules` | 12 | **H** | MarketDiscoveryPolicy.cs L22 | Discovery list cap | `Propose` |
-| `PricingRule.MinimumPrice` | 1 (raised on buy) | U/C | PricingModels.cs | Resale floor | `CalculateFloor` L90 |
-| `PricingRule.MinimumMarginPercent` | 0 (raised on buy) | C | — | Resale margin floor | `CalculateFloor` L90 |
-| `PricingRule.UndercutAmount` | 1 | U | PricingModels.cs | Undercut step | `Evaluate` |
-| `PriceWarDropPercent` | 60% | U (0–<100) | PricingModels.cs | Price-war trigger | `IsPriceWar` L100 |
-| Excluded worlds | Bismarck, Ravana, Sephirot, Sophia, Zurvan | **H** | ProcurementTravelPolicy.cs L5 | Never shop there | `CanShopOnWorld` L11 |
+### 5.1 Margins and economics
 
-Computed (**C**) values: `AvailablePurchaseSlots` (L1842), `PlannedSaleSlots` (L2019),
-`ComfortableBagTarget` = `CLAMP((slots+4)/5, 5, 20)` (ResaleStockPolicy L8),
-`ComfortableItemTarget` = `CLAMP((listed+3)/4, 1, 3)` (L11), `PortfolioCapacitySlots`,
-`CoreTarget` / `OpportunisticCap` (`PortfolioPolicy.Summarize` L102), `SpendableGil` (L1848).
+| Setting | Default | Kind | Meaning |
+|---|---|---|---|
+| `ProcurementFastMoverRoiPercent` | 10% | U (8–1000) | Bar for preferred + liquid + valuable stock |
+| `ProcurementHighVolumeRoiPercent` | 14% | U (8–1000) | Bar for unpinned liquid + valuable stock |
+| `ProcurementMinimumRoiPercent` | 20% | U (0–1000) | Bar for ordinary opportunities |
+| `ProcurementLowValueRoiPercent` | 35% | U (8–1000) | Bar for cheap stock |
+| `ProcurementAbsoluteMinimumRoiPercent` | 8% | U (8–1000) | Nothing is ever bought below this |
+| `ProcurementFillRoiPercent` | 10% | U (0–1000) | Relaxed bar for the top-up pass |
+| `ProcurementMinimumProfitPerUnit` | 100 | U (0–100M) | Flat gil/unit floor |
+| `ProcurementMinimumProfitPerSaleSlot` | 2,500 | U (≤100M) | Slot-worthiness gate for non-Core |
+| `ObservedMarketTaxPercent` | 5% | C | Recorded from the game; reset if outside [0,100) |
+| `ProcurementHighVolumeMinimumSalesPerDay` | 10 | U (10–10,000) | Velocity half of "high-volume" |
+| `ProcurementHighVolumeMinimumValuePerSlot` | 150,000 | U (150k–100M) | Value half of "high-volume" |
+
+### 5.2 Inventory sizing
+
+| Setting | Default | Kind | Meaning |
+|---|---|---|---|
+| `ProcurementPreferredCoverageDays` | 3.0 | U (0.25–7) | Days of demand held in Core stock |
+| `ProcurementSecondaryCoverageDays` | 1.5 | U (0.25–7) | Days of demand held in Secondary stock |
+| `ProcurementOpportunisticCoverageDays` | 0.5 | U (0.1–2) | Days of demand held in cheap stock |
+| `ProcurementCoverageOvershootDays` | 1.0 | U (0–1) | How far one stack may carry holdings past target |
+| `ProcurementEmergencyMaximumSlotsPerItem` | 20 | U (1–60) | Hard concentration limit |
+| `ProcurementAnchorAbsorptionDays` | 0.5 | U (0–0.5) | Cheap competing stock the market swallows |
+| `rule.MaximumSaleSlots` | 8 / 2 / 1 / 5 | U (1–60) | **A floor** beneath the demand-derived cap |
+| `ProcurementWeeklySalesSharePercent` | 25% | U (1–100) | Backstop; only used when velocity is unusable |
+| `PreferredPortfolioTargetPercent` | 75% | U (0–100) | Core slot target (reporting + fill shaping) |
+| `OpportunisticPortfolioMaximumPercent` | 10% | U (0–100) | Cheap-stock slot **and capital** cap |
+
+### 5.3 Capital, capacity and travel
+
+| Setting | Default | Kind | Meaning |
+|---|---|---|---|
+| `ProcurementBudget` | 5,000,000 | U | Per-trip cap **when reinvest off** |
+| `ReinvestAvailableGil` | true | U | Ignore the per-trip cap, spend the wallet |
+| `ProcurementTravelReserve` | 5,000 | U | Always withheld |
+| `ProcurementBufferGilPercent` | 20% | U | Cap on spend once bags cover slots (Core exempt) |
+| `ProcurementBufferValueTarget` | 1,000,000 | U | Buffer must be worth this |
+| `ProcurementBagBufferStacks` | 5 | U (0–50) | Spare stacks when not "continue stocked" |
+| `ProcurementTargetSaleSlots` | 60 | U (1–200) | Portfolio size |
+| `ProcurementInventoryReserve` | 10 | U (1–100) | Bag slots kept free |
+| `ShoppingTripMinimumFreeSaleSlots` | 10 | U (0–60) | Won't travel below this |
+| `ShoppingTripMinimumGil` | 1,000,000 | U (≤100M) | Won't travel below this |
+| `HomePriceMaxAgeMinutes` | 30 | U (5–30) | Resale-anchor staleness |
+| `ScoutKnowledgeMaxAgeHours` | 24 | U (1–168) | Away-observation reuse |
+| `PriorityWorldsPerTrip` / `PriorityMinutesPerTrip` | 31 / 180 | U | Circuit length |
+| `PriorityItemsPerWorld` | 14 | U (1–40) | Items priced per world |
+| Excluded worlds | Bismarck, Ravana, Sephirot, Sophia, Zurvan | **H** | Never shop there |
+
+### 5.4 Safety and pricing
+
+| Setting | Default | Kind | Meaning |
+|---|---|---|---|
+| `MinimumDaysToSell` / `MaximumDaysToSell` | 0.25 / 30 | **H** | Reporting clamps on `EstimatedDaysToSell` |
+| `ProfitNormalizationDays` | 1.0 | **H** | Scoring denominator floor |
+| `OutlierFractionOfMedian` | 0.5 | **H** | Anchor outlier cut (`WithoutOutliers`) |
+| `MaximumListingPrice` | 999,999,999 | **H** | Game cap |
+| `MaximumCuratedUnitPrice` | 1,000,000 | **H** | Curated sanity ceiling |
+| `PriceWarDropPercent` | 60% | U (0–<100) | Price-war trigger |
+| `PricingRule.UndercutAmount` | 1 | U | Undercut step |
+| `MarketRequestTimeoutSeconds` / retries | 6 / 2 | U | Live board wait |
+| listing search retries | 3 | **H** | `RetryListingRequest` |
+| comparison pass limit | 20 min | **H** | Buying phase time box |
+
+### 5.5 Discovery confidence
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `CandidateMinimumSalesPerDay` | 50 | Floor to be proposed at all |
+| `CandidateMinimumStackValue` | 150,000 | Floor to be proposed at all |
+| `ProvenMinimumSalesPerDay` | 75 | Promotion floor |
+| `ProvenMinimumStackValue` | 300,000 | Promotion floor |
+| `ProvenMinimumGilPerDay` | 50,000 | Promotion floor (computed at the *absolute minimum* margin) |
+| `ProvenMinimumConfirmations` | 5 | Agreeing refreshes required |
+| `ProvenMaximumPriceSpreadPercent` | 25% | Price stability required |
+| `MaximumDiscoveredRules` | 12 | Discovered list cap |
 
 ---
 
@@ -579,13 +674,13 @@ Computed (**C**) values: `AvailablePurchaseSlots` (L1842), `PlannedSaleSlots` (L
 
 ### 6.1 Where prices come from
 
-Repricing uses **live in-game Compare Prices**, not Universalis
-(`MarketDataService.cs -> GetSnapshotAsync`). Bag listing uses **Universalis** for the home world
-(`BagListingController.cs -> QueuePricedStock` L314).
+Repricing uses **live in-game Compare Prices** (`MarketDataService.GetSnapshotAsync`), not
+Universalis. Bag listing uses Universalis for the home world
+(`BagListingController.QueuePricedStock`).
 
 ### 6.2 Competitor selection
 
-`src/SmartUndercutBot.Core/Services/PricingStrategyService.cs -> Evaluate` (L14), competitor set at L31–40:
+`PricingStrategyService.Evaluate`:
 
 ```
 competitors = market.Listings WHERE
@@ -596,125 +691,123 @@ competitors = market.Listings WHERE
   AND RetainerId != 0 OR RetainerName != ourRetainerName     ; name fallback
 ```
 
-- **HQ/NQ matters**: default `QualityFilterMode.SameQuality`; other modes are configurable.
-- **Stack size does NOT matter**: a 1-unit listing at 6,599 and a 99-stack at 6,599 are treated
-  identically. Only `PricePerUnit` is compared. [IMPL]
+- **HQ/NQ matters**: default `QualityFilterMode.SameQuality`.
+- **Stack depth now matters**: `lowest` is `DepthAdjustedLowest(competitors, market.AbsorbableUnits)`,
+  so a 1-unit undercut in a market that turns over hundreds of units a day does not drag a
+  99-stack down. `AbsorbableUnits` is supplied by the caller as
+  `MIN(stackSize / 2, salesPerDay × ProcurementAnchorAbsorptionDays)` and is `0` when unknown,
+  which degrades exactly to the old "cheapest listing wins". [IMPL]
 - **Own listings ARE detected**, by retainer ID with a retainer-name fallback.
 
 ### 6.3 The pricing algorithm, in order
 
 ```
-1. Validate listing/rule bounds                        -> InvalidData      [L21-27]
-2. floor = CalculateFloor(listing, rule)                                   [L29, L90]
-       costBasis = listing.AcquisitionCost != 0 ? it : rule.CostBasis
-       IF costBasis == 0 -> floor = MAX(1, rule.MinimumPrice)
-       ELSE floor = MAX(rule.MinimumPrice,
-                        CEIL(costBasis × (1 + MinimumMarginPercent/100)))
-3. Build competitor set (above)                                            [L31-40]
+1. Validate listing/rule bounds                        -> InvalidData
+2. floor = CalculateFloor(listing, rule)
+       configured = MAX(rule.MinimumPrice, rule.AcquisitionFloor)
+       costBasis  = listing.AcquisitionCost != 0 ? it : rule.CostBasis
+       IF costBasis == 0 -> floor = MAX(1, configured)
+       ELSE floor = MAX(configured, CEIL(costBasis × (1 + MinimumMarginPercent/100)))
+3. Build competitor set (above)
 4. competitors empty                                   -> NoMarketData (no change)
-5. lowest = MIN(competitor prices)                                         [L47]
-6. Price-war test: lowest < historicalMedian × (1 − PriceWarDropPercent/100)  [L48, L100]
+5. lowest = DepthAdjustedLowest(competitors, AbsorbableUnits)
+6. Price-war test: lowest < historicalMedian × (1 − PriceWarDropPercent/100)
        IF war AND action == LeaveUnchanged             -> PriceWar (no change)
-       IF war AND action == MatchProtectedFloor:
-            protectedFloor = MAX(floor, FLOOR(median × (1 − drop/100)))
-            -> Update to protectedFloor (or NoChange)
-7. currentPrice <= lowest                              -> NoChange   (already cheapest)
-8. WithinTolerance(current, lowest)                    -> WithinTolerance (no change)
-       |current − lowest| <= AbsoluteTolerance  (if > 0)
-       OR |current − lowest|×100/lowest <= PercentageTolerance (if > 0)
-9. rawTarget = Mode == MatchLowest ? lowest
-                                   : (lowest > UndercutAmount ? lowest − UndercutAmount : 1)
+       IF war AND action == MatchProtectedFloor        -> Update to MAX(floor, protected)
+7. currentPrice <= lowest                              -> NoChange
+8. WithinTolerance(current, lowest)                    -> WithinTolerance
+9. rawTarget = Mode == MatchLowest ? lowest : (lowest > UndercutAmount ? lowest − UndercutAmount : 1)
 10. rawTarget < floor                                  -> BelowFloor (no change)
 11. rounded = RoundDown(rawTarget, Rounding)           ; None | EndIn99 | EndIn999
 12. target = MAX(floor, rounded)
-13. target > 999,999,999                               -> InvalidData      [L77]
+13. target > 999,999,999                               -> InvalidData
 14. target == currentPrice                             -> NoChange
 15. -> Update(target)
 ```
 
-- **Minimum undercut** = `UndercutAmount` (default **1 gil**).
-- **Maximum undercut** = none; bounded only by the floor.
-- **Price-war avoidance**: yes — default `PriceWarDropPercent = 60%`, default action
-  `LeaveUnchanged` (do nothing while the market is crashed).
-- **Refuses to reprice** on: NoMarketData, PriceWar, NoChange, WithinTolerance, BelowFloor,
-  InvalidData, dry-run (`!AllowAutomaticWrites`), or session update cap reached.
+### 6.4 Cost basis — weighted average, not a ratchet
 
-### 6.4 Cost floor pinned by purchases
-
-After a confirmed buy (`ProcurementController.cs -> PollPurchase` L1398, mutation at L1442–1454):
+After a confirmed buy (`ProcurementController.PollPurchase` L1415 →
+`PositionCostPolicy.RecordPurchase`):
 
 ```
-landedCostPerUnit = CEIL((price×qty + serverTax) / qty)                    [L1442]
-rule.CostBasis            = MAX(existing, landedCostPerUnit)               [L1445]  ; monotonic
-rule.MinimumMarginPercent = MAX(existing, RequiredPurchaseRoi(order))      [L1446]  ; monotonic
-rule.MinimumPrice         = MAX(existing, ProcurementPriceSafety.MinimumResalePrice(...)) [L1448]
+landedCost  = live.PricePerUnit × live.Quantity + live.TotalTax          ; SERVER-reported tax
+unit        = CEIL(landedCost / quantity)
+blendUnits  = MIN(heldUnits, rule.CostBasisUnits)
+CostBasis   = (holdingsKnown && CostBasis > 0)
+              ? CEIL((CostBasis × blendUnits + landedCost) / (blendUnits + quantity))
+              : MAX(CostBasis, unit)                                     ; protective fallback
+CostBasisUnits   = blendUnits + quantity
+AcquisitionFloor = ProcurementPriceSafety.MinimumResalePrice(CostBasis, requiredRoi, minProfit, fees)
+                 = CEIL( CEIL(MAX(cost × (1+roi/100), cost + minProfit)) / (1 − marketTax/100) )
 ```
 
-```
-MinimumResalePrice(cost, roi%, minProfit)                    ; ProcurementPriceSafety.cs L5
-  = CEIL( CEIL( MAX(cost × (1+roi/100), cost + minProfit) ) / 0.95 )      [L10]
-```
+`MinimumMarginPercent` is **no longer written** by purchases, and `MinimumPrice` is left to the
+user; the automatic floor lives in `AcquisitionFloor` and is recomputed from the current basis
+every time. [IMPL]
 
-The `/0.95` grosses the required *net* up to a *listing* price so the 5% sale tax still leaves the
-margin intact.
+`ProcurementController.ReconcilePositionCosts` (L1948), called at the start of every scan,
+retires units that are no longer held (`PositionCostPolicy.RecordSale`) and clears the basis
+entirely once the position empties, so the next purchase rebases the item. It runs **only**
+against a complete, verified retainer picture, because a partial pass would look like stock
+that had sold and would drop a live floor. [IMPL]
 
-[IMPL] Note the deliberate coupling added in `ad1fa36`: because `RequiredPurchaseRoi` is now
-velocity-tiered, a fast mover bought at a 10% bar also pins a **10%** resale margin — the comment at
-L1476 explains that pinning 20% on stock bought at 10% "would just park the stack."
+**Known approximation:** holdings are aggregate, not per-lot. When holdings cannot be verified
+the old high-water mark is kept, and only units the basis already accounts for may dilute it.
+The floor therefore always covers at least the average landed cost of what is really in the
+bags. [OBS]
 
 ### 6.5 Suspicious/stale listing handling
 
-- **Anchor outliers**: buying ignores home listings below half the median (`HomePriceReference` L30–40).
-- **Safety-seed detection**: `MarketPriceSafety.IsSafetySeedRepresentation` catches the 999,999,999
-  placeholder and stack-totals within ±1,000 of it.
-- **Curated ceiling**: curated consumables priced above 1,000,000/unit are treated as unresolved
-  placeholders and repaired from a known-safe or historical price, or skipped.
-- [OBS] **Repricing itself has no outlier rejection.** A single 1-gil competitor listing is a valid
-  `lowest`; only the floor prevents following it down.
+- **Anchor outliers**: `HomePriceReference.WithoutOutliers` drops listings below half the
+  median, but only with ≥3 listings. When an absorption allowance is supplied,
+  `DepthAdjustedLowest` deliberately skips the outlier filter — substantial cheap inventory
+  must not be discarded merely for being cheap; depth is what decides.
+- **Safety-seed detection**: `MarketPriceSafety.IsSafetySeedRepresentation` catches the
+  999,999,999 placeholder and stack-totals within ±1,000 of it.
+- **Curated ceiling**: curated consumables priced above 1,000,000/unit are treated as
+  unresolved placeholders and repaired or skipped.
+- [OBS] **Repricing still has no outlier rejection**, only the depth adjustment and the floor.
 
 ---
 
 ## 7. Market Data Sources
 
-| Source | Endpoint / mechanism | Consumed by | Failure behaviour |
+| Source | Mechanism | Consumed by | Failure behaviour |
 |---|---|---|---|
-| **Universalis full** | `GET /api/v2/{scope}/{ids}?listings=100&entries=100&statsWithin=604800000` (`UniversalisService.ScanAsync` L176) | Home listings + 7-day sales + velocity → resale anchor, demand gate, tiering | 20 ids/batch; 3 attempts on 408/429/500/502/503/504; **partial results kept**; throws only if *every* batch failed |
-| **Universalis aggregated** | `GET /api/v2/aggregated/{scope}/{ids}`, 100 ids/req (`FetchPriceHintsAsync` L259) | `MarketPriceHint` → **route and per-world item choice only** | Failed batches logged and tolerated; hints reduced; shopping unaffected |
-| **In-game Compare Prices** | `MarketDataService` + `IMarketBoard` packets | Repricing (its only pricing source) | Timeout (6s) → retry; `LastRequestSawAnyPacket` distinguishes "nothing arrived" |
+| **Universalis full** | `GET /api/v2/{scope}/{ids}?listings=100&entries=100&statsWithin=604800000` | Home listings + 7-day sales + velocity → anchor, demand gate, coverage, tiering | 20 ids/batch; 3 attempts on 408/429/5xx; **partial results kept**; throws only if every batch failed |
+| **Universalis aggregated** | `GET /api/v2/aggregated/{scope}/{ids}` | `MarketPriceHint` → **route and per-world item choice only** | Tolerated; shopping unaffected |
+| **In-game Compare Prices** | `MarketDataService` + `IMarketBoard` packets | Repricing | Timeout → retry |
 | **In-game Item Search** | `MarketPurchaseService` + `InfoProxyItemSearch` | **The only source that can authorize a purchase** | `MarketResponseTracker.IsReady` requires the declared row count fully received, no error, 750 ms settle |
-| **Saddlebag Exchange** | `POST docs.saddlebagexchange.com/api/ffxivrawstats`, 45 s timeout | Discovery only, **off by default** | Returns `[]`, logs, curated rules unaffected |
-| **Repricing observations** | `AutomationController.ObservedHomePrices` | Seeds home anchors for free | Falls back to a live home sweep |
+| **Retainer sell window** | `RetainerListingService.TryReadSellerFeePercent` | **`ObservedMarketTaxPercent`** — every margin, ceiling and floor | Falls back to 5% |
+| **Saddlebag Exchange** | `POST .../ffxivrawstats` | Discovery only, **off by default** | Returns `[]` |
+| **Repricing observations** | `AutomationController.ObservedHomePrices` | Seeds home anchors | Falls back to a live home sweep |
 | **Local Excel sheets** | `dataManager.GetExcelSheet<Item>()` | Rule seeding, discovery validation | Authoritative for tradability/HQ/stack |
 
 ### 7.1 Staleness
 
-| Data | Lifetime | Enforced |
-|---|---|---|
-| Home resale anchor | 30 min (`HomePriceMaxAgeMinutes`, clamped 5–30) | `HomeReferenceMaxAge` L456 — checked at plan build **and again** before purchase (L1242) |
-| Away scout observations | 24 h (`ScoutKnowledgeMaxAgeHours`) | `ScoutKnowledgeIsFresh` L158 |
-| Snipe block (`PreferredStock` + `AlwaysScout`) | **never cached** | `ScoutKnowledgeIsFresh` returns false for these |
-| Discovery cache | 24 h (`MarketDiscoveryCacheHours`) | `MarketDiscoveryService.RefreshIfDue` |
-| Live listing before buy | must be fresh this visit | `MarketResponseTracker.IsReady` |
+| Data | Lifetime |
+|---|---|
+| Home resale anchor | 30 min; checked at plan build **and again** before purchase |
+| Away scout observations | 24 h (`ScoutKnowledgeMaxAgeHours`) |
+| Snipe block (`PreferredStock` + `AlwaysScout`) | **never cached** |
+| Discovery cache | 24 h |
+| Live listing before buy | must be fresh this visit |
 
 ### 7.2 API failure — does it fail open?
 
-**No, for purchases.** [IMPL] A purchase requires a live in-game board reading that satisfies
+**No, for purchases.** [IMPL] A purchase requires a live in-game board reading satisfying
 `MarketResponseTracker.IsReady`. Universalis is never sufficient. Hints are typed as
-`MarketPriceHint` — deliberately *not* `ProcurementMarketListing` — so they cannot reach the planner
-as buyable listings.
+`MarketPriceHint` — deliberately *not* `ProcurementMarketListing` — so they cannot reach the
+planner as buyable listings.
 
-Specific failure behaviours:
-
-- Universalis fully down ⇒ `ScanAsync` throws ⇒ scan fails ⇒ retry on interval. **No purchases.**
-- Universalis partially down ⇒ partial data used ⇒ **fewer** candidates. Safe direction.
-- Aggregate hints down ⇒ routing falls back to rotation. Shopping continues.
-- Saddlebag down ⇒ `[]`; curated rules stand.
-- Home anchor expired mid-trip ⇒ that order is skipped (L1242) or the trip ends to refresh.
+- Universalis fully down ⇒ scan fails ⇒ retry on interval. **No purchases.**
+- Universalis partially down ⇒ fewer candidates. Safe direction.
+- Home anchor expired mid-trip ⇒ that order is skipped, or the trip ends to refresh.
 - Live board empty/timeout ⇒ 3 retries then skip that item.
 
-[OBS] One soft spot: **stale-but-fresh-enough data is used**. A home anchor up to 30 minutes old
-authorizes a purchase, and away observations up to 24 hours old select which deals to revisit —
-though the revisit re-reads the live board and re-checks profit before buying.
+[OBS] Soft spot: a home anchor up to 30 minutes old can authorize a purchase, though the live
+board is re-read and profit re-checked immediately before buying.
 
 ---
 
@@ -722,93 +815,121 @@ though the revisit re-reads the live board and re-checks profit before buying.
 
 ### 8.1 Quantity is not chosen
 
-The bot buys **whole listings**. The only quantity constraints are
-`listing.Quantity <= MAX(1, rule.TargetStackSize)` (`BuildPlan` L101) and the clamp at purchase time
-(`PollListings` L1297: `Quantity = MIN(currentOrder.Quantity, TargetStackSize)`).
+The bot buys **whole listings**, constrained to `listing.Quantity <= rule.TargetStackSize` and
+clamped again at purchase time.
 
-### 8.2 Slot budget
+### 8.2 Inventory coverage — the primary volume control
+
+`InventoryCoveragePolicy` (`InventoryCoveragePolicy.cs`)
 
 ```
-AvailablePurchaseSlots()  = PlannedSaleSlots(repricing.LastKnownFreeSaleSlots ?? 0)   [L1842]
+ownedUnits   = listed units + bagged resale units + units already planned this run
+coverageDays = ownedUnits / salesPerDay
+targetUnits  = CEIL(salesPerDay × CoverageDaysFor(tier))          ; Core 3, Secondary 1.5, Opp 0.5
+ceilingUnits = CEIL(salesPerDay × (CoverageDaysFor(tier) + 1.0))
 
-PlannedSaleSlots(free):                                                              [L2019]
-    free = MIN(free, ProcurementTargetSaleSlots)      ; 60
+CanAdd ⟺ quantity > 0 AND salesPerDay > 0
+       AND ownedUnits < targetUnits
+       AND ownedUnits + quantity <= ceilingUnits
+```
+
+With no usable velocity `CanAdd` is **false** and the weekly-share cap takes over as the
+backstop. The check is applied in the planner *and* re-applied at the board (§2.4 check 13).
+
+### 8.3 Slot budget
+
+```
+AvailablePurchaseSlots() = PlannedSaleSlots(repricing.LastKnownFreeSaleSlots ?? 0)
+
+PlannedSaleSlots(free):
+    free = MIN(free, ProcurementTargetSaleSlots)
     held = ResaleBagSlots                              ; bag stock as sale-stacks
-    IF free > held            -> free − held                        (fill real vacancies)
+    IF free > held            -> free − held
     IF ContinueShoppingWhenStocked ->
-        MIN(MAX(0, free + ComfortableBagTarget − held),
+        MIN(MAX(0, free + ComfortableStockTarget − held),
             MAX(0, FreeInventorySlots − ProcurementInventoryReserve))
     ELSE                      -> MAX(0, free + ProcurementBagBufferStacks − held)
 
-slotLimit (planner) = MIN(FreeSaleSlots, FreeInventorySlots)
+slotLimit (planner)   = MIN(FreeSaleSlots, FreeInventorySlots)
+per-item slot ceiling = EffectiveMaximumSlots(policy, rule, candidate)
+                      = MIN(EmergencyMaximumSlotsPerItem,
+                            MAX(rule.MaximumSaleSlots,
+                                CEIL(ceilingUnits / stackSize)))
 ```
 
-`ResaleBagSlots` is capped per item by `rule.MaximumSaleSlots` (`CollectBagStock` L2003) — so 999
-materia under a 1-slot rule counts as **1** buffer slot, not 50. (Before that cap, deep stacks made a
-few bag slots look like a full portfolio and stopped shopping entirely.)
+`ResaleBagSlots` is capped per item by the same demand-derived figure, so deep stacks of a
+liquid line no longer make a few bag slots look like a full portfolio.
 
-### 8.3 Gil budget
+### 8.4 Gil budget and the top-up pass
 
 ```
-SpendableGil(newTrip):                                                               [L1848]
-  available = ResaleStockPolicy.SpendableGil(wallet, travelReserve, reinvest, tripCap, spent)  [L77]
-            = reinvest ? wallet − reserve
-                       : MIN(wallet − reserve, tripCap − spent)
-
+SpendableGil(newTrip):
+  available = reinvest ? wallet − reserve : MIN(wallet − reserve, tripCap − spent)
   bags = CollectBagStock() EXCLUDING PreferredStock items
-  IF MIN(freeSlots, targetSlots) > bags.SaleSlots -> return available   (vacancies exist)
-
+  IF MIN(freeSlots, targetSlots) > bags.SaleSlots -> return available
   ; bags already cover the vacancies: apply the buffer cap
-  bufferCost = Σ quantity × GetEffectiveRule(item).CostBasis
-  cap = BufferSpendableGil(wallet−reserve, bufferCost, ProcurementBufferGilPercent)   [L85]
-      = CLAMP(FLOOR((walletAfterReserve + bufferCost) × pct/100) − bufferCost,
+  cap = CLAMP(FLOOR((walletAfterReserve + bufferCost) × BufferGilPercent/100) − bufferCost,
               0, walletAfterReserve)
   return MIN(available, cap)
 ```
 
-[OBS] Preferred (Core) stock is **exempt** from the buffer cap — gil keeps flowing into gemdraughts
-while cheap stock is restrained.
+Preferred (Core) stock is **exempt** from the buffer cap. [OBS]
 
-### 8.4 Anti-overconcentration
+`TopUpEmptySaleSlots` (`ProcurementController.Priority.cs` L242) runs when the comparison plan
+still leaves slots empty:
+
+```
+uncovered = MAX(0, MIN(freeSaleSlots, targetSaleSlots) − ResaleBagSlots)
+free      = MIN(AvailablePurchaseSlots(), uncovered) − compared.Orders.Count
+IF free <= 0 OR ProcurementFillRoiPercent >= ProcurementMinimumRoiPercent -> no top-up
+plan with Economics = policy.RelaxedTo(ProcurementFillRoiPercent)
+          Portfolio = gates with OpportunisticMaximumPercent = 0
+accept only orders whose Tier != Opportunistic
+```
+
+The relaxed policy lowers the preferred, high-volume and standard rungs; it does **not** lower
+the low-value rung or the absolute floor, and it does **not** change coverage targets. So the
+pass can buy good stock a little cheaper and cannot buy junk or overstock. [IMPL]
+
+### 8.5 Anti-overconcentration
 
 | Mechanism | Effect |
 |---|---|
-| `rule.MaximumSaleSlots` | Hard per-item slot cap (curated 8, dyes 2, materia 1) |
-| Weekly share cap | `MAX(TargetStackSize, 25% × weeklyUnits) − owned` units |
-| `ShoppingRules()` re-cap (L2033) | When bags already cover slots, per-item spare limited to `ComfortableItemTarget` = 1–3 |
-| Opportunistic cap | ≤10% of portfolio slots for low-value/low-velocity stock |
-| Slot-value gate | ≥2,500 gil profit per slot for non-Core |
+| **Inventory coverage** | The primary control: days of the market's own demand |
+| `EffectiveMaximumSlots` | Demand-derived per-item slot cap, floored at `rule.MaximumSaleSlots` |
+| `EmergencyMaximumSlotsPerItem` | Hard limit (20) no amount of demand may exceed |
+| Opportunistic slot cap | ≤10% of portfolio slots, counting stock already listed |
+| Opportunistic capital cap | ≤10% of the shopping budget |
+| Slot-value gate | ≥`MinimumProfitPerSaleSlot` profit per slot for non-Core |
+| Weekly share cap | Backstop only, when velocity is unusable |
 | Buffer gil cap | ≤20% of (wallet + buffer cost) in non-preferred bag stock |
-| `owned` counting | Listed **and** bagged stock counts against every cap |
+| `owned` counting | Listed **and** bagged **and** already-planned stock counts against every cap |
 
-**Answer to "can it overspend on one high-ROI, low-value item?"**
-[OBS] Largely no. A cheap item is Opportunistic → capped at 10% of slots → and its per-item
-`MaximumSaleSlots` (2 for dyes, 1 for materia) binds first. The residual risk is the immediate-buy
-path (§2.5), which can spend budget on a 100%-ROI cheap item before better stock is seen — but that
-order is still subject to the slot-value gate and the opportunistic cap.
+**Can it overspend on one high-ROI, low-value item?** [OBS] No. A cheap item lands in
+Opportunistic, is held to the 35% bar, is limited to half a day of its own demand (typically one
+stack), is weighted 0.6× in the ranking, and is capped at a tenth of both slots and capital.
+
+**Can it overspend on one excellent item?** Deliberately, yes — up to its coverage target and
+the 20-slot emergency limit. That is the intended behaviour for markets like Caramel Popcorn.
 
 ---
 
 ## 9. High-Value vs Low-Value Opportunities — Direct Answer
 
-**The code has an explicit, layered bias AGAINST high-ROI/low-value items.** This is unusual and
-deliberate. [IMPL]
+**The code has an explicit, layered bias toward high-value, high-throughput stock, expressed as
+economics rather than as tiering.** [IMPL]
 
-### 9.1 The five defences
+### 9.1 The defences
 
-1. **ROI is never an objective.** It only produces a price ceiling. No sort key is ROI, except
-   strategy 3 (`profit/cost`), which is still tier-major and only one of five candidate plans.
-2. **Tier dominance.** `Tiered()` (L375) sorts by tier first in every strategy. A Core gemdraught is
-   considered before any dye, always.
-3. **Value floor for Secondary.** `SecondaryMinimumValuePerSlot = 150,000` gil of resale value per
-   slot. Below that, no amount of velocity or ROI earns better than Opportunistic.
-4. **Slot-value gate.** Non-Core candidates need ≥`MinimumProfitPerSaleSlot` (2,500) profit per slot
-   or they are rejected outright with reason "insufficient slot value" (L239).
-5. **Opportunistic cap.** ≤10% of portfolio slots, counting already-listed stock.
-
-Plus: plan objective 5 (slot occupancy) is *last*, with the comment at L344 saying a cheap low-value
-item must never win by filling one more slot; and `FinishPriorityScouting` (L214) will leave slots
-empty rather than buy junk.
+1. **ROI is never an objective.** It only produces a price ceiling.
+2. **The ranking key is gil per day**, normalised to a one-day window so small stacks cannot
+   manufacture a rate.
+3. **The margin ladder requires value, not just speed.** A cheap fast item gets the *strictest*
+   bar (35%), not the most lenient.
+4. **Coverage sizes positions by demand.** Half a day of a 31/day dye market is 16 units.
+5. **Slot-value gate.** Non-Core candidates need ≥2,500 gil profit per slot.
+6. **Opportunistic caps** on both slots (10%) and capital (10%).
+7. **Tier weighting** (1.25 / 1.0 / 0.6) as a final thumb on the scale.
 
 ### 9.2 Concrete numerical comparison
 
@@ -816,246 +937,141 @@ empty rather than buy junk.
 |---|---|---|
 | Buy price/unit | 15,000 | 1,148 |
 | Resale anchor | 21,499 | 6,599 |
-| `totalCost` | 1,559,250 | 24,108 |
-| `expectedProfit` | **462,726** | 101,272 |
-| `RoiPercent` (reported) | 31% | **441%** |
+| Landed cost | 1,559,250 | 24,108 |
+| Expected profit | **462,726** | 101,272 |
+| **NetRoiPercent** | 29.68% | **420.1%** |
+| Margin bar applied | 10% | **35%** |
 | `ResaleValuePerSaleSlot` | 2,128,401 | 131,980 |
-| `SalesPerDay` | 40 | 60 |
-| `DaysToSell` | 2.475 | 0.333 |
-| `ProfitVelocity` | 186,960/day | **303,816/day** |
-| **Tier** | **Core** (pinned) | **Opportunistic** (131,980 < 150,000) |
+| `SalesPerDay` | 40 | 31 |
+| `EstimatedDaysToSell` | 2.475 | 0.645 |
+| **ExpectedGilPerDay** | **186,960** | 101,272 |
+| Tier / weight | Core / 1.25 | Opportunistic / 0.6 |
+| **AllocationScore** | **233,700** | 60,763 |
+| Coverage target | 120 units (3 d) | 16 units (0.5 d) |
 
-**Outcome:** A wins every strategy because tier sorts first. B is capped at 10% of slots.
+**Outcome:** A outranks B by 3.8×, on economics alone. Under the old model B's `ProfitVelocity`
+was 405,088/day — *higher* than A's — and only tier dominance kept it down. [OBS]
 
-Note B's `ProfitVelocity` is *higher* (304k vs 187k gil/day) — B returns its smaller profit roughly
-7× faster. If tiering were removed, B would win strategies 1 and 4.
-**Tier is the only thing preventing that.** [OBS]
+### 9.3 Where bias could still leak
 
-### 9.3 Where the bias can still leak
-
-1. **The immediate-buy path** (§2.5) — no cross-item comparison; the first-seen exceptional deal wins.
-2. **A dye priced just over the value floor.** At `ResaleValuePerSaleSlot ≥ 150,000` (e.g. 20 × 7,500)
-   with ≥10 sales/day and ≥2,500 profit/slot, a dye becomes **Secondary** and then competes on
-   `ProfitVelocity`, where small fast stacks score very well because of the 0.25-day clamp.
-   Worked: 20 units clearing in <6 h ⇒ `DaysToSell` floors at 0.25 ⇒ `ProfitVelocity = profit × 4`.
-   A 101,272-gil profit scores 405,088/day, beating the gemdraught's 186,960/day. It still cannot
-   outrank Core, but it outranks other Secondary stock. **This is the sharpest remaining edge.** [OBS]
-3. **`MinimumDaysToSell = 0.25` systematically favours small stacks** — any stack clearing in under
-   six hours gets the same denominator, so profit-per-day is inflated for tiny lots.
-4. **The fast-mover ROI cut applies to cheap items too.** `RequiredRoiPercent` keys only on
-   `salesPerDay >= 10`; it has no value floor. A cheap, fast-selling item gets the same 10% bar as
-   popcorn, so its price ceiling rises and more cheap listings qualify. They still land in
-   Opportunistic and hit the 10% cap, but the candidate pool grows. [OBS]
+1. **`salesPerDay` is the whole market's rate**, not our share of it, so `EstimatedDaysToSell`
+   is optimistic. It is applied consistently, so it does not bias between candidates, but the
+   absolute gil/day figures read high. [OBS]
+2. **A cheap item that crosses the 150,000 value floor** becomes Secondary and gets the 14%
+   bar, a 1.5-day coverage target and a 1.0 weight. This is intended — at that value per slot
+   it is no longer a trinket — but the floor is where the boundary sits.
+3. **Coverage depends on velocity data.** An item whose Universalis velocity is reported as an
+   explicit `0` suppresses the 7-day fallback, which makes `CanAdd` false and falls back to the
+   weekly-share cap. Conservative, but a data quirk rather than a decision. [OBS]
 
 ---
 
 ## 10. Item Categories and Special Cases
 
-| Category | Treatment | Source |
-|---|---|---|
-| **Raid food/potions** (4 Gemdraughts, Caramel Popcorn, Popoto Potage) | `PreferredStock`, `TourPriority=0`, HQ-required, `MaximumSaleSlots=8`, `AlwaysScout`, exempt from the buffer gil cap, always Core, listed as 99-stacks | `UniversalisService.CreateFavoriteRules` L73; `FavoriteNames` L39 |
-| **General-Purpose / Wide-Spectrum dyes** | Buyable; `TourPriority=1`, stack 20, `MaximumSaleSlots=2`, `MinimumWeeklyUnitsSold=50`, `AllowHighQuality` from the sheet's `CanBeHq` | `CreateBuyableDyeRules` L114 |
-| **Jet Black / Pure White dyes** | `AlwaysScout=true` — priced on every world (snipe lines) | Configuration.cs L158; backfill L512 |
-| **All other dyes** | `LiquidateOnly` — sold from bags, never bought, no reserve | `CreateLiquidationRules` L100 |
-| **Materia XI/XII** | Buyable; `TourPriority=2`, stack 20, **`MaximumSaleSlots=1`**, `MinimumWeeklyUnitsSold=50` | `CreateTradeableMateriaRules` L142 |
-| **All other materia** | `LiquidateOnly` | `CreateLiquidationRules` L100 |
-| **Ethers** (whole-word match; excludes "Aethersand") | `LiquidateOnly` | `CreateLiquidationRules` L100 |
-| **8 tomestone materials** | `LiquidateOnly`, stack 20, 5 slots, no reserve | `CreateTomeMaterialRules` L130 |
-| **Discovered items** | Food/medicine only (`Meal`, `Medicine`, `Seafood`, `Ingredient`); ≥150k stack value, ≥50 units/day; seeded `PreferredStock=true`, `TourPriority=0` | `MarketDiscoveryPolicy.Propose` |
-| Crafting materials, gear, furniture, glamour, minions | **No rules** ⇒ invisible to the buying path | — |
-
-**Category-driven pricing differences:** curated consumables get a 1,000,000 gil/unit sanity ceiling
-and are listed as full 99-stacks; everything else uses `rule.TargetStackSize` and the general safety
-check.
-
-**Absent:** no item-level logic, no crafted-vs-gathered distinction, no vendor-price comparison, no
-glamour/furniture handling, no seasonal or patch awareness.
+| Category | Treatment |
+|---|---|
+| **Raid food/potions** (4 Gemdraughts, Caramel Popcorn, Popoto Potage) | `PreferredStock`, `TourPriority=0`, HQ-required, `AlwaysScout`, exempt from the buffer gil cap, always Core: 10% bar, 3-day coverage, ×1.25 weight, demand-derived slot cap |
+| **General-Purpose / Wide-Spectrum dyes** | Buyable; `TourPriority=1`, stack 20, `MinimumWeeklyUnitsSold=50`. Usually Opportunistic on value per slot |
+| **Jet Black / Pure White dyes** | `AlwaysScout=true` — priced on every world |
+| **All other dyes, ethers, older materia** | `LiquidateOnly` — sold from bags, never bought |
+| **Materia XI/XII** | Buyable; `TourPriority=2`, stack 20. Secondary or Opportunistic on value per slot |
+| **8 tomestone materials** | `LiquidateOnly` |
+| **Discovered items** | Food/medicine only; ≥150k stack value, ≥50 units/day; seeded `Confidence=Candidate`, `PreferredStock=false`. Promotion requires sustained evidence (§12) |
+| Crafting materials, gear, furniture, glamour, minions | **No rules** ⇒ invisible to the buying path |
 
 ---
 
 ## 11. Important Configuration
 
-### 11.1 Economically material settings
+See §5 for the full tables. The economically material dashboard controls (Shopping tab) are:
 
-| Config property | UI label (Shopping tab) | Default | Range | Consumed at |
-|---|---|---|---|---|
-| `ProcurementMinimumRoiPercent` | Minimum expected return after fees | 20 | 0–1000 | planner ceiling L81; `RequiredPurchaseRoi` L1481 |
-| `ProcurementFastMoverRoiPercent` | **High-volume ROI %** | 10 | 0–1000 | `RequiredRoiPercent` L39 (DashboardWindow L1091) |
-| `ProcurementFillRoiPercent` | Fill-up ROI % for empty slots | 10 | 0–1000 | `TopUpEmptySaleSlots` L239 |
-| `ProcurementMinimumProfitPerUnit` | Minimum profit per unit | 100 | 0–100M | `profitCeiling` L86 |
-| `ProcurementMinimumProfitPerSaleSlot` | — | 2,500 | ≤100M | `AddCandidate` L239 |
-| `PreferredPortfolioTargetPercent` | Portfolio shape | 75 | 0–100 | `Summarize` L102 |
-| `OpportunisticPortfolioMaximumPercent` | Portfolio shape | 10 | 0–100 | `Allocate` L303 |
-| `ProcurementBudget` | Maximum gil per trip | 5,000,000 | 1k–100M | only when `ReinvestAvailableGil=false` |
-| `ReinvestAvailableGil` | Spend whatever gil is in the wallet | true | — | `SpendableGil` L77 |
-| `ProcurementTravelReserve` | Gil to keep for travel | 5,000 | ≤100M | `SpendableGil` L77 |
-| `ProcurementBufferGilPercent` | Buffer budget when sale slots are covered | 20 | 0–100 | `BufferSpendableGil` L85 |
-| `ProcurementBufferValueTarget` | Spare stock worth at least | 1,000,000 | ≤999,999,999 | `BufferIsComfortable` L52 |
-| `BuyHighQualityOnly` | Only buy high-quality stock | true | — | `BuyableQuality` L67 |
-| `ProcurementWeeklySalesSharePercent` | Maximum stock to hold, as % of weekly sales | 25 | 1–100 | `BuildPlan` L50 |
-| `ProcurementTargetSaleSlots` | Maximum sale slots to fill | 60 | 1–200 | slot maths |
-| `ProcurementInventoryReserve` | Bag slots to keep free | 10 | 1–100 | planner; L1366 |
-| `ShoppingTripMinimumFreeSaleSlots` | — | 10 | 0–60 | `HoldingForSaleSlots` L188 |
-| `ShoppingTripMinimumGil` | — | 1,000,000 | ≤100M | `HoldingForGil` L196 |
-| `HomePriceMaxAgeMinutes` | — | 30 | 5–30 | `HomeReferenceMaxAge` L456 |
-| `ScoutKnowledgeMaxAgeHours` | Remember away-world prices for (hours) | 24 | 1–168 | `ScoutKnowledgeIsFresh` L158 |
-| `PriorityWorldsPerTrip` | Worlds per shopping trip | 31 | 1–40 | trip end |
-| `PriorityMinutesPerTrip` | Minutes away per trip | 180 | 5–480 | trip end |
-| `PriorityItemsPerWorld` | — | 14 | 1–40 | `SelectWorldItems` |
-| `ContinueShoppingWhenStocked` | Keep a comfortable stock in bags | true | — | `PlannedSaleSlots` L2019 |
-| `ProcurementBagBufferStacks` | — | 5 | 0–50 | `PlannedSaleSlots` (only when above is false) |
-| `MarketDiscoveryEnabled` | — | **false** | — | `MarketDiscoveryService.RefreshIfDue` |
-| `GlobalRule.*` / `PerItemRules` | Pricing tab | see PricingModels.cs | — | `PricingStrategyService` |
+- **Margins:** minimum ROI, high-volume ROI (preferred and unpinned), low-value ROI, absolute
+  minimum ROI, fill-up ROI, minimum profit per unit, minimum profit per sale slot.
+- **What counts as high volume:** minimum sales/day, minimum stack value.
+- **Inventory sizing:** preferred / secondary / opportunistic coverage days, emergency maximum
+  slots per item, undercut absorption days.
+- **Portfolio shape:** preferred target %, opportunistic maximum %.
+- **Capital:** budget, reinvest toggle, travel reserve, buffer gil %, buffer value target.
 
-### 11.2 Settings that are unused, partially used, or unreachable
+### 11.1 Settings that are unused, partially used, or unreachable
 
 | Item | Status |
 |---|---|
-| `ProcurementPlanRequest.MarketTaxPercent` / `BuyerFeePercent` | **[DEAD as configuration]** — parameters exist (L156–157, L180–181), no caller ever supplies them; always 5%/5%. No UI. |
-| `TryReadSellerFeePercent` (live game seller fee) | **[Partially used]** — read at `AutomationController.cs` L911, but only surfaces in the Earnings portfolio display; never affects buy or resale maths |
-| `LiveWorldStockHuntEnabled` + `BuildLiveMarketPlan` (L135) | **[CFG / effectively DEAD]** — the property defaults `true` (Configuration.cs L106) on a *fresh* config; migration v15 (L309) sets it true, then migration v16 (L324) sets it `false`, and `EnableStockAutomation()` (L138, behind the Start button) sets it `false`. `KeepsRetainersStocked` (L122–124) requires it false. In the shipped flow the live-tour planner does not run. |
+| `LiveWorldStockHuntEnabled` + `BuildLiveMarketPlan` | **[CFG / effectively DEAD]** — the Start button and migration v16 both set it false, and `KeepsRetainersStocked` requires it false |
 | `LiveWorldStockThresholdPerItem`, `LiveWorldStockHuntCooldownMinutes`, `LiveWorldStockHuntMaximumItems` | Only meaningful on that unreachable path |
 | `GuidedTourMaximumWorlds` | Guided (manual) route only |
 | `ProcurementBagBufferStacks` | Only when `ContinueShoppingWhenStocked=false` (default true) |
-| `ProcurementDataCenter` | Normalised by `ProcurementTravelPolicy.ShoppingScope`; regional hints hardcode `"North-America"` at `ProcurementController.Priority.cs` L61 regardless of this setting |
-| `ProcurementOrder.SaleSlots` | Always constructed as `1`; the `Slots` divisor in the per-slot metrics is therefore inert |
-| `MarketDiscoveryRegion` | Only used when discovery is enabled (off by default) |
+| `ProcurementDataCenter` | Regional hints hardcode `"North-America"` regardless |
+| `ProcurementOrder.SaleSlots` | Always constructed as `1`; the `Slots` divisor is therefore inert |
+| `MarketDiscoveryRegion` / `MarketDiscoveryEnabled` | Discovery is off by default |
+| `PortfolioPolicy.Rank` | Used for scouting display order only; no longer part of allocation |
 
 ---
 
-## 12. Hidden / Emergent Behaviour
+## 12. Automatic Discovery and Confidence
 
-1. **[HIGH] `MinimumDaysToSell = 0.25` inflates small stacks.**
-   `ProfitVelocity = profit / MAX(0.25, days)` (PortfolioPolicy L63). Any stack clearing in under six
-   hours gets the same denominator, so a 20-unit lot and a 5-unit lot score identically per gil of
-   profit. Systematically favours small, fast lots in strategies 1 and 4.
+`MarketConfidencePolicy` (`MarketConfidencePolicy.cs`) and
+`MarketDiscoveryService.Reassess`.
 
-2. **[HIGH] Two different ROI bases coexist.** The planner's ceiling uses **post-fee** cost;
-   `ProcurementOrder.RoiPercent` (L218, shown in logs, `PortfolioDecision`, and the dashboard) uses
-   **pre-fee** cost. The displayed ROI is therefore ~5% higher than the ROI actually enforced.
+```
+Opportunistic  -> below the proposal floors; not worth watching
+Candidate      -> >= 50 units/day AND >= 150,000 gil per stack
+Proven         -> ALL of:
+                    >= 75 units/day
+                    >= 300,000 gil per stack
+                    >= 50,000 estimated gil/day   (computed at the ABSOLUTE MINIMUM margin)
+                    >= 5 agreeing observations
+                    price spread <= 25% between refreshes
+                    a REALISED profitable cross-world spread (non-zero tracked cost basis)
 
-3. **[HIGH] `RequiredRoiPercent` can only ever *lower* the bar.** `Math.Min(minimumRoi, fastMoverRoi)`
-   (PortfolioPolicy L41) means setting the high-volume ROI *above* the standard ROI has **no effect at
-   all** — the UI accepts 0–1000 for it, but any value ≥ `ProcurementMinimumRoiPercent` is silently
-   inert. A user raising it to demand more margin on fast movers would see nothing change. [OBS]
+ShouldPin(confidence) ⟺ confidence == Proven      -> sets PreferredStock
+```
 
-4. **[MEDIUM] One constant serves two unrelated purposes.** `SecondaryMinimumSalesPerDay = 10`
-   is both the Secondary-tier velocity floor **and** the fast-mover ROI threshold. Changing the tier
-   floor would silently move the ROI discount boundary, and vice versa. They are not independently
-   configurable.
+Each discovery refresh folds into the rule's evidence. A refresh whose price has not lurched
+counts as a confirmation; one that has **resets the count to zero**, because the count means
+"this line has behaved consistently". The discovery cache is a day long, so five confirmations
+is roughly "it has looked like this for most of a week". [IMPL]
 
-5. **[MEDIUM] `netUnitProceeds` truncates twice.** `FLOOR(price × 0.95)` then a `(uint)` cast inside
-   `totalNet` (L105). On cheap items this is a meaningful relative loss, biasing slightly conservative.
-
-6. **[MEDIUM] `CostBasis` is monotonically non-decreasing.** `MAX(existing, landedCostPerUnit)`
-   (L1445). Buy once at a high price and the resale floor stays high forever, even after buying the
-   same item much cheaper later. Nothing ever lowers it.
-
-7. **[MEDIUM] `MinimumMarginPercent` also only ratchets up** (L1446). A *fill* order (10%) can never
-   lower a floor previously set at 20%, but a normal slow-mover order raises it to 20% permanently —
-   including for an item that later qualifies as a fast mover at 10%.
-
-8. **[MEDIUM] First-match immediate buy.** `IsExceptional` (L517) triggers on the first qualifying
-   listing in circuit order; no comparison against later worlds.
-
-9. **[MEDIUM] The anchor uses `homeLowest − 1`, not the median, whenever a home listing exists** (L73).
-   One competitor undercutting hard (but above the 50%-of-median outlier line) drags the resale
-   anchor — and therefore the whole price ceiling — down for the entire trip.
-
-10. **[LOW] The outlier filter needs ≥3 listings.** With 1–2 home listings, a single bad price becomes
-    the anchor unfiltered (`HomePriceReference.cs` L35).
-
-11. **[LOW] `ShoppingRules()` mutates `MaximumSaleSlots` on clones** (L2033) to
-    `listed + ComfortableItemTarget(listed)`. Since `ComfortableItemTarget = CLAMP((listed+3)/4, 1, 3)`,
-    an item with 0 listed gets 1 and one with 8 listed gets 3 — *already-successful* items are allowed
-    proportionally more spare stock.
-
-12. **[LOW] Plan ties break toward fewer worlds then lower cost** (objectives 7–8), a mild bias toward
-    concentrating purchases on a single world.
-
-13. **[LOW] `PortfolioSummary` is cached ~2 s** and invalidated after a purchase
-    (`portfolioSummary = null`, L1454), so an opportunistic-cap check can use slightly stale slot counts.
-
-14. **[LOW] `SalesVelocityPolicy` accepts `0` as a valid reported velocity.** The guard is
-    `reported is >= 0 and <= 1_000_000_000m`, so an explicit Universalis `0` suppresses the 7-day
-    fallback, yielding `DaysToSell = 30` (the max clamp) rather than a computed rate — and also
-    denies that item the fast-mover ROI discount.
-
-15. **[LOW] `remainingUnits` is keyed per (item, quality) but written per market** (L56), so with
-    multiple market entries for the same item the last one wins.
+A config migration (v43) demotes any rule that was auto-pinned under the old behaviour.
 
 ---
 
-## 13. Suspicious or Potentially Suboptimal Logic
+## 13. Hidden / Emergent Behaviour and Remaining Concerns
 
-### HIGH
+### Resolved by the rework
 
-**H1 — Small-stack bias via the `DaysToSell` floor.**
-`ProfitVelocity` is objective #3 and the primary sort in strategies 1 and 4. The 0.25-day clamp scores
-any small lot as if it clears in six hours. A 20-unit dye stack with 101k profit scores 405k gil/day;
-a 99-unit gemdraught stack with 463k profit scores 187k gil/day. Only tier dominance prevents the dye
-from winning — and the moment a cheap item crosses the 150k value floor into Secondary, this bias
-becomes active against other Secondary stock.
+The following items from the previous audit no longer apply: the 0.25-day small-stack
+inflation, the dual ROI bases, the inert fast-mover setting, the shared 10/day constant,
+the `CostBasis` and `MinimumMarginPercent` ratchets, the first-match immediate buy, the
+single-listing resale anchor, and the auto-pinning of discovered items.
 
-**H2 — Two ROI bases; reported ROI overstates enforced ROI.**
-`RoiPercent` (pre-fee) is what appears in `PortfolioDecision`, logs and the dashboard. The enforced
-gate is post-fee. Anyone tuning `ProcurementMinimumRoiPercent` against the displayed numbers is
-calibrating against the wrong figure.
+Additionally resolved by the marginal pass: repeat stacks of one market no longer carry the same
+score as the first (§3.1); greedy no longer leaves gil unusable under a tight budget (§3.4); a
+reported velocity of `0` no longer vetoes recorded sales (§3.2); and the weekly-share cap is no
+longer overwritten by a later market row for the same item — it takes the tighter of the two.
 
-**H3 — `CostBasis` ratchet can permanently strand an item.**
-One expensive purchase sets a floor that never decreases. Combined with the `MinimumResalePrice`
-gross-up, an item bought once at a bad price may sit unsellable (always `BelowFloor`) indefinitely,
-consuming a retainer slot. Nothing in the code lowers `CostBasis`.
+### Remaining
 
-**H4 — The high-volume ROI setting is silently inert above the standard ROI.**
-`Math.Min` (PortfolioPolicy L41) means the UI's 0–1000 range is misleading: only values *below*
-`ProcurementMinimumRoiPercent` do anything. A user who sets it to 30 expecting a stricter bar on fast
-movers gets exactly the old 20% behaviour with no feedback.
-
-### MEDIUM
-
-**M1 — The immediate-buy path is not comparative.** (§2.5) Spends slots and budget on the first
-≥100%-ROI listing found, before better opportunities later in the circuit are seen.
-
-**M2 — The resale anchor is competitor-driven, not sales-driven.** `MIN(median, homeLowest − 1)` means
-one aggressive undercutter sets the ceiling for the whole trip, suppressing otherwise-good buys.
-
-**M3 — Transaction costs are incomplete.** Teleport fares are not deducted from expected profit (only
-a flat 5,000 gil reserve is withheld). Retainer venture costs are likewise absent.
-
-**M4 — The live seller fee is read but ignored.** The game reports the actual retainer sale tax;
-decisions use a hardcoded 5%. If the real rate differs (city-state discounts), every margin is wrong
-in the same direction.
-
-**M5 — Repricing has no outlier protection.** Buying filters anchor outliers; repricing does not. A
-1-gil competitor becomes `lowest` and the bot undercuts to its floor. `PriceWarDropPercent = 60%` only
-fires relative to the *historical median*, which requires history to be present.
-
-**M6 — Stack size is ignored in competitor comparison.** Undercutting a 1-unit listing by 1 gil to
-sell a 99-stack is treated as equivalent to undercutting another 99-stack. Real markets price these
-differently.
-
-**M7 — The fast-mover discount has no value floor.** It keys only on `salesPerDay >= 10`, so cheap
-high-velocity junk gets the same 10% bar as popcorn, widening the candidate pool at the bottom end.
-The tier caps still contain it, but the discount was justified in-code by popcorn's economics, not by
-a cheap dye's.
-
-### LOW
-
-**L1 — 30-minute anchor staleness authorizes purchases.** Prices can move within that window; the live
-board is re-read for the *listing*, but the *anchor* may be up to 30 minutes old.
-
-**L2 — Hardcoded `0.95` / `1.05` literals** in three places diverge from the (also hardcoded) request
-defaults. Any future tax change requires edits in four locations.
-
-**L3 — The outlier filter is inactive below 3 listings.**
-
-**L4 — The weekly-share cap floors at one full stack.** `MAX(TargetStackSize, …)` means that for a
-99-stack item the 25% share cap is inert until weekly volume exceeds 396 units.
-
-**L5 — Discovery pins to `PreferredStock=true`** (Core tier, exempt from the buffer gil cap) on the
-strength of remote statistics alone. Off by default, but a discovered item immediately receives the
-strongest possible tier with no live validation of its resale behaviour.
+1. **[MEDIUM] Transaction costs are still incomplete.** Teleport fares and retainer venture
+   costs appear in no profit calculation; only a flat 5,000 gil travel reserve is withheld. On a
+   31-world circuit this is real gil. [OBS]
+2. **[MEDIUM] `salesPerDay` is the market's rate, not ours.** Every holding-time and gil/day
+   figure is therefore optimistic in absolute terms. [OBS]
+3. **[LOW] 30-minute anchor staleness authorizes purchases.** The listing is re-read live; the
+   anchor may be half an hour old.
+4. **[LOW] The outlier filter needs ≥3 listings**, and is deliberately bypassed entirely when a
+   depth allowance is supplied — depth, not price, decides there.
+5. **[MEDIUM] Marginal clearing assumes our own stacks sell in sequence.** In reality several of
+   our listings drain in parallel. `(owned + quantity) / salesPerDay` is the correct *completion*
+   time for the position either way, which is what capital commitment depends on, but it is not a
+   model of which individual stack sells first. [OBS]
+6. **[LOW] Repricing has no outlier rejection**, only the depth adjustment and the floor. A
+   deep cheap position is followed down to the floor.
+7. **[LOW] `PortfolioSummary` is cached ~2 s** and invalidated after a purchase, so an
+   opportunistic-cap check can use slightly stale slot counts.
+8. **[LOW] The repair pass reduces one market at a time.** It cannot find an improvement that
+   requires cutting two markets simultaneously. Bounded search is deliberate. [OBS]
+9. **[LOW] Cost basis is aggregate, not per-lot.** Documented approximation; see §6.4.
 
 ---
 
@@ -1064,99 +1080,92 @@ strongest possible tier with no live validation of its resale behaviour.
 ```text
 # ---------- TRIP GATE ----------
 IF !armed OR repricing busy OR no completed retainer pass OR wallet−reserve == 0: STOP
-IF LiveWorldStockHuntEnabled: (live-tour branch; not reached in shipped config) STOP
 IF freeSaleSlots < 10 OR spendableGil < 1_000_000: STAY HOME AND KEEP UNDERCUTTING
 IF no capacity change AND no income AND before nextScan: STOP
+ReconcilePositionCosts()          # retire basis for stock that has sold
 
 # ---------- CANDIDATE RULES ----------
 rules = ProcurementRules WHERE Enabled AND !LiquidateOnly
         AND (PreferredStock OR AlwaysScout OR home7DaySales >= MinimumWeeklyUnitsSold)
-order rules by: snipeBlockFirst, homeSalesPerDay desc, TourPriority, name
+order by: snipeBlockFirst, homeSalesPerDay desc, TourPriority, name
 
 # ---------- HOME ANCHORS ----------
 seed home prices from repricing observations (<= 30 min old)
 scan home world for any rule whose anchor is stale
+absorbable = FLOOR(salesPerDay × AnchorAbsorptionDays)
 homeAnchor[item] = MIN( median(7-day home sale prices),
-                        MIN(WithoutOutliers(home listings excluding own)) − 1 )
+                        DepthAdjustedLowest(home listings excl. own, absorbable) − 1 )
 
 # ---------- CIRCUIT ----------
 route = data centers one at a time, own DC first, scored by cached Universalis hints
 FOR world IN route (<= 31 worlds, <= 180 minutes):
-    items = snipeBlock ALWAYS + hinted(¼) + busiest secondary + rotation   (<= 14)
+    items = snipeBlock ALWAYS + hinted + busiest secondary + rotation   (<= 14)
     FOR item IN items WHERE observation older than 24h:
         read live board
-        candidate = BuildPlan(this listing vs homeAnchor)
-        IF candidate AND expectedProfit >= 100% of landedCost:
-            BUY NOW (after live re-validation)      # not compared against later worlds
-        ELSE:
-            remember listing for end-of-circuit comparison
+        record the observation and its economics       # NOTHING IS BOUGHT HERE
     IF !roomToBuy OR spendableGil == 0 OR bags full: BREAK
 
 # ---------- COMPARISON ----------
-markets = remembered listings WHERE home anchor still fresh
-compared = BuildPlan(markets, minRoi = 20%, fastMoverRoi = 10%)
+markets  = remembered listings WHERE home anchor still fresh
+compared = BuildPlan(markets, Economics = configured policy)
 IF free slots remain:
-    fill = BuildPlan(remaining listings, minRoi = 10%, opportunisticCap = 0)
+    fill = BuildPlan(remaining, Economics = policy.RelaxedTo(FillRoi), opportunisticCap = 0)
     compared += fill orders WHERE tier != Opportunistic
-IF compared is empty: GO HOME, LEAVE SLOTS EMPTY     # explicit: empty beats junk
+IF compared is empty: GO HOME, LEAVE SLOTS EMPTY       # explicit: empty beats junk
 
 # ---------- BuildPlan (per item, per quality) ----------
 IF home7DaySales < MinimumWeeklyUnitsSold: REJECT
-shareLimit  = MAX(TargetStackSize, 25% × weeklyUnits) − ownedUnits
 anchor      = homeAnchor
-net         = FLOOR(anchor × 0.95)
+net         = FLOOR(anchor × (1 − marketTax/100))
 salesPerDay = Universalis velocity, else 7-day sales / 7
-requiredRoi = (salesPerDay >= 10) ? MIN(minRoi, fastMoverRoi) : minRoi
-ceiling     = MIN( FLOOR(net / (1+requiredRoi/100) / 1.05),
-                   FLOOR((net − minProfitPerUnit) / 1.05),
+refValue    = anchor × TargetStackSize
+requiredRoi = MAX( ladder(preferred, salesPerDay >= 10, refValue >= 150k),
+                   AbsoluteMinimumRoi )
+IF fewer than 3 recent sales: requiredRoi = MAX(requiredRoi, StandardRoi)
+ceiling     = MIN( FLOOR(net / (1+requiredRoi/100) / buyerMult),
+                   FLOOR((net − minProfitPerUnit) / buyerMult),
                    rule.MaximumUnitPrice if set )
 FOR listing WHERE price <= ceiling AND qty <= TargetStackSize
              AND retainer NOT ours AND quality matches:
-    cost   = CEIL(price × qty × 1.05)
-    profit = net × qty − cost                    ; REJECT if <= 0
+    landed = CEIL(price × qty × buyerMult)
+    profit = net × qty − landed                  ; REJECT if <= 0 or ROI/profit short
     tier   = Core          IF PreferredStock
              Secondary     IF salesPerDay>=10 AND valuePerSlot>=150k AND profitPerSlot>=2500
              Opportunistic OTHERWISE
     IF tier != Core AND profitPerSlot < 2500: REJECT ("insufficient slot value")
+    score  = (profit / MAX(1.0, qty/salesPerDay)) × weight(tier)
     ADD candidate
 
-# ---------- ALLOCATE ----------
-FOR each of 5 strategies (all tier-major):
-    #1 profitVelocity  #2 profit  #3 profit/cost  #4 salesPerDay  #5 valuePerSlot
-    greedily add candidates subject to:
-        slotLimit, opportunisticCap, rule.MaximumSaleSlots, budget, weeklyShareLimit
-CHOOSE plan lexicographically:
-    1 close core deficit
-    2 do not exceed opportunistic cap
-    3 max non-opportunistic profitVelocity
-    4 max absolute profit
-    5 max slots used                # deliberately last
-    6 max distinct items
-    7 min distinct worlds
-    8 min cost
+# ---------- ALLOCATE (one greedy pass) ----------
+FOR candidate IN candidates ORDER BY score desc, profit desc, days asc, capital desc, tour asc:
+    SKIP IF no free slot
+    SKIP IF opportunistic AND (slot cap OR capital cap) reached
+    SKIP IF itemSlots >= EffectiveMaximumSlots(policy, rule, candidate)
+    SKIP IF spent + landed > budget
+    SKIP IF !CanAdd(owned, qty, salesPerDay, coverageDays(tier), overshootDays)
+    ADD, and count the units toward `owned` for the rest of the pass
 
 # ---------- EXECUTE ----------
 FOR order IN plan:
     travel; search item; wait for a COMPLETE server response
-    re-check: anchor fresh, rule valid, tier caps, live listing matches,
-              profit with SERVER-REPORTED tax at RequiredPurchaseRoi(order),
+    re-check: anchor fresh, rule valid, EffectiveMaximumSlots, live listing matches,
+              demand coverage, profit with SERVER-REPORTED buyer tax at RequiredPurchaseRoi,
               slots, inventory reserve, gil
     IF all pass: SUBMIT PURCHASE; confirm via inventory delta (+ yes/no prompt)
-    ON confirm: CostBasis            = MAX(CostBasis, landedCost)        # ratchets up only
-                MinimumMarginPercent = MAX(existing, RequiredPurchaseRoi(order))
-                MinimumPrice         = MAX(existing, CEIL(requiredNet / 0.95))
+    ON confirm: CostBasis        = weighted average landed cost over units held
+                CostBasisUnits  += quantity
+                AcquisitionFloor = CEIL(required net / (1 − marketTax/100))
 
 # ---------- RESELL (continuous, every retainer pass) ----------
 FOR each retainer listing:
-    read live Compare Prices
+    read live Compare Prices; record the seller fee the game reports
     competitors = listings excluding our own retainers, matching quality
     IF none: KEEP
-    lowest = MIN(competitors)
+    lowest = DepthAdjustedLowest(competitors, MIN(stack/2, salesPerDay × AbsorptionDays))
     IF lowest < historicalMedian × 0.40: PRICE WAR -> keep (or protected floor)
-    IF current <= lowest: KEEP
-    IF |current − lowest| within tolerance: KEEP
+    IF current <= lowest OR within tolerance: KEEP
     target = lowest − UndercutAmount                 # default 1 gil
-    floor  = MAX(MinimumPrice, CEIL(CostBasis × (1 + MinimumMarginPercent/100)))
+    floor  = MAX(MinimumPrice, AcquisitionFloor, CEIL(CostBasis × (1 + MinimumMarginPercent/100)))
     IF target < floor: KEEP                          # never sell below landed cost + margin
     COMMIT MAX(floor, roundDown(target))
 ```
@@ -1165,67 +1174,111 @@ FOR each retainer listing:
 
 ## 15. Key Code Map
 
-| Responsibility | File | Class / Method | Notes |
-|---|---|---|---|
-| Buy candidate generation + allocation | `src/SmartUndercutBot.Core/Services/ProcurementPlannerService.cs` | `BuildPlan` (L13), `AddCandidate` (L233), `Allocate` (L254), `Tiered` (L375), `PurchaseCost` (L396) | The economic core |
-| Live-tour planner | same | `BuildLiveMarketPlan` (L135) | Unreachable in the shipped config |
-| Tiering, ROI bar, velocity maths | `Core/Services/PortfolioPolicy.cs` | `RequiredRoiPercent` (L39), `Rank` (L45), `DaysToSell` (L57), `ProfitVelocity` (L63), `ClassifyCandidate` (L73), `ClassifyHolding` (L91), `Summarize` (L102) | Hardcoded 10/day and 150k floors |
-| Sales velocity | `Core/Services/SalesVelocityPolicy.cs` | `DailyUnits` | Universalis velocity → 7-day fallback |
-| Order metrics | `Core/Models/ProcurementModels.cs` | `ProcurementOrder` (L188–232), `PortfolioGates` (L21), `ProcurementPlanRequest` (L148) | `RoiPercent` L218; tax/fee defaults L156-157 |
-| Resale anchor / outliers | `Core/Services/HomePriceReference.cs` | `WithoutOutliers` (L30) | 0.5 × median cut, needs ≥3 listings |
-| Resale pricing / undercut | `Core/Services/PricingStrategyService.cs` | `Evaluate` (L14), `CalculateFloor` (L90), `IsPriceWar` (L100) | Lowest−1, floor, price war |
-| Resale floor from cost | `Core/Services/ProcurementPriceSafety.cs` | `MinimumResalePrice` (L5) | `/0.95` gross-up |
-| Price sanity / placeholders | `Core/Services/MarketPriceSafety.cs` | `IsSafeAutomaticUnitPrice`, `IsSafetySeedRepresentation` | 1M curated ceiling (L13) |
-| Stock / quality / budget helpers | `Core/Services/ResaleStockPolicy.cs` | `ComfortableBagTarget` (L8), `ComfortableItemTarget` (L11), `BufferIsComfortable` (L52), `BuyableQuality` (L67), `SpendableGil` (L77), `BufferSpendableGil` (L85) | |
-| Route + per-world item choice | `Core/Services/ShoppingScoutPolicy.cs` | `BuildRoute`, `SelectWorldItems`, `IsExceptional` (L74) | Immediate-buy threshold |
-| Excluded worlds / scopes | `Core/Services/ProcurementTravelPolicy.cs` | `ExcludedWorlds` (L5), `CanShopOnWorld` (L11), `ShoppingScope` | 5 congested worlds |
-| Discovery proposals | `Core/Services/MarketDiscoveryPolicy.cs` | `Propose` | Food/medicine, 150k (L15), 50/day (L16), ≤12 (L22) |
-| Shopping orchestration | `src/SmartUndercutBot/Automation/ProcurementController.cs` | `HoldingForSaleSlots` (L188), `PollListings` (L1233), `PollPurchase` (L1398), `RequiredPurchaseRoi` (L1481), `TryAutomaticStart` (L1700), `AvailablePurchaseSlots` (L1842), `SpendableGil` (L1848), `CollectBagStock` (L1967), `PlannedSaleSlots` (L2019), `ShoppingRules` (L2033) | Trip gates, live guards |
-| Circuit / comparison / top-up | `Automation/ProcurementController.Priority.cs` | `ScanPriorityRegionAsync` (L58), `PrepareScoutRoute` (L77), `ScoutKnowledgeIsFresh` (L158), `FinishPriorityScouting` (L195), `TopUpEmptySaleSlots` (L239), `BeginPriorityShopping` (L296), `HomeReferenceMaxAge` (L456), `ObservePriorityItem` (L470) | |
-| Repricing loop | `Automation/AutomationController.cs` | `EvaluateCurrentListing` (L1115), `TryReadSellerFeePercent` use (L911), `ObservedHomePrices` | Feeds home anchors |
-| Bag listing | `Automation/BagListingController.cs` | `QueuePricedStock` (L314), `BuildStockSummary` (L414) | Universalis-priced |
-| Pending stock ledger | `Services/ProcurementLedger.cs` | `RecordPurchase`, `MarkListed`, `PendingSaleSlots` | Slot accounting |
-| Universalis client | `Services/UniversalisService.cs` | `FavoriteNames` (L39), `CreateFavoriteRules` (L73), `CreateLiquidationRules` (L100), `CreateBuyableDyeRules` (L114), `CreateTomeMaterialRules` (L130), `CreateTradeableMateriaRules` (L142), `ScanAsync` (L176), `FetchPriceHintsAsync` (L259) | Seeded categories |
-| Universalis parsing | `Core/Services/UniversalisResponseParser.cs`, `UniversalisAggregatedParser.cs` | `Parse`, `ParseHints` | Velocity fields |
-| Live board (repricing) | `Services/MarketDataService.cs` | `GetSnapshotAsync` | Packet aggregation |
-| Live board (buying) | `Services/MarketPurchaseService.cs` | `TrySelectLiveListing`, `SubmitPurchase`, `TryConfirmPurchase` | Only purchase authority |
-| Response completeness | `Core/Services/MarketResponseTracker.cs` | `IsReady` | Declared rows fully received |
-| Discovery orchestration | `Services/MarketDiscoveryService.cs` | `RefreshIfDue` | Off by default |
-| Saddlebag statistics | `Services/SaddlebagStatisticsProvider.cs` | `GetStatisticsAsync` | Optional, discovery only |
-| All settings + migrations | `Configuration.cs` | properties L20–L106, `PortfolioGates` (L119), `EnableStockAutomation` (L126), migration v42 (L532–539), `Normalize` clamps (L545–585) | Schema v42 |
-| Settings UI | `Windows/DashboardWindow.cs` | Shopping tab; "High-volume ROI %" (L1091) | |
+| Responsibility | File | Class / Method |
+|---|---|---|
+| Buy candidate generation + allocation | `Core/Services/ProcurementPlannerService.cs` | `BuildPlan` (L22), `CollectCandidates` (L149), `AddCandidate` (L219), **`ScoreOf` (L255)**, `Allocate` (L279), **`SelectGreedily` (L315)**, **`ImproveUnderConstrainedCapital` (L469)**, `EffectiveMaximumSlots` |
+| Live-tour planner | same | `BuildLiveMarketPlan` (L95) — unreachable in the shipped config |
+| Margin ladder, tiering, gil/day | `Core/Services/PortfolioPolicy.cs` | `RequiredRoiPercent` (L51), `DaysToSell` (L81), `ExpectedGilPerDay` (L91), **`MarginalDaysToClear` (L108)**, **`MarginalGilPerDay` (L124)**, `ClassifyCandidate`, `Summarize` |
+| **Personal sell-through (measured, unused)** | `Core/Services/SellThroughObserver.cs` | `Observe`, `IsReliable`, `CaptureShare` |
+| **Transaction costs and ROI** | `Core/Services/MarketEconomics.cs` | `FeeModel` — `LandedCost`, `NetProceeds`, `NetRoiPercent` (L40), `MaximumUnitPrice` (L48), `ListingPriceForNet` (L65) |
+| **Inventory coverage** | `Core/Services/InventoryCoveragePolicy.cs` | `CoverageDays` (L17), `TargetUnits` (L23), `CanAdd` (L42), `DemandJustifiedSlots` (L59) |
+| **Economic policy / knobs** | `Core/Models/EconomicPolicy.cs` | `ProcurementEconomicPolicy` (L12), `RelaxedTo` (L91), `CoverageDaysFor` (L98), `ScoreWeightFor` (L105) |
+| **Position cost basis** | `Core/Services/PositionCostPolicy.cs` | `RecordPurchase` (L29), `RecordSale` (L54) |
+| **Discovery confidence** | `Core/Services/MarketConfidencePolicy.cs` | `Classify` (L61), `ShouldPin` (L82), `PriceSpreadPercent` (L89) |
+| Sales velocity | `Core/Services/SalesVelocityPolicy.cs` | `DailyUnits` |
+| Order metrics | `Core/Models/ProcurementModels.cs` | `ProcurementOrder` (L232+), `PortfolioGates`, `PortfolioDecision` (L54), `MarketConfidence` (L99) |
+| **Depth-aware anchor** | `Core/Services/HomePriceReference.cs` | `DepthAdjustedLowest` (L62), `WithoutOutliers` (L30) |
+| Resale pricing / undercut | `Core/Services/PricingStrategyService.cs` | `Evaluate`, `CalculateFloor`, `DepthAdjustedLowest`, `IsPriceWar` |
+| Resale floor from cost | `Core/Services/ProcurementPriceSafety.cs` | `MinimumResalePrice` (L12) |
+| Price sanity / placeholders | `Core/Services/MarketPriceSafety.cs` | `IsSafeAutomaticUnitPrice`, `IsSafetySeedRepresentation` |
+| Stock / quality / budget helpers | `Core/Services/ResaleStockPolicy.cs` | `BuyableQuality`, `SpendableGil`, `BufferSpendableGil` |
+| Route + per-world item choice | `Core/Services/ShoppingScoutPolicy.cs` | `BuildRoute`, `SelectWorldItems`, `BuysBeforeComparison` |
+| Discovery proposals | `Core/Services/MarketDiscoveryPolicy.cs` | `Propose` |
+| Shopping orchestration | `Automation/ProcurementController.cs` | `StartScan` (L307), `PollListings` (L1238), `PollPurchase` (L1415), `RequiredPurchaseRoi` (L1504), `ReconcilePositionCosts` (L1948), `PlannedSaleSlots` (L2106) |
+| Circuit / comparison / top-up | `Automation/ProcurementController.Priority.cs` | `FinishPriorityScouting` (L197), `TopUpEmptySaleSlots` (L242), `BeginPriorityShopping` (L304), `ObservePriorityItem` (L478) |
+| Repricing loop + **seller fee capture** | `Automation/AutomationController.cs` | `EvaluateCurrentListing`, `CaptureSellerFee` |
+| Bag listing | `Automation/BagListingController.cs` | `QueuePricedStock`, `BuildStockSummary` |
+| Pending stock ledger | `Services/ProcurementLedger.cs` | `RecordPurchase`, `MarkListed`, `PendingSaleSlots` |
+| Universalis client | `Services/UniversalisService.cs` | `CreateFavoriteRules`, `ScanAsync`, `FetchPriceHintsAsync` |
+| Live board (buying) | `Services/MarketPurchaseService.cs` | `TrySelectLiveListing`, `SubmitPurchase`, `TryConfirmPurchase` |
+| **Discovery promotion** | `Services/MarketDiscoveryService.cs` | `ApplyPendingDiscoveries`, `Reassess` |
+| All settings + migrations | `Configuration.cs` | `Fees`, `EconomicPolicy`, `PortfolioGates`, migration v43, `Normalize` clamps |
+| Settings UI | `Windows/DashboardWindow.cs` | Shopping tab |
+
+---
+
+## 16. Decision Log Output
+
+`PortfolioDecision.ToString()` (`ProcurementModels.cs` L78) is what appears in the log and on
+the dashboard:
+
+```
+BUY Caramel Popcorn HQ x99 [CORE]: cost 1,559,250, sale 2,021,976 net, profit 462,726
+  (29.7% ROI); 100/day, turnover 0.99d, 462,726 gil/day, coverage 0.8d -> 1.8d;
+  selected preferred high-volume stock; restocking toward 3.0d coverage
+
+SKIP General-Purpose Dye x20 [OPPORTUNISTIC]: cost 24,108, sale 125,380 net, profit 101,272
+  (420.1% ROI); 31/day, turnover 0.65d, 101,272 gil/day, coverage 0.6d -> 1.3d;
+  opportunistic portfolio cap reached (6/6 slots)
+```
+
+Every number the ranking used is present: landed cost, net proceeds, profit, the one ROI,
+velocity, turnover, gil per day, and the coverage before and after.
+
+---
+
+## 17. Own Sell-Through: Measured Groundwork, Not Applied
+
+`SalesPerDay` is the whole home world's rate. If the bot is one of four sellers of a line, the
+"3 days of coverage" it targets may really be closer to twelve days of its own selling.
+
+**Nothing in the shipped path corrects for this.** What exists: [IMPL]
+
+| Piece | Status |
+|---|---|
+| `SellThroughObserver` + `SellThroughObservation` (`Core/Services/SellThroughObserver.cs`) | Written and tested (10 cases) |
+| `Configuration.SellThrough` persistence slot | Declared, **never written** |
+| Observation wiring into the retainer pass | **Not implemented** |
+| Effect on velocity, coverage or purchasing | **None** |
+
+The estimator, if it were fed, would work as:
+
+```
+available   = previousUnits + purchasedSinceLastReading
+soldRate    = MIN((available − currentUnits) / elapsedDays, marketUnitsPerDay)
+UnitsPerDay = UnitsPerDay + 0.3 × (soldRate − UnitsPerDay)            ; EWMA
+IsReliable  = Samples >= 4 AND ObservedDays >= 3
+CaptureShare = CLAMP(UnitsPerDay / marketRate, 0.25, 1)   or null when unreliable
+```
+
+with windows outside `[0.25, 14]` days discarded, restocking added back so it is never negative
+sales, an unexplained gain teaching nothing, a rate above the whole market capped, and a 0.25
+floor so a bad patch could never cut a market's assumed demand more than four-fold.
+
+**Why it is not wired up.** The repository has no sale signal. It does not read the game's
+retainer sale history addon; Universalis sale entries carry no seller identity; and
+`WealthHistoryService` tracks gil totals rather than per-item proceeds. Inventory differencing
+between two complete retainer passes is the only available source, and it cannot tell a sale from
+a manual withdrawal, an item used or discarded, or a listing that expired off the board after 30
+days. All three inflate apparent sell-through → inflate capture share → raise effective velocity
+→ **buy more**. That is the unsafe direction, so the known optimism is left in place where it is
+at least documented and constant. Reading the retainer's own sale history would unlock it. [OBS]
 
 ---
 
 ## Ambiguities and limits of this analysis
 
-1. **`ProcurementOrder.SaleSlots` is always 1** at every construction site I found, so the `Slots`
-   divisor in `ProfitVelocity`, `ResaleValuePerSaleSlot` and `ExpectedProfitPerSaleSlot` is inert. If a
-   multi-slot order were ever constructed those metrics would divide; I could not confirm any intended
-   path that does so.
-
-2. **Real FFXIV tax rates were not verified against the game.** The code assumes 5% buy and 5% sell.
-   Whether that matches current live rates (including city-state discounts) is outside what the
-   repository can tell me.
-
-3. **`LiveWorldStockHuntEnabled` reachability is a config-order question.** A user on a *fresh* config
-   who never presses "Start all automation" would run the live-tour path. I classify it as effectively
-   dead because both the Start button (L126) and the v16 migration set it false, and
-   `KeepsRetainersStocked` requires it false.
-
-4. **`MarketStatistic` / `ParseStatistics` and `IMarketDiscoveryProvider`** exist and compile, but I
-   traced only one implementation path (`SaddlebagStatisticsProvider` → `MarketDiscoveryService`),
-   which is disabled by default. Universalis' `ParseStatistics` has no active caller I found.
-
-5. **Numeric examples in §4 and §9 use plausible market prices, not observed ones.** The formulas are
-   taken verbatim from the code; the input prices are illustrative.
-
-6. **I did not execute the code or run the test suite** as part of this analysis. Behaviour is derived
-   from reading the implementation, cross-checked against test names in
-   `tests/SmartUndercutBot.Core.Tests/` (notably `ProcurementPlannerServiceTests`,
-   `PortfolioAllocationTests`, `StockPriorityTests`, `PricingStrategyServiceTests`).
-
-7. **The velocity-tiered ROI gate is untested.** `grep -rn "RequiredRoiPercent\|FastMover" tests/`
-   returns nothing, so `PortfolioPolicy.RequiredRoiPercent` — added in commit `ad1fa36` and now sitting
-   directly on the buy path and on the resale margin pinned after every purchase — has no test
-   coverage at all. That makes it the least-verified piece of economic logic in the repository. [OBS]
+1. **`ProcurementOrder.SaleSlots` is always 1** at every construction site, so the `Slots`
+   divisor in the per-slot metrics is inert.
+2. **Real FFXIV tax rates were not verified against the game.** The sale tax is now read from
+   the retainer sell window at runtime; the *buyer* fee is still assumed 5% at planning time,
+   though the server-reported figure is used at the board.
+3. **Numeric examples in §4 and §9 use plausible market prices, not observed ones.** The
+   formulas are taken verbatim from the code, and every figure quoted is reproduced by a test
+   in `tests/SmartUndercutBot.Core.Tests/ProfitOptimizationTests.cs`.
+4. **`MarketStatistic` / `ParseStatistics` and `IMarketDiscoveryProvider`** exist and compile,
+   but only the `SaddlebagStatisticsProvider` → `MarketDiscoveryService` path was traced, and
+   it is disabled by default.
+5. **Coverage behaviour under sparse velocity data** is the least-exercised path in live play:
+   the unit tests cover it, but a market with erratic Universalis reporting will fall back to
+   the weekly-share cap more often than the design intends. [OBS]

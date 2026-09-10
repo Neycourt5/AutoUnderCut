@@ -72,20 +72,15 @@ public static class ShoppingScoutPolicy
     }
 
     /// <summary>
-    /// Whether a listing is worth buying on the spot instead of remembering it and
-    /// comparing it against the rest of the circuit.
+    /// There is deliberately no immediate-buy path.
     ///
-    /// Buying immediately spends scarce capital and a scarce sale slot before any
-    /// later world has been seen, so it has to be reserved for cases where waiting
-    /// is the greater risk. A large percentage return is not sufficient on its own -
-    /// a cheap trinket at 300% is not an emergency. It must also be stock the
-    /// portfolio actually wants: liquid, valuable per slot, carrying real absolute
-    /// profit, and not something that would sit in a slot for days.
+    /// Buying the first listing that clears some percentage return spends scarce
+    /// capital and a scarce sale slot before any later world has been seen, and a
+    /// percentage is exactly the wrong trigger for it: a thirty-thousand-gil dye at
+    /// 300% is not an emergency, while the stack of raid food on the twentieth world
+    /// that would have earned ten times as much never gets the gil. Every offer is
+    /// remembered and compared at the end of the circuit instead, where the planner
+    /// can weigh gil per day, absolute profit and demand coverage against each other.
     /// </summary>
-    public static bool IsExceptional(
-        ProcurementOrder order, decimal minimumRoi, ProcurementEconomicPolicy? policy = null)
-    {
-        // All offers compete after scouting; percentage ROI never pre-empts capital.
-        return false;
-    }
+    public const bool BuysBeforeComparison = false;
 }

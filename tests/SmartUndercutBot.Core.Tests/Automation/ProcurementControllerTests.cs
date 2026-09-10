@@ -73,8 +73,12 @@ public sealed class ProcurementControllerTests
     }
 
     [Fact]
-    public void AutomaticRestockTargetsPermitSpareStockBesideFullListedItemExposure()
+    public void RestockingFollowsDemandCoverageRatherThanTheFixedSlotCap()
     {
+        // 990 units listed against roughly 1,414 units a day is about 0.7 days of
+        // cover, far short of the target. The old rule stopped at three spare
+        // stacks because the item was already on eight sale slots; the demand-based
+        // rule keeps buying, because the market plainly absorbs it.
         using var run = new Route();
         run.Config.Current.EnableStockAutomation();
         run.Config.Current.ContinueShoppingWhenStocked = true;
@@ -86,14 +90,37 @@ public sealed class ProcurementControllerTests
         run.Game.AutomaticWorldArrival = run.Game.AutomaticPurchaseConfirmation = true;
         run.Tick();
         for (var i = 0; i < 300 && run.Controller.IsActive; i++) run.Tick(2);
-        // Three replacements (25% of the item's listed slots, capped at three),
-        // even though the already-listed count exceeds the old maximum of eight.
-        Assert.Equal(3, run.Game.Purchases);
-        Assert.Equal(297, run.Game.Inventory);
+        Assert.True(run.Game.Purchases > 3,
+            $"a market this liquid should restock past the old three-stack clamp, bought {run.Game.Purchases}");
+        Assert.Equal(run.Game.Purchases * 99, run.Game.Inventory);
+        // The rule's own eight-slot limit is untouched; it is a floor now, and the
+        // demand-derived cap is what actually governs.
         Assert.Equal(8, run.Config.Current.ProcurementRules[0].MaximumSaleSlots);
-        run.Repricing.IsActive = false;
-        run.Tick(601); run.Tick();
-        Assert.Equal(3, run.Game.Purchases);
+        Assert.True(ProcurementPlannerService.EffectiveMaximumSlots(
+            run.Config.Current.EconomicPolicy,
+            run.Config.Current.ProcurementRules[0],
+            new(1, "Popcorn", 0, 0, "Cactuar", 0, 1_000, 99, true, 1_999, 1_999, 20_000, 1,
+                SalesPerDay: 9_900m / 7m, Tier: PortfolioTier.Secondary)) > 8);
+    }
+
+    [Fact]
+    public void RestockingStopsOnceDemandCoverageIsSatisfied()
+    {
+        // Same market, but the shelves are already full: 6,000 units against about
+        // 1,414 a day is over four days of cover, past the target and its overshoot
+        // allowance. Nothing more is bought however good the listing looks.
+        using var run = new Route();
+        run.Config.Current.EnableStockAutomation();
+        run.Config.Current.ContinueShoppingWhenStocked = true;
+        run.Repricing.LastKnownFreeSaleSlots = 0;
+        run.Repricing.ListedStock = [new(1, true, 6_000, 10)];
+        run.Game.Gil = 10_000_000;
+        run.Game.WeeklySalesQuantity = 9_900;
+        run.Game.ExtraBuyListings = 10;
+        run.Game.AutomaticWorldArrival = run.Game.AutomaticPurchaseConfirmation = true;
+        run.Tick();
+        for (var i = 0; i < 300 && run.Controller.IsActive; i++) run.Tick(2);
+        Assert.Equal(0, run.Game.Purchases);
         Assert.Empty(run.Controller.Plan.Orders);
     }
 
@@ -976,6 +1003,8 @@ public sealed class ProcurementControllerTests
         run.Repricing.LastKnownFreeSaleSlots = emptySlots;
         run.Config.Current.ProcurementMinimumRoiPercent = 20;
         run.Config.Current.ProcurementFillRoiPercent = 10;
+        // No spare-stack buffer, so "no empty sale slot" really is no capacity.
+        run.Config.Current.ProcurementBagBufferStacks = 0;
         run.Config.Current.ProcurementRules[0].PreferredStock = true;
         run.Game.AutomaticWorldArrival = run.Game.AutomaticPurchaseConfirmation = true;
         run.Game.LiveProvider = (world, item) => world switch
@@ -986,16 +1015,31 @@ public sealed class ProcurementControllerTests
         };
         run.Controller.RunNow();
         for (var i = 0; i < 600 && run.Controller.IsActive; i++) run.Tick(2);
-        Assert.Equal(ProcurementState.Completed, run.Controller.State);
+        Assert.False(run.Controller.IsActive);
         Assert.Equal(shouldBuy ? 1 : 0, run.Game.Purchases);
         if (shouldBuy)
         {
+            Assert.Equal(ProcurementState.Completed, run.Controller.State);
             Assert.Equal(166_320u, run.Controller.Status.GilSpent);
             Assert.Single(run.Ledger.Snapshot());
-            Assert.Equal(10m, run.Config.Current.PerItemRules[1].MinimumMarginPercent);
+            // The position, not a high-water mark: 166,320 gil of landed cost over
+            // 99 units, and a floor that returns it plus the 10% bar after sale tax.
+            var pricing = run.Config.Current.PerItemRules[1];
+            Assert.Equal(1_680u, pricing.CostBasis);
+            Assert.Equal(99u, pricing.CostBasisUnits);
+            Assert.Equal(1_946u, pricing.AcquisitionFloor);
+            // Nothing ratchets the configured margin, so a later cheaper buy is free
+            // to lower the floor instead of being stranded above it.
+            Assert.Equal(0m, pricing.MinimumMarginPercent);
             Assert.Contains(("Behemoth", 1u), run.Game.Searches);
         }
-        else Assert.Empty(run.Ledger.Snapshot());
+        else
+        {
+            // No capacity means no plan at all, not a plan that is merely unspent.
+            Assert.Empty(run.Ledger.Snapshot());
+            Assert.Empty(run.Game.Bought);
+            Assert.Empty(run.Controller.Plan.Orders);
+        }
     }
 
     [Fact]
@@ -1176,8 +1220,11 @@ public sealed class ProcurementControllerTests
         for (var i = 0; i < 600 && run.Controller.IsActive; i++) run.Tick(2);
 
         Assert.Equal(ProcurementState.Completed, run.Controller.State);
-        var bought = Assert.Single(run.Game.Bought);
-        Assert.Equal((1u, 99u), (bought.Item, bought.Quantity));
+        // Only the curated flip is bought, and it is no longer limited to a single
+        // stack: a market this liquid is allowed the capital its demand supports.
+        Assert.NotEmpty(run.Game.Bought);
+        Assert.All(run.Game.Bought, b => Assert.Equal((1u, 99u), (b.Item, b.Quantity)));
+        Assert.DoesNotContain(run.Game.Bought, b => b.Item == 2u);
         Assert.True(run.Controller.PortfolioSummary.OpportunisticSlots >
                     run.Controller.PortfolioSummary.OpportunisticCap);
         // The dye was profitable, fast moving and cheaper than the flip that was
@@ -1194,8 +1241,9 @@ public sealed class ProcurementControllerTests
         run.Repricing.LastKnownFreeSaleSlots = 1;
         run.Config.Current.ProcurementMinimumRoiPercent = 20;
         run.Config.Current.ProcurementFillRoiPercent = 10;
-        run.Config.Current.ProcurementRules[0].PreferredStock = true;
         run.Game.AutomaticWorldArrival = run.Game.AutomaticPurchaseConfirmation = true;
+        // ~13% net ROI: under the 14% high-volume bar the comparison pass applies,
+        // over the 10% the top-up pass relaxes to. So it can only be a fill order.
         run.Game.LiveProvider = (world, item) => world switch
         {
             "Siren" => [new(0, item, 11, 21, 2000, 99, true, 0)],
@@ -1203,8 +1251,8 @@ public sealed class ProcurementControllerTests
             _ => [],
         };
         run.Controller.RunNow();
-        for (var i = 0; i < 600 && !run.Controller.Plan.Orders.Any(); i++) run.Tick(2);
-        Assert.NotEmpty(run.Controller.Plan.Orders);
+        for (var i = 0; i < 600 && !run.Controller.Plan.Orders.Any(o => o.IsFillOrder); i++) run.Tick(2);
+        Assert.Contains(run.Controller.Plan.Orders, o => o.IsFillOrder);
         run.Game.Inventory = 99;
         for (var i = 0; i < 300 && run.Controller.IsActive; i++) run.Tick(2);
         Assert.Equal(ProcurementState.Completed, run.Controller.State);

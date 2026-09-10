@@ -22,11 +22,26 @@ public sealed class SalesVelocityPolicyTests
     }
 
     [Fact]
-    public void KnownZeroDoesNotFallBackToPositiveHistory()
+    public void ReportedZeroDefersToObservedSalesButInventsNothing()
     {
-        var market = new ProcurementMarketItem(1, "Food", [],
+        // Universalis reports 0 both for "nothing sold" and for "no window of data
+        // for this quality". Taken literally it used to veto the seven-day fallback,
+        // so an item with 700 observed HQ sales scored as if it never moved - which
+        // then denied it the volume margin bar and made coverage refuse to size a
+        // position. Recorded sales are unambiguous evidence; the zero is not.
+        var withHistory = new ProcurementMarketItem(1, "Food", [],
             [new(100, 700, true, DateTimeOffset.UtcNow.AddDays(-1))], HqSalesPerDay: 0);
-        Assert.Equal(0m, SalesVelocityPolicy.DailyUnits(market, true));
+        Assert.Equal(100m, SalesVelocityPolicy.DailyUnits(withHistory, true));
+
+        // With nothing to corroborate it, a reported zero still yields zero. The
+        // fallback reports what was observed; it never manufactures demand.
+        var withoutHistory = new ProcurementMarketItem(1, "Food", [], [], HqSalesPerDay: 0);
+        Assert.Equal(0m, SalesVelocityPolicy.DailyUnits(withoutHistory, true));
+
+        // A quality with no sales of its own is not lent the other quality's rate.
+        var otherQualityOnly = new ProcurementMarketItem(1, "Food", [],
+            [new(100, 700, false, DateTimeOffset.UtcNow.AddDays(-1))], HqSalesPerDay: 0);
+        Assert.Equal(0m, SalesVelocityPolicy.DailyUnits(otherQualityOnly, true));
     }
 
     [Fact]

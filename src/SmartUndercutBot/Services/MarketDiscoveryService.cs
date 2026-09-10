@@ -126,6 +126,7 @@ public sealed class MarketDiscoveryService
         var proposed = proposals.Select(x => x.ItemId).ToHashSet();
         var retired = rules.RemoveAll(x => x.DiscoveredAutomatically && !proposed.Contains(x.ItemId));
         var added = 0;
+        var promoted = 0;
         foreach (var proposal in proposals)
         {
             var existing = rules.FirstOrDefault(x => x.ItemId == proposal.ItemId);
@@ -140,15 +141,65 @@ public sealed class MarketDiscoveryService
                 // leave anything the player may have changed alone.
                 existing.ItemName = proposal.ItemName;
                 existing.TargetStackSize = proposal.TargetStackSize;
+                promoted += Reassess(existing, proposal) ? 1 : 0;
             }
         }
-        if (added > 0 || retired > 0)
+        if (added > 0 || retired > 0 || promoted > 0)
         {
             configuration.Save();
             log.Add(AutomationLogLevel.Information,
-                $"MARKET DISCOVERY: added {added} and retired {retired} automatically discovered flip(s). " +
-                "They are candidates only: live prices, fees, demand, budget and portfolio limits still decide.");
+                $"MARKET DISCOVERY: added {added}, retired {retired} and promoted {promoted} automatically " +
+                "discovered flip(s). Additions are candidates only: live prices, fees, demand, budget and " +
+                "portfolio limits still decide.");
         }
         return added;
     }
+
+    /// <summary>
+    /// Fold a fresh proposal into what an existing discovered rule already knows
+    /// about itself, and promote it only if the accumulated evidence justifies it.
+    ///
+    /// A refresh that agrees with the last one - same market, a price that has not
+    /// lurched - is a confirmation. A refresh that disagrees resets the count,
+    /// because the point of the count is "this line has behaved consistently", and
+    /// an unstable price is exactly the evidence that it has not.
+    /// </summary>
+    private bool Reassess(ProcurementRule existing, ProcurementRule proposal)
+    {
+        var config = configuration.Current;
+        var spread = MarketConfidencePolicy.PriceSpreadPercent(
+            existing.LastObservedUnitPrice, proposal.LastObservedUnitPrice);
+        existing.DiscoveryConfirmations = spread <= MarketConfidencePolicy.ProvenMaximumPriceSpreadPercent
+            ? existing.DiscoveryConfirmations + 1
+            : 0;
+        existing.LastObservedUnitPrice = proposal.LastObservedUnitPrice;
+        existing.LastObservedSalesPerDay = proposal.LastObservedSalesPerDay;
+
+        var stack = (uint)Math.Max(1, existing.TargetStackSize);
+        var stackValue = (ulong)proposal.LastObservedUnitPrice * stack;
+        var salesPerDay = proposal.LastObservedSalesPerDay;
+        // The gil this line would generate at the thinnest margin the bot would
+        // ever accept. Deliberately the floor rather than a hoped-for margin: it is
+        // an estimate, and an estimate used to hand out the strongest tier in the
+        // system should read low.
+        var gilPerDay = proposal.LastObservedUnitPrice * salesPerDay *
+                        config.ProcurementAbsoluteMinimumRoiPercent / 100m;
+        // Evidence that the spread is real, not merely wide on paper: a purchase of
+        // this item has actually cleared the margin bar and been executed.
+        var realized = config.PerItemRules.TryGetValue(existing.ItemId, out var pricing) && pricing.CostBasis > 0;
+
+        var confidence = MarketConfidencePolicy.Classify(new(
+            salesPerDay, stackValue, gilPerDay, existing.DiscoveryConfirmations, spread, realized));
+        var wasPinned = existing.PreferredStock;
+        existing.Confidence = confidence;
+        existing.PreferredStock = MarketConfidencePolicy.ShouldPin(confidence);
+        if (!existing.PreferredStock || wasPinned)
+            return false;
+        log.Add(AutomationLogLevel.Information,
+            $"MARKET DISCOVERY: {existing.ItemName} promoted to preferred core stock after " +
+            $"{existing.DiscoveryConfirmations} agreeing observation(s) at {salesPerDay:N0} units/day, " +
+            $"{stackValue:N0} gil per stack and a realised profitable spread.");
+        return true;
+    }
+
 }

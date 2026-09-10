@@ -1,4 +1,23 @@
-# Active: v1.0.0.66 economic allocation update
+# Active: v1.0.0.67 marginal-allocation economics release
+
+Publishing requested by the user; AGENTS.md standing authorization applies.
+
+- [x] Recover HEAD 47498d0 and inspect inherited implementation, tests and notes.
+- [x] Marginal rescoring and bounded market-cap improvement implemented.
+- [x] Adversarial regressions added (marginal allocation, sell-through observer).
+- [x] Release solution build clean (0 warnings) and full suite green on SDK 10.0.302.
+- [x] PROFIT_OPTIMIZATION_IMPLEMENTATION.md and PURCHASING_RESALE_LOGIC.md updated,
+      with the 15M example reproduced from code by a test.
+- [x] Version bumped 1.0.0.66 -> 1.0.0.67 (1.0.0.66 was never released; live was .65).
+- [ ] Push main + annotated tag v1.0.0.67; verify the release workflow, published
+      repo.json AssemblyVersion and SmartUndercutBot.zip.
+
+Personal sell-through forecasting remains deferred: inventory differences are not
+verified sales, and every confound biases the estimate toward buying more. The
+estimator and its tests are retained but nothing calls them. Native game operations
+have not been exercised.
+
+## Superseded publication checklist from the earlier session
 
 - [x] Read the requested implementation and existing audit; reviewed unfinished changes.
 - [ ] Finish planner/controller/configuration integration, fee and inventory safeguards.

@@ -77,6 +77,24 @@ public sealed record ProcurementEconomicPolicy(
         LowValueRoiPercent = roiPercent,
     };
 
+    /// <summary>
+    /// The same policy with every margin bar relaxed to at most
+    /// <paramref name="roiPercent"/>, used by the top-up pass when sale slots would
+    /// otherwise sit empty.
+    ///
+    /// Three things are deliberately left alone. The low-value bar does not move,
+    /// because the point of the pass is to keep good stock flowing rather than to
+    /// make a trinket acceptable. The absolute floor does not move, so nothing is
+    /// ever bought below it. And the coverage targets do not move, so a relaxed
+    /// margin still cannot build inventory the market's demand will not carry.
+    /// </summary>
+    public ProcurementEconomicPolicy RelaxedTo(decimal roiPercent) => this with
+    {
+        CoreHighVolumeRoiPercent = Math.Min(CoreHighVolumeRoiPercent, roiPercent),
+        HighVolumeRoiPercent = Math.Min(HighVolumeRoiPercent, roiPercent),
+        StandardRoiPercent = Math.Min(StandardRoiPercent, roiPercent),
+    };
+
     public decimal CoverageDaysFor(PortfolioTier tier) => tier switch
     {
         PortfolioTier.Core => PreferredCoverageDays,

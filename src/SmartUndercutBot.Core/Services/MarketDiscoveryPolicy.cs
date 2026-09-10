@@ -12,8 +12,8 @@ namespace SmartUndercutBot.Core.Services;
 public static class MarketDiscoveryPolicy
 {
     /// <summary>Food and medicine only, and only if it is worth a retainer slot.</summary>
-    public const uint MinimumStackValue = 150_000;
-    public const decimal MinimumUnitsSoldPerDay = 50m;
+    public const ulong MinimumStackValue = MarketConfidencePolicy.CandidateMinimumStackValue;
+    public const decimal MinimumUnitsSoldPerDay = MarketConfidencePolicy.CandidateMinimumSalesPerDay;
 
     /// <summary>
     /// Keep the discovered list short. Every extra item multiplies scouting cost
@@ -76,10 +76,15 @@ public static class MarketDiscoveryPolicy
                 ListFromBags = true,
                 HuntOnTour = true,
                 TourPriority = 3,
-                // Objectively high-value, high-volume food or medicine: exactly the
-                // kind of stock the curated list exists to hold.
+                // A proposal is a candidate, never core stock. One flattering
+                // statistics call is not evidence that a market behaves like
+                // popcorn; MarketConfidencePolicy decides that, over several
+                // refreshes that agree with each other.
                 PreferredStock = false,
+                Confidence = MarketConfidence.Candidate,
                 DiscoveredAutomatically = true,
+                LastObservedUnitPrice = price,
+                LastObservedSalesPerDay = perDay,
             }, price * (decimal)stack * perDay));
         }
 

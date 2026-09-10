@@ -911,6 +911,18 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
         if (!retainerListings.TryReadSellerFeePercent(out var feePercent))
             return;
 
+        // The game just told us what selling actually costs. Record it so every
+        // margin, price ceiling and resale floor is computed from the real rate
+        // instead of the assumed 5%.
+        if (feePercent is >= 0m and < 100m && configuration.Current.ObservedMarketTaxPercent != feePercent)
+        {
+            configuration.Current.ObservedMarketTaxPercent = feePercent;
+            configuration.Save();
+            log.Add(AutomationLogLevel.Information,
+                $"MARKET TAX: the retainer sell window reports {feePercent:0.##}%. " +
+                "Purchase margins, price ceilings and resale floors now use that rate.");
+        }
+
         var retainerId = retainerListings.ActiveRetainerId;
         if (portfolioRetainers.TryGetValue(retainerId, out var balance))
             portfolioRetainers[retainerId] = balance with { SellerFeePercent = feePercent };

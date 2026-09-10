@@ -58,8 +58,14 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
                     (ulong)Math.Max(1, rule.TargetStackSize),
                     (ulong)decimal.Floor(sales.Sum(x => (decimal)x.Quantity) *
                         request.MaximumWeeklySalesSharePercent / 100m));
-                context.WeeklyShareLimits[(market.ItemId, quality)] =
-                    observedLimit > ownedUnits ? observedLimit - ownedUnits : 0;
+                var shareKey = (market.ItemId, quality);
+                var remainingShare = observedLimit > ownedUnits ? observedLimit - ownedUnits : 0;
+                // Two market entries can name the same item. The limit is a cap on a
+                // single position, so the tighter of the two is the honest answer;
+                // letting the last one seen win could silently raise it.
+                context.WeeklyShareLimits[shareKey] = context.WeeklyShareLimits.TryGetValue(shareKey, out var existing)
+                    ? Math.Min(existing, remainingShare)
+                    : remainingShare;
                 context.OwnedUnits[(market.ItemId, quality)] = ownedUnits;
 
                 var targetSalePrice = Median(sales.Select(x => x.PricePerUnit));
@@ -233,51 +239,85 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
                 $"{context.Gates.MinimumProfitPerSaleSlot:N0} required)"));
             return;
         }
-        // Preference is a weight on the economics, never a bypass of them: an
-        // outstanding non-core opportunity can still beat a poor core one.
-        context.Candidates.Add(tiered with
-        {
-            AllocationScore = tiered.ExpectedGilPerDay * context.Policy.ScoreWeightFor(tier),
-        });
+        // No score is stored here. What a stack is worth depends on the inventory it
+        // will land behind, and that is only known during allocation - so the score
+        // is computed there, per candidate, per iteration.
+        context.Candidates.Add(tiered);
     }
+
+    /// <summary>
+    /// What one more stack is worth right now: gil per day of committed capital given
+    /// the units already queued in front of it, weighted by the market's class.
+    ///
+    /// Preference is a weight on the economics, never a bypass of them - an
+    /// outstanding non-core opportunity can still beat a poor core one.
+    /// </summary>
+    private static decimal ScoreOf(ProcurementOrder candidate, ProcurementEconomicPolicy policy) =>
+        candidate.MarginalGilPerDay * policy.ScoreWeightFor(candidate.Tier);
 
     private static PortfolioDecision Describe(ProcurementOrder order, bool selected, string reason) => new(
         order.ItemId, order.ItemName, order.IsHighQuality, order.Tier, selected, reason,
         order.SalesPerDay, order.ExpectedProfit, order.NetRoiPercent, order.EstimatedDaysToSell,
         order.ExpectedResaleValue, order.CapitalAtRisk, order.ExpectedNetProceeds,
-        order.ExpectedGilPerDay, order.InventoryCoverageDays, order.CoverageDaysAfterPurchase, order.Quantity);
+        order.ExpectedGilPerDay, order.InventoryCoverageDays, order.CoverageDaysAfterPurchase, order.Quantity,
+        order.MarginalGilPerDay, order.MarginalDaysToClear, order.AllocationScore);
 
     /// <summary>
-    /// One greedy pass over the candidates in economic order.
+    /// Bounded search budget for the constrained-capital improvement pass. Greedy is
+    /// still the allocator; this only re-runs it a handful of times.
+    /// </summary>
+    private const int MaximumImprovementDrops = 8;
+    private const int MaximumImprovementRounds = 3;
+
+    /// <summary>
+    /// Choose the basket.
     ///
-    /// The ordering is the objective: expected gil per day first (weighted by how much
-    /// confidence the market's class earns), then absolute profit, then liquidity, then
-    /// cost. Every rejection below is a capacity or concentration limit, not a
-    /// preference - preference has already been expressed in the score.
+    /// Greedy selection on marginal value, then a small bounded repair step for the
+    /// one case greedy is known to get wrong: a tight gil budget where one expensive
+    /// stack crowds out two cheaper ones that are together worth more.
     /// </summary>
     private static ProcurementPlan Allocate(
         PlanningContext context, uint budget, int slotLimit,
         IReadOnlyList<StockExposure> owned, int capacitySlots, bool useWeeklyShare)
     {
-        var policy = context.Policy;
         var ownedSlots = owned.GroupBy(x => x.Tier).ToDictionary(x => x.Key, x => x.Sum(y => y.SaleSlots));
         var opening = PortfolioPolicy.Summarize(ownedSlots, slotLimit, capacitySlots, context.Gates);
         if (context.Candidates.Count == 0)
             return new(DateTimeOffset.UtcNow, [], 0, 0, 0, opening, context.Rejected);
 
-        int Priority(ProcurementOrder x) =>
-            context.Rules.TryGetValue(x.ItemId, out var rule) ? rule.TourPriority : int.MaxValue;
+        var outcome = SelectGreedily(context, budget, slotLimit, owned, ownedSlots, opening, useWeeklyShare, null);
+        outcome = ImproveUnderConstrainedCapital(
+            context, budget, slotLimit, owned, ownedSlots, opening, useWeeklyShare, outcome);
 
-        var ordered = context.Candidates
-            .OrderByDescending(x => x.AllocationScore)
-            .ThenByDescending(x => x.ExpectedProfit)
-            .ThenBy(x => x.EstimatedDaysToSell)
-            .ThenByDescending(x => x.CapitalAtRisk)
-            .ThenBy(Priority)
-            .ThenBy(x => x.ItemId)
-            .ThenBy(x => x.ListingId)
-            .ToArray();
+        return new(DateTimeOffset.UtcNow, outcome.Orders,
+            (uint)Math.Min(outcome.Spent, uint.MaxValue),
+            (uint)Math.Min(outcome.Profit, uint.MaxValue), outcome.Orders.Count,
+            PortfolioPolicy.Summarize(outcome.TierSlots, 0, capacitySlots, context.Gates),
+            context.Rejected.Concat(outcome.Notes).ToArray());
+    }
 
+    /// <summary>
+    /// Repeated best-choice selection.
+    ///
+    /// Each iteration re-scores every surviving candidate against the inventory that
+    /// now exists - including everything selected earlier in this same pass - and
+    /// takes the best one. That is the whole of the marginal model: the second stack
+    /// of a market is scored over the days it will actually take to clear behind the
+    /// first, so a market's attractiveness decays as the position fills and other
+    /// opportunities overtake it without any category quota saying that they must.
+    ///
+    /// Every rejection below is a capacity or concentration limit, and all of them
+    /// are monotone - holdings, spend and slots only ever grow - so a candidate that
+    /// fails one can never become feasible later and is dropped for good. Each
+    /// improvement trial starts afresh from context.Candidates, so dropped candidates
+    /// are available again when a trial frees capital or coverage.
+    /// </summary>
+    private static AllocationOutcome SelectGreedily(
+        PlanningContext context, uint budget, int slotLimit, IReadOnlyList<StockExposure> owned,
+        IReadOnlyDictionary<PortfolioTier, int> ownedSlots, PortfolioAllocationSummary opening,
+        bool useWeeklyShare, IReadOnlyDictionary<(uint ItemId, bool IsHighQuality), int>? trialCaps)
+    {
+        var policy = context.Policy;
         var itemSlots = owned.GroupBy(x => x.ItemId).ToDictionary(x => x.Key, x => x.Sum(y => y.SaleSlots));
         var tierSlots = new Dictionary<PortfolioTier, int>(ownedSlots);
         var heldUnits = new Dictionary<(uint, bool), ulong>(context.OwnedUnits);
@@ -285,88 +325,249 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
         var orders = new List<ProcurementOrder>();
         var notes = new List<PortfolioDecision>();
         ulong spent = 0, profit = 0, opportunisticSpent = 0;
+        decimal objective = 0;
+        var budgetBlocked = false;
 
-        foreach (var candidate in ordered)
+        var opportunisticCapital = budget * context.Gates.OpportunisticMaximumPercent / 100m;
+        var remaining = context.Candidates.ToList();
+        // Stacks added by this pass, per market, so a trial cap can say "give this
+        // market one fewer slot" without depending on which listing was picked.
+        var addedByKey = new Dictionary<(uint, bool), int>();
+
+        int Priority(ProcurementOrder x) =>
+            context.Rules.TryGetValue(x.ItemId, out var rule) ? rule.TourPriority : int.MaxValue;
+
+        while (orders.Count < slotLimit && remaining.Count > 0)
         {
-            var key = (candidate.ItemId, candidate.IsHighQuality);
-            var cost = candidate.CapitalAtRisk;
-            var rule = context.Rules[candidate.ItemId];
-            var held = heldUnits.GetValueOrDefault(key);
+            ProcurementOrder? best = null;
+            var survivors = new List<ProcurementOrder>(remaining.Count);
 
-            if (orders.Count >= slotLimit)
+            foreach (var pending in remaining)
             {
-                notes.Add(Describe(candidate, false, "no free sale slot remains"));
-                continue;
-            }
-            // Counts stock already listed, so a retainer full of trinkets actively
-            // blocks buying more of them.
-            if (candidate.Tier == PortfolioTier.Opportunistic &&
-                tierSlots.GetValueOrDefault(PortfolioTier.Opportunistic) + candidate.SaleSlots >
-                opening.OpportunisticCap)
-            {
-                notes.Add(Describe(candidate, false,
-                    $"opportunistic portfolio cap reached ({tierSlots.GetValueOrDefault(PortfolioTier.Opportunistic)}" +
-                    $"/{opening.OpportunisticCap} slots)"));
-                continue;
-            }
-            if (candidate.Tier == PortfolioTier.Opportunistic &&
-                opportunisticSpent + cost > budget * context.Gates.OpportunisticMaximumPercent / 100m)
-            {
-                notes.Add(Describe(candidate, false, "opportunistic capital cap reached"));
-                continue;
-            }
-            var maximumSlots = EffectiveMaximumSlots(policy, rule, candidate);
-            if (itemSlots.GetValueOrDefault(candidate.ItemId) >= maximumSlots)
-            {
-                notes.Add(Describe(candidate, false,
-                    $"already holding {itemSlots.GetValueOrDefault(candidate.ItemId)} of {maximumSlots} sale slots for this item"));
-                continue;
-            }
-            if (spent + cost > budget)
-            {
-                notes.Add(Describe(candidate, false, "remaining budget does not cover this stack"));
-                continue;
-            }
+                var key = (pending.ItemId, pending.IsHighQuality);
+                var held = heldUnits.GetValueOrDefault(key);
+                var candidate = pending with { OwnedUnitsBefore = held };
+                candidate = candidate with { AllocationScore = ScoreOf(candidate, policy) };
+                var cost = candidate.CapitalAtRisk;
+                var rule = context.Rules[candidate.ItemId];
+                var coverageDays = policy.CoverageDaysFor(candidate.Tier);
 
-            var coverageDays = policy.CoverageDaysFor(candidate.Tier);
-            if (coverageDays > 0)
-            {
-                if (!InventoryCoveragePolicy.CanAdd(held, candidate.Quantity, candidate.SalesPerDay,
-                        coverageDays, policy.CoverageOvershootDays))
+                // Counts stock already listed, so a retainer full of trinkets
+                // actively blocks buying more of them.
+                if (candidate.Tier == PortfolioTier.Opportunistic &&
+                    tierSlots.GetValueOrDefault(PortfolioTier.Opportunistic) + candidate.SaleSlots >
+                    opening.OpportunisticCap)
                 {
-                    var have = InventoryCoveragePolicy.CoverageDays(held, candidate.SalesPerDay);
-                    notes.Add(Describe(candidate with { OwnedUnitsBefore = held }, false,
-                        candidate.SalesPerDay <= 0
-                            ? "no reliable sales velocity to size a position against"
-                            : $"demand coverage reached ({have:N1}d held, {coverageDays:N1}d target)"));
+                    notes.Add(Describe(candidate, false,
+                        $"opportunistic portfolio cap reached ({tierSlots.GetValueOrDefault(PortfolioTier.Opportunistic)}" +
+                        $"/{opening.OpportunisticCap} slots)"));
                     continue;
                 }
-            }
-            else if (useWeeklyShare &&
-                     boughtUnits.GetValueOrDefault(key) + candidate.Quantity >
-                     context.WeeklyShareLimits.GetValueOrDefault(key))
-            {
-                notes.Add(Describe(candidate, false, "weekly market-share limit reached for this item"));
-                continue;
+                if (candidate.Tier == PortfolioTier.Opportunistic && opportunisticSpent + cost > opportunisticCapital)
+                {
+                    notes.Add(Describe(candidate, false, "opportunistic capital cap reached"));
+                    continue;
+                }
+                if (trialCaps is not null && trialCaps.TryGetValue(key, out var trialCap) &&
+                    addedByKey.GetValueOrDefault(key) >= trialCap)
+                {
+                    notes.Add(Describe(candidate with { OwnedUnitsBefore = held }, false,
+                        "held back so cheaper stock could use the gil"));
+                    continue;
+                }
+                var maximumSlots = EffectiveMaximumSlots(policy, rule, candidate);
+                if (itemSlots.GetValueOrDefault(candidate.ItemId) >= maximumSlots)
+                {
+                    notes.Add(Describe(candidate, false,
+                        $"already holding {itemSlots.GetValueOrDefault(candidate.ItemId)} of {maximumSlots} sale slots for this item"));
+                    continue;
+                }
+                if (coverageDays > 0)
+                {
+                    if (!InventoryCoveragePolicy.CanAdd(held, candidate.Quantity, candidate.SalesPerDay,
+                            coverageDays, policy.CoverageOvershootDays))
+                    {
+                        var have = InventoryCoveragePolicy.CoverageDays(held, candidate.SalesPerDay);
+                        notes.Add(Describe(candidate with { OwnedUnitsBefore = held }, false,
+                            candidate.SalesPerDay <= 0
+                                ? "no reliable sales velocity to size a position against"
+                                : $"demand coverage reached ({have:N1}d held, {coverageDays:N1}d target)"));
+                        continue;
+                    }
+                }
+                else if (useWeeklyShare &&
+                         boughtUnits.GetValueOrDefault(key) + candidate.Quantity >
+                         context.WeeklyShareLimits.GetValueOrDefault(key))
+                {
+                    notes.Add(Describe(candidate, false, "weekly market-share limit reached for this item"));
+                    continue;
+                }
+                if (spent + cost > budget)
+                {
+                    // Spending only grows in this pass. A trial starts afresh, so
+                    // there is no need to reconsider or log this rejection on every pick.
+                    budgetBlocked = true;
+                    notes.Add(Describe(candidate with { OwnedUnitsBefore = held }, false,
+                        "remaining budget does not cover this stack"));
+                    continue;
+                }
+
+                survivors.Add(candidate);
+                if (best is null || IsBetter(candidate, best, Priority))
+                    best = candidate;
             }
 
-            var selected = candidate with { OwnedUnitsBefore = held };
-            orders.Add(selected);
-            notes.Add(Describe(selected, true, SelectionReason(selected, coverageDays)));
-            itemSlots[candidate.ItemId] = itemSlots.GetValueOrDefault(candidate.ItemId) + 1;
-            tierSlots[candidate.Tier] = tierSlots.GetValueOrDefault(candidate.Tier) + candidate.SaleSlots;
-            boughtUnits[key] = boughtUnits.GetValueOrDefault(key) + candidate.Quantity;
-            heldUnits[key] = held + candidate.Quantity;
-            spent += cost;
-            if (candidate.Tier == PortfolioTier.Opportunistic) opportunisticSpent += cost;
-            profit += candidate.ExpectedProfit;
+            if (best is null)
+            {
+                remaining = [];
+                break;
+            }
+
+            var chosen = best;
+            orders.Add(chosen);
+            notes.Add(Describe(chosen, true, SelectionReason(chosen, policy.CoverageDaysFor(chosen.Tier))));
+            var chosenKey = (chosen.ItemId, chosen.IsHighQuality);
+            itemSlots[chosen.ItemId] = itemSlots.GetValueOrDefault(chosen.ItemId) + 1;
+            tierSlots[chosen.Tier] = tierSlots.GetValueOrDefault(chosen.Tier) + chosen.SaleSlots;
+            boughtUnits[chosenKey] = boughtUnits.GetValueOrDefault(chosenKey) + chosen.Quantity;
+            addedByKey[chosenKey] = addedByKey.GetValueOrDefault(chosenKey) + 1;
+            heldUnits[chosenKey] = heldUnits.GetValueOrDefault(chosenKey) + chosen.Quantity;
+            spent += chosen.CapitalAtRisk;
+            if (chosen.Tier == PortfolioTier.Opportunistic) opportunisticSpent += chosen.CapitalAtRisk;
+            profit += chosen.ExpectedProfit;
+            objective += chosen.AllocationScore;
+
+            // Survivors were scored against the inventory of this iteration; they are
+            // re-scored on the next one. Only the chosen listing leaves the pool.
+            remaining = survivors.Where(x => !SameListing(x, chosen)).ToList();
         }
 
-        return new(DateTimeOffset.UtcNow, orders, (uint)Math.Min(spent, uint.MaxValue),
-            (uint)Math.Min(profit, uint.MaxValue), orders.Count,
-            PortfolioPolicy.Summarize(tierSlots, 0, capacitySlots, context.Gates),
-            context.Rejected.Concat(notes).ToArray());
+        foreach (var leftover in remaining)
+        {
+            var final = leftover with
+            { OwnedUnitsBefore = heldUnits.GetValueOrDefault((leftover.ItemId, leftover.IsHighQuality)) };
+            final = final with { AllocationScore = ScoreOf(final, policy) };
+            notes.Add(Describe(final, false, "no free sale slot remains"));
+        }
+
+        return new(orders, notes, spent, profit, objective, tierSlots, budgetBlocked);
     }
+
+    /// <summary>
+    /// The repair step for constrained capital.
+    ///
+    /// Greedy takes the highest-scoring stack it can afford, which under a tight
+    /// budget can spend on one candidate worth 300k what would have bought two worth
+    /// 200k each. Rather than build an optimiser, drop one selected stack at a time -
+    /// the expensive ones first, since those are what crowd the rest out - and re-run
+    /// the same greedy selection without it. A replacement basket is adopted only if
+    /// the total objective strictly improves, and it is produced by that same
+    /// routine, so every budget, slot, coverage, concentration, opportunistic and
+    /// rule constraint is enforced identically.
+    ///
+    /// Bounded at 2 x MaximumImprovementRounds x MaximumImprovementDrops re-runs, and
+    /// skipped entirely unless the budget actually stopped something - so a large
+    /// wallet pays nothing for it and behaves exactly as it did before.
+    /// </summary>
+    private static AllocationOutcome ImproveUnderConstrainedCapital(
+        PlanningContext context, uint budget, int slotLimit, IReadOnlyList<StockExposure> owned,
+        IReadOnlyDictionary<PortfolioTier, int> ownedSlots, PortfolioAllocationSummary opening,
+        bool useWeeklyShare, AllocationOutcome current)
+    {
+        var caps = new Dictionary<(uint, bool), int>();
+        for (var round = 0; round < MaximumImprovementRounds; round++)
+        {
+            if (!current.BudgetBlocked || current.Orders.Count == 0)
+                break;
+
+            AllocationOutcome? bestAlternative = null;
+            (uint, bool) bestKey = default;
+            var bestCap = 0;
+
+            // The neighbourhood: for each market in the basket, what if it were
+            // allowed one fewer stack, or none at all? Expressed as a slot cap
+            // rather than as a banned listing, because banning one listing of a
+            // market that has identical siblings changes nothing - the sibling
+            // simply takes its place, and the trial is wasted.
+            var groups = current.Orders
+                .GroupBy(x => (x.ItemId, x.IsHighQuality))
+                .Select(g => (Key: g.Key, Stacks: g.Count(), Capital: g.Sum(x => (decimal)x.CapitalAtRisk)))
+                .OrderByDescending(g => g.Capital)
+                .ThenBy(g => g.Key.ItemId)
+                .ThenBy(g => g.Key.IsHighQuality)
+                .Take(MaximumImprovementDrops)
+                .ToArray();
+
+            foreach (var group in groups)
+            {
+                foreach (var cap in group.Stacks > 1 ? new[] { group.Stacks - 1, 0 } : [0])
+                {
+                    if (caps.TryGetValue(group.Key, out var standing) && standing <= cap)
+                        continue;
+                    var trial = new Dictionary<(uint, bool), int>(caps) { [group.Key] = cap };
+                    var alternative = SelectGreedily(
+                        context, budget, slotLimit, owned, ownedSlots, opening, useWeeklyShare, trial);
+                    if (alternative.Objective <= current.Objective)
+                        continue;
+                    if (bestAlternative is null || IsBetterBasket(alternative, bestAlternative))
+                    {
+                        bestAlternative = alternative;
+                        bestKey = group.Key;
+                        bestCap = cap;
+                    }
+                }
+            }
+
+            if (bestAlternative is null)
+                break;
+            caps[bestKey] = bestCap;
+            current = bestAlternative;
+        }
+        return current;
+    }
+
+    /// <summary>Total order over candidates, so selection is deterministic.</summary>
+    private static bool IsBetter(ProcurementOrder x, ProcurementOrder y, Func<ProcurementOrder, int> priority)
+    {
+        if (x.AllocationScore != y.AllocationScore) return x.AllocationScore > y.AllocationScore;
+        if (x.ExpectedProfit != y.ExpectedProfit) return x.ExpectedProfit > y.ExpectedProfit;
+        if (x.MarginalDaysToClear != y.MarginalDaysToClear) return x.MarginalDaysToClear < y.MarginalDaysToClear;
+        // Deploying more capital productively is a late tie-break, never a reason.
+        if (x.CapitalAtRisk != y.CapitalAtRisk) return x.CapitalAtRisk > y.CapitalAtRisk;
+        var px = priority(x);
+        var py = priority(y);
+        if (px != py) return px < py;
+        if (x.ItemId != y.ItemId) return x.ItemId < y.ItemId;
+        if (x.IsHighQuality != y.IsHighQuality) return !x.IsHighQuality;
+        if (x.ListingId != y.ListingId) return x.ListingId < y.ListingId;
+        return string.CompareOrdinal(x.WorldName, y.WorldName) < 0;
+    }
+
+    private static bool SameListing(ProcurementOrder x, ProcurementOrder y) =>
+        x.ItemId == y.ItemId && x.IsHighQuality == y.IsHighQuality && x.ListingId == y.ListingId &&
+        string.Equals(x.WorldName, y.WorldName, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Total order over complete baskets, so the repair step is deterministic.</summary>
+    private static bool IsBetterBasket(AllocationOutcome x, AllocationOutcome y)
+    {
+        if (x.Objective != y.Objective) return x.Objective > y.Objective;
+        if (x.Profit != y.Profit) return x.Profit > y.Profit;
+        if (x.Spent != y.Spent) return x.Spent < y.Spent;
+        return x.Orders.Count > y.Orders.Count;
+    }
+
+    /// <summary>One complete candidate basket and what it is worth.</summary>
+    private sealed record AllocationOutcome(
+        IReadOnlyList<ProcurementOrder> Orders,
+        IReadOnlyList<PortfolioDecision> Notes,
+        ulong Spent,
+        ulong Profit,
+        // Sum of the marginal, class-weighted gil per day of every selected stack,
+        // evaluated in the order it was selected. This is what the repair step
+        // maximises, so the two passes optimise the same quantity.
+        decimal Objective,
+        IReadOnlyDictionary<PortfolioTier, int> TierSlots,
+        bool BudgetBlocked);
 
     /// <summary>
     /// How many sale slots one item may occupy. The fixed per-rule number is a floor,

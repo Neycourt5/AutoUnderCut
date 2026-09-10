@@ -1094,7 +1094,80 @@ public sealed class DashboardWindow : Window
                 config.ProcurementFastMoverRoiPercent = (decimal)Math.Max(0, fastRoi);
                 configurationDirty = true;
             }
-            ImGui.TextDisabled("The margin required on anything selling 10+ units a day at home - popcorn and the other fast lines. Their return comes from turning the gil over, so holding out for the full margin mostly leaves the gil idle. The per-unit profit floor and every safety check still apply.");
+            ImGui.TextDisabled("The margin required on preferred stock that is both fast-moving and valuable per slot - popcorn, potages, raid gemdraughts. Their return comes from turning the gil over, so holding out for the full margin mostly leaves the gil idle. The per-unit profit floor and every safety check still apply.");
+            var highVolumeRoi = (float)config.ProcurementHighVolumeRoiPercent;
+            if (ImGui.DragFloat("High-volume ROI % (not preferred)", ref highVolumeRoi, 0.5f, 8, 1_000, "%.1f%%"))
+            {
+                config.ProcurementHighVolumeRoiPercent = (decimal)Math.Max(8f, highVolumeRoi);
+                configurationDirty = true;
+            }
+            ImGui.TextDisabled("The same thinner bar for high-volume, high-value stock that is not pinned as preferred.");
+            var lowValueRoi = (float)config.ProcurementLowValueRoiPercent;
+            if (ImGui.DragFloat("Low-value ROI %", ref lowValueRoi, 0.5f, 8, 1_000, "%.1f%%"))
+            {
+                config.ProcurementLowValueRoiPercent = (decimal)Math.Max(8f, lowValueRoi);
+                configurationDirty = true;
+            }
+            ImGui.TextDisabled("Cheap stock is held to a deliberately stricter bar. A big percentage on a small stack is a side profit, not somewhere to put capital.");
+            var floorRoi = (float)config.ProcurementAbsoluteMinimumRoiPercent;
+            if (ImGui.DragFloat("Absolute minimum ROI %", ref floorRoi, 0.5f, 8, 1_000, "%.1f%%"))
+            {
+                config.ProcurementAbsoluteMinimumRoiPercent = (decimal)Math.Max(8f, floorRoi);
+                configurationDirty = true;
+            }
+            ImGui.TextDisabled("Nothing is ever bought below this net return after fees, whatever the other bars say.");
+
+            ImGui.Separator();
+            ImGui.TextUnformatted("What counts as a high-volume market");
+            var highVolumeSales = (float)config.ProcurementHighVolumeMinimumSalesPerDay;
+            if (ImGui.DragFloat("High-volume minimum sales/day", ref highVolumeSales, 1f, 10, 10_000, "%.0f"))
+            {
+                config.ProcurementHighVolumeMinimumSalesPerDay = (decimal)Math.Max(10f, highVolumeSales);
+                configurationDirty = true;
+            }
+            var highVolumeValue = config.ProcurementHighVolumeMinimumValuePerSlot;
+            if (InputUInt("High-volume minimum stack value (gil)", ref highVolumeValue, 150_000, 100_000_000))
+            {
+                config.ProcurementHighVolumeMinimumValuePerSlot = highVolumeValue;
+                configurationDirty = true;
+            }
+            ImGui.TextDisabled("Speed alone does not earn the thinner margin. A 5,000 gil item that sells quickly is not the same capital proposition as a two-million-gil stack of raid food, so a market has to clear both bars.");
+
+            ImGui.Separator();
+            ImGui.TextUnformatted("Inventory sizing (days of demand)");
+            var preferredDays = (float)config.ProcurementPreferredCoverageDays;
+            if (ImGui.DragFloat("Preferred coverage days", ref preferredDays, 0.1f, 0.25f, 7f, "%.1f d"))
+            {
+                config.ProcurementPreferredCoverageDays = (decimal)Math.Clamp(preferredDays, 0.25f, 7f);
+                configurationDirty = true;
+            }
+            var secondaryDays = (float)config.ProcurementSecondaryCoverageDays;
+            if (ImGui.DragFloat("Secondary coverage days", ref secondaryDays, 0.1f, 0.25f, 7f, "%.1f d"))
+            {
+                config.ProcurementSecondaryCoverageDays = (decimal)Math.Clamp(secondaryDays, 0.25f, 7f);
+                configurationDirty = true;
+            }
+            var opportunisticDays = (float)config.ProcurementOpportunisticCoverageDays;
+            if (ImGui.DragFloat("Opportunistic coverage days", ref opportunisticDays, 0.05f, 0.1f, 2f, "%.2f d"))
+            {
+                config.ProcurementOpportunisticCoverageDays = (decimal)Math.Clamp(opportunisticDays, 0.1f, 2f);
+                configurationDirty = true;
+            }
+            ImGui.TextDisabled("How much stock to hold, measured in days of each market's own observed sales rather than in slots. A line selling a hundred a day can absorb several stacks and millions of gil; a line selling three a day cannot absorb one, however good the margin looks.");
+            var emergencySlots = config.ProcurementEmergencyMaximumSlotsPerItem;
+            if (InputInt("Emergency maximum slots per item", ref emergencySlots, 1, 60))
+            {
+                config.ProcurementEmergencyMaximumSlotsPerItem = emergencySlots;
+                configurationDirty = true;
+            }
+            ImGui.TextDisabled("A hard concentration limit no amount of demand may exceed, so one market cannot become the entire portfolio.");
+            var absorptionDays = (float)config.ProcurementAnchorAbsorptionDays;
+            if (ImGui.DragFloat("Undercut absorption days", ref absorptionDays, 0.05f, 0f, 0.5f, "%.2f d"))
+            {
+                config.ProcurementAnchorAbsorptionDays = (decimal)Math.Clamp(absorptionDays, 0f, 0.5f);
+                configurationDirty = true;
+            }
+            ImGui.TextDisabled("How much cheap competing stock the market swallows before it should move the expected resale price. One three-unit undercut in a market selling 150 a day is gone in minutes and should not redefine what a 99-stack is worth. Set 0 to always price against the single cheapest listing.");
 
             ImGui.Separator();
             ImGui.TextUnformatted("Portfolio shape");

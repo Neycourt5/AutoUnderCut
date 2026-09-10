@@ -93,7 +93,9 @@ public sealed partial class ProcurementController
                     priorityDemand.FirstOrDefault(m => m.ItemId == x.Hint.ItemId)?.Listings
                         .Where(h => h.WorldName.Equals(homeWorld, StringComparison.OrdinalIgnoreCase)).ToArray() ?? []).Reference;
                 var units = (uint)Math.Max(1, x.Rule.TargetStackSize);
-                return (x.Hint, Score: Math.Max(0m, FeeModel.Default.NetUnitProceeds(reference) - (decimal)FeeModel.Default.LandedUnitCost(x.Hint.PricePerUnit)) * units);
+                var fees = config.Fees;
+                return (x.Hint, Score: Math.Max(0m,
+                    fees.NetUnitProceeds(reference) - (decimal)fees.LandedUnitCost(x.Hint.PricePerUnit)) * units);
             })
             .ToArray();
         var scores = hints.GroupBy(x => x.Hint.WorldName, StringComparer.OrdinalIgnoreCase)
@@ -206,6 +208,7 @@ public sealed partial class ProcurementController
             OwnedStock: CollectOwnedStock(), MaximumWeeklySalesSharePercent: config.ProcurementWeeklySalesSharePercent,
             HighQualityOnly: config.BuyHighQualityOnly, ResaleListings: homePrices.Values.SelectMany(x => x).ToArray(),
             Portfolio: config.PortfolioGates, PortfolioCapacitySlots: PortfolioCapacitySlots(),
+            MarketTaxPercent: config.Fees.MarketTaxPercent,
             Economics: config.EconomicPolicy));
         LogPortfolioDecisions("SCOUT", compared);
         compared = TopUpEmptySaleSlots(compared, markets);
@@ -263,7 +266,12 @@ public sealed partial class ProcurementController
             HighQualityOnly: config.BuyHighQualityOnly, ResaleListings: homePrices.Values.SelectMany(x => x).ToArray(),
             Portfolio: config.PortfolioGates with { OpportunisticMaximumPercent = 0m },
             PortfolioCapacitySlots: PortfolioCapacitySlots(),
-            Economics: config.EconomicPolicy));
+            MarketTaxPercent: config.Fees.MarketTaxPercent,
+            // The fill bar relaxes the preferred and high-volume margins only. The
+            // absolute floor, the low-value bar and every coverage target stand, so
+            // this can buy good stock a little cheaper - never junk, and never more
+            // than the market's own demand supports.
+            Economics: config.EconomicPolicy.RelaxedTo(config.ProcurementFillRoiPercent)));
         // Belt and braces: the cap already excludes them, and PollListings refuses
         // one again before buying, but never carry an opportunistic fill order.
         var accepted = fill.Orders.Where(o => o.Tier != PortfolioTier.Opportunistic).ToArray();
@@ -508,13 +516,13 @@ public sealed partial class ProcurementController
                     OwnedStock: owned, MaximumWeeklySalesSharePercent: config.ProcurementWeeklySalesSharePercent,
                     HighQualityOnly: config.BuyHighQualityOnly, ResaleListings: resale,
                     Portfolio: config.PortfolioGates, PortfolioCapacitySlots: PortfolioCapacitySlots(),
+                    MarketTaxPercent: config.Fees.MarketTaxPercent,
                     Economics: config.EconomicPolicy));
                 candidates.AddRange(plan.Orders);
             }
         }
         var order = candidates.OrderBy(x => PortfolioPolicy.Rank(x.Tier))
             .ThenByDescending(x => x.ExpectedProfit).ThenBy(x => x.PricePerUnit).FirstOrDefault();
-        var exceptional = order is not null && ShoppingScoutPolicy.IsExceptional(order, config.ProcurementMinimumRoiPercent);
         if (stockHuntWorldIndex > 0)
         {
             scoutListings.RemoveAll(x => x.WorldName == WorldName && x.ItemId == rule.ItemId);
@@ -526,7 +534,11 @@ public sealed partial class ProcurementController
             if (!ResaleStockPolicy.BuyableQuality(rule, quality, config.BuyHighQualityOnly)) continue;
             var qualified = rows.Where(x => x.IsHighQuality == quality && !retainerListings.OwnedRetainerIds.Contains(x.RetainerId)).ToArray();
             var decision = order is not null && order.IsHighQuality == quality
-                ? $"{order.Tier.ToString().ToUpperInvariant()}. {(exceptional ? "Buy exceptional deal now" : "Save for comparison after scouting")}: x{order.Quantity} at {order.PricePerUnit:N0}; resale {order.TargetSalePrice:N0}, ceiling {order.MaximumAcceptableUnitPrice:N0}, expected profit {order.ExpectedProfit:N0}, estimated turnover {order.EstimatedDaysToSell:N2} days."
+                ? $"{order.Tier.ToString().ToUpperInvariant()}. Save for comparison after scouting: x{order.Quantity} at {order.PricePerUnit:N0}; " +
+                  $"resale {order.TargetSalePrice:N0}, ceiling {order.MaximumAcceptableUnitPrice:N0}, landed cost {order.CapitalAtRisk:N0}, " +
+                  $"expected profit {order.ExpectedProfit:N0} ({order.NetRoiPercent:N1}% net ROI), " +
+                  $"{order.ExpectedGilPerDay:N0} gil/day, coverage {order.InventoryCoverageDays:N1}d -> {order.CoverageDaysAfterPurchase:N1}d, " +
+                  $"estimated turnover {order.EstimatedDaysToSell:N2} days."
                 : homePrices.GetValueOrDefault(rule.ItemId)?.Length is not > 0 ? "No confirmed home resale listings; skip buying."
                 : "No deal passes home sales, ROI, portfolio quality, demand, budget and stock limits.";
             observations.Add(new(timeProvider.GetUtcNow(), WorldName, rule.ItemName, quality,
@@ -538,14 +550,8 @@ public sealed partial class ProcurementController
                 $"{observed.Listings} listings / {observed.Units} units, lowest {observed.Lowest:N0}. " +
                 $"Home sales {HomeSalesPerDay(rule.ItemId, quality):N1} units/day. {decision}");
         }
-        if (!exceptional || order is null) { AdvanceStockHuntRule(); return; }
-        Plan = new(timeProvider.GetUtcNow(), Plan.Orders.Append(order).ToArray(),
-            (uint)Math.Min(uint.MaxValue, (ulong)Plan.TotalCost + (ulong)order.PricePerUnit * order.Quantity),
-            (uint)Math.Min(uint.MaxValue, (ulong)Plan.ExpectedProfit + order.ExpectedProfit), Plan.SaleSlots + 1);
-        currentOrder = order;
-        // Listings are already loaded. A separate tick revalidates the exact live
-        // candidate and tax through the normal purchase guards before submitting.
-        nextActionAt = timeProvider.GetUtcNow();
-        Wait(ProcurementState.WaitingForListings, $"Checking the live {order.ItemName} deal before buying.", 30);
+        // Nothing is bought here. Every observation goes into the end-of-circuit
+        // comparison, so capital is committed once, against the whole field.
+        AdvanceStockHuntRule();
     }
 }

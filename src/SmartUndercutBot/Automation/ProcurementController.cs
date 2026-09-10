@@ -310,6 +310,9 @@ public sealed partial class ProcurementController : IDisposable
             return;
         stockHuntScanning = false;
         priorityShopping = mode == ProcurementRunMode.AutomaticPurchase && configuration.Current.PriorityShoppingEnabled;
+        // Retire cost information for stock that has since sold, before anything is
+        // planned against it.
+        ReconcilePositionCosts();
         // Optional, cached, and never blocking: discovery may add candidates for
         // the next scan, but a failure leaves the curated rules to do their job.
         discovery?.ApplyPendingDiscoveries();
@@ -607,6 +610,7 @@ public sealed partial class ProcurementController : IDisposable
             HighQualityOnly: config.BuyHighQualityOnly,
             Portfolio: config.PortfolioGates,
             PortfolioCapacitySlots: PortfolioCapacitySlots(),
+            MarketTaxPercent: config.Fees.MarketTaxPercent,
             Economics: config.EconomicPolicy));
         LogPortfolioDecisions("DEAL SEARCH", Plan);
         lastScannedFreeSaleSlots = plannedSaleSlots;
@@ -1173,6 +1177,7 @@ public sealed partial class ProcurementController : IDisposable
             HighQualityOnly: config.BuyHighQualityOnly,
             Portfolio: config.PortfolioGates,
             PortfolioCapacitySlots: PortfolioCapacitySlots(),
+            MarketTaxPercent: config.Fees.MarketTaxPercent,
             Economics: config.EconomicPolicy));
         LogPortfolioDecisions("LIVE TOUR", Plan);
         detail = Plan.Orders.Count == 0
@@ -1366,7 +1371,7 @@ public sealed partial class ProcurementController : IDisposable
             SkipCurrentOrder($"SKIPPED BUY {currentOrder.ItemName}: current demand coverage does not permit more stock.");
             return;
         }
-        var expectedNetProceeds = (decimal)FeeModel.Default.NetProceeds(currentOrder.TargetSalePrice, live.Quantity);
+        var expectedNetProceeds = (decimal)configuration.Current.Fees.NetProceeds(currentOrder.TargetSalePrice, live.Quantity);
         if (expectedNetProceeds < totalCost * (1m + RequiredPurchaseRoi(currentOrder) / 100m) ||
             expectedNetProceeds - totalCost < (decimal)configuration.Current.ProcurementMinimumProfitPerUnit * live.Quantity)
         {
@@ -1459,11 +1464,11 @@ public sealed partial class ProcurementController : IDisposable
         PositionCostPolicy.RecordPurchase(pricingRule, positionUnitsBeforePurchase,
             actual.Quantity, purchaseCost, RequiredPurchaseRoi(actual),
             configuration.Current.ProcurementMinimumProfitPerUnit,
-            repricing.LastKnownFreeSaleSlots.HasValue);
+            repricing.LastKnownFreeSaleSlots.HasValue, configuration.Current.Fees);
         actual = actual with
         {
             LandedCost = purchaseCost,
-            ExpectedProfit = (uint)Math.Clamp((decimal)FeeModel.Default.NetProceeds(actual.TargetSalePrice, actual.Quantity)
+            ExpectedProfit = (uint)Math.Clamp((decimal)configuration.Current.Fees.NetProceeds(actual.TargetSalePrice, actual.Quantity)
                 - purchaseCost, 0m, uint.MaxValue),
             TargetSalePrice = Math.Max(actual.TargetSalePrice, Math.Max(pricingRule.MinimumPrice, pricingRule.AcquisitionFloor)),
         };
@@ -1500,8 +1505,22 @@ public sealed partial class ProcurementController : IDisposable
     {
         var config = configuration.Current;
         var rule = config.ProcurementRules.FirstOrDefault(x => x.ItemId == order.ItemId);
-        return Math.Max(order.RequiredRoiPercent, PortfolioPolicy.RequiredRoiPercent(config.EconomicPolicy,
-            rule?.PreferredStock == true, order.SalesPerDay, order.ExpectedResaleValue));
+        // A fill order was planned under the relaxed bar, so it has to be re-checked
+        // under that same bar. Re-deriving it at the full bar here would reject at
+        // the board exactly what the planner just approved.
+        var policy = order.IsFillOrder
+            ? config.EconomicPolicy.RelaxedTo(config.ProcurementFillRoiPercent)
+            : config.EconomicPolicy;
+        // Mirror the planner's reference: a full target stack, not this listing's
+        // quantity, so a part stack cannot land in a different margin band here than
+        // it did during planning.
+        var referenceValuePerSlot = (ulong)order.TargetSalePrice *
+            (uint)Math.Max(1, rule?.TargetStackSize ?? (int)Math.Max(1, order.Quantity));
+        // The bar the order was planned against is kept as a floor, so a plan built
+        // before the settings changed can never buy under a laxer rule than the one
+        // now in force.
+        return Math.Max(order.RequiredRoiPercent, PortfolioPolicy.RequiredRoiPercent(
+            policy, rule?.PreferredStock == true, order.SalesPerDay, referenceValuePerSlot));
     }
 
     private ulong positionUnitsBeforePurchase;
@@ -1912,6 +1931,50 @@ public sealed partial class ProcurementController : IDisposable
     // counts toward the preferred target and against the opportunistic cap.
     private IReadOnlyList<StockExposure> CollectOwnedStock() =>
         repricing.ListedStock.Concat(CollectBagStock()).Select(WithPortfolioTier).ToArray();
+
+    /// <summary>
+    /// Bring tracked position costs back in line with what is actually held.
+    ///
+    /// The cost basis exists to stop the bot underselling capital it has already
+    /// committed. Once that capital has left - the stack sold, or was removed - the
+    /// basis is protecting nothing, and leaving it in place is exactly the ratchet
+    /// that strands a healthy line at an unsellable floor. Units that are no longer
+    /// held are retired from the basis, and a position that has emptied clears it
+    /// entirely so the next purchase rebases the item.
+    ///
+    /// Only run against a complete, verified picture of the retainers: a partial
+    /// pass would look like stock that had sold and would drop a live floor.
+    /// </summary>
+    private void ReconcilePositionCosts()
+    {
+        var config = configuration.Current;
+        if (!repricing.LastKnownFreeSaleSlots.HasValue || !config.ProcessAllRetainers)
+            return;
+        var held = CollectOwnedStock()
+            .GroupBy(x => x.ItemId)
+            .ToDictionary(x => x.Key, x => (ulong)x.Sum(y => (long)y.Quantity));
+        var changed = false;
+        foreach (var (itemId, rule) in config.PerItemRules)
+        {
+            var tracked = rule.CostBasisUnits;
+            if (tracked == 0)
+                continue;
+            var units = held.GetValueOrDefault(itemId);
+            if (units >= tracked)
+                continue;
+            PositionCostPolicy.RecordSale(rule, (uint)(tracked - units));
+            changed = true;
+            if (rule.CostBasisUnits == 0)
+                log.Add(AutomationLogLevel.Information,
+                    $"COST BASIS CLEARED for item {itemId}: the position sold out, so the next purchase " +
+                    "sets a fresh basis instead of inheriting the old one.");
+        }
+        if (changed)
+            configuration.Save();
+    }
+
+    // Personal sell-through collection is deferred. Inventory differences cannot
+    // identify confirmed sales; keep the experimental observer isolated from runtime.
 
     /// <summary>
     /// Tier a holding we already own. Profit is sunk on owned stock, so only the

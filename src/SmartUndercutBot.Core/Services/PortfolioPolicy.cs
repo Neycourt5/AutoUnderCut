@@ -92,6 +92,40 @@ public static class PortfolioPolicy
         expectedProfit / Math.Max(ProfitNormalizationDays, daysToSell);
 
     /// <summary>
+    /// Days until a newly bought stack has finished selling, counting the units
+    /// already held or already planned that sit in front of it.
+    ///
+    /// Our own stacks compete with each other. Holding 200 units of a market that
+    /// moves 100 a day means the next stack bought does not begin returning gil for
+    /// two days and is not fully liquidated for three - the capital is committed for
+    /// the whole of that window, not for the 0.99 days a stack of 99 would take on
+    /// an empty position. Measuring from the back of our own queue is what makes the
+    /// second and third stack of the same item honestly worth less than the first.
+    ///
+    /// With nothing held this is exactly <see cref="DaysToSell"/>, so a fresh market
+    /// is scored the same way it always was.
+    /// </summary>
+    public static decimal MarginalDaysToClear(ulong ownedUnits, uint quantity, decimal salesPerDay)
+    {
+        if (quantity == 0 || salesPerDay <= 0)
+            return MaximumDaysToSell;
+        return Math.Clamp((ownedUnits + quantity) / salesPerDay, MinimumDaysToSell, MaximumDaysToSell);
+    }
+
+    /// <summary>
+    /// Expected gil per day of committed capital for one more stack, given what is
+    /// already queued in front of it. This is what the allocator ranks on.
+    ///
+    /// The one-day normalisation still applies, and applies to the marginal figure:
+    /// a stack that would clear in two hours on an empty position still cannot claim
+    /// twelve times the rate, and a stack landing behind three days of inventory is
+    /// measured over those three days rather than over its own size alone.
+    /// </summary>
+    public static decimal MarginalGilPerDay(
+        uint expectedProfit, ulong ownedUnits, uint quantity, decimal salesPerDay) =>
+        expectedProfit / Math.Max(ProfitNormalizationDays, MarginalDaysToClear(ownedUnits, quantity, salesPerDay));
+
+    /// <summary>
     /// Tier for something we are considering buying. Pinned stock is always core.
     /// Everything else must earn Secondary with actual market characteristics:
     /// meaningful value per occupied slot, meaningful profit per occupied slot and

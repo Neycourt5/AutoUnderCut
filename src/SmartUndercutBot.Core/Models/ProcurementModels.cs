@@ -68,7 +68,12 @@ public sealed record PortfolioDecision(
     decimal ExpectedGilPerDay = 0m,
     decimal CoverageDaysBefore = 0m,
     decimal CoverageDaysAfter = 0m,
-    uint Quantity = 0)
+    uint Quantity = 0,
+    // What the allocator actually ranked on: gil per day of committed capital given
+    // the inventory queued ahead of this stack, weighted by the market's class.
+    decimal MarginalGilPerDay = 0m,
+    decimal MarginalDaysToClear = 0m,
+    decimal AllocationScore = 0m)
 {
     /// <summary>
     /// The decision line as it appears in the log. It has to answer "why did this
@@ -87,8 +92,29 @@ public sealed record PortfolioDecision(
         var coverage = CoverageDaysAfter > 0
             ? $", coverage {CoverageDaysBefore:N1}d -> {CoverageDaysAfter:N1}d"
             : string.Empty;
-        return $"{head}: {money}; {market}{coverage}; {Reason}";
+        // Only worth printing once inventory is queued ahead of the stack, where the
+        // marginal figure and the standalone one stop agreeing.
+        var marginal = MarginalDaysToClear > 0 && MarginalGilPerDay != ExpectedGilPerDay
+            ? $"; marginal {MarginalGilPerDay:N0} gil/day over {MarginalDaysToClear:N2}d" +
+              (AllocationScore > 0 ? $", score {AllocationScore:N0}" : string.Empty)
+            : AllocationScore > 0 ? $"; score {AllocationScore:N0}" : string.Empty;
+        return $"{head}: {money}; {market}{coverage}{marginal}; {Reason}";
     }
+}
+
+/// <summary>
+/// How much a market has proved about itself. Discovery proposes at the bottom of
+/// this ladder; only sustained, agreeing evidence reaches the top, where an item is
+/// pinned as core stock.
+/// </summary>
+public enum MarketConfidence
+{
+    /// <summary>Worth a side profit at most.</summary>
+    Opportunistic,
+    /// <summary>Looks like real trading stock, but has not been observed long enough.</summary>
+    Candidate,
+    /// <summary>Repeatedly demonstrated core-stock volume, value, stability and margin.</summary>
+    Proven,
 }
 
 public sealed class ProcurementRule
@@ -113,6 +139,13 @@ public sealed class ProcurementRule
     // Set when automatic market discovery proposed this rule, so a later discovery
     // pass may refresh or retire it without touching anything edited by hand.
     public bool DiscoveredAutomatically { get; set; }
+    // How much a discovered market has proved about itself, and the evidence behind
+    // it. A single flattering statistics call reaches Candidate and no further;
+    // PreferredStock is only set once the line has agreed with itself repeatedly.
+    public MarketConfidence Confidence { get; set; } = MarketConfidence.Candidate;
+    public int DiscoveryConfirmations { get; set; }
+    public uint LastObservedUnitPrice { get; set; }
+    public decimal LastObservedSalesPerDay { get; set; }
     // The all-world tour is slow - every extra item is multiplied by the number of
     // worlds visited - so only stock explicitly marked for it is walked, in order.
     public bool HuntOnTour { get; set; }
@@ -257,6 +290,23 @@ public sealed record ProcurementOrder(
     /// </summary>
     public decimal ExpectedGilPerDay =>
         PortfolioPolicy.ExpectedGilPerDay(ExpectedProfit, EstimatedDaysToSell) / Slots;
+
+    /// <summary>
+    /// Days until this stack has finished selling, counting the units already held
+    /// or planned that sit in front of it in our own queue. Equal to
+    /// <see cref="EstimatedDaysToSell"/> when the position is empty.
+    /// </summary>
+    public decimal MarginalDaysToClear =>
+        PortfolioPolicy.MarginalDaysToClear(OwnedUnitsBefore, Quantity, SalesPerDay);
+
+    /// <summary>
+    /// Gil per day of committed capital for this stack given the inventory in front
+    /// of it - the figure the allocator ranks on. The standalone
+    /// <see cref="ExpectedGilPerDay"/> is what the stack would earn on an empty
+    /// position; this is what it earns where it will actually sit.
+    /// </summary>
+    public decimal MarginalGilPerDay =>
+        PortfolioPolicy.MarginalGilPerDay(ExpectedProfit, OwnedUnitsBefore, Quantity, SalesPerDay) / Slots;
 
     /// <summary>Days of this market's demand already held before the purchase.</summary>
     public decimal InventoryCoverageDays =>

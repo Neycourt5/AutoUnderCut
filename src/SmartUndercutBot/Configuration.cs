@@ -77,6 +77,14 @@ public sealed class Configuration : IPluginConfiguration
     public decimal ProcurementAnchorAbsorptionDays { get; set; } = 0.5m;
     // Hard concentration limit no amount of demand may exceed.
     public int ProcurementEmergencyMaximumSlotsPerItem { get; set; } = 20;
+
+    /// <summary>
+    /// The retainer sale tax the game itself last reported, in percent. Every
+    /// margin, ceiling, ROI figure and resale floor is computed from this, so the
+    /// numbers follow the real rate rather than an assumed one. Falls back to the
+    /// standard 5% until the retainer sell window has actually been read.
+    /// </summary>
+    public decimal ObservedMarketTaxPercent { get; set; } = 5m;
     // Portfolio shape. Preferred (core) stock should occupy most of the retainers;
     // opportunistic arbitrage is capped so it cannot crowd out capital or slots.
     public decimal PreferredPortfolioTargetPercent { get; set; } = 75m;
@@ -142,10 +150,23 @@ public sealed class Configuration : IPluginConfiguration
     public int GuidedTourMaximumWorlds { get; set; } = 6;
     public List<ProcurementRule> ProcurementRules { get; set; } = [];
     public PricingRule GlobalRule { get; set; } = new();
+    /// <summary>
+    /// Reserved experimental observations per "itemId:H|N". Runtime collection and
+    /// planner consumption are disabled; retained for configuration compatibility. See PROFIT_OPTIMIZATION_IMPLEMENTATION.md for why
+    /// the correction is deferred rather than applied.
+    /// </summary>
+    public Dictionary<string, SellThroughObservation> SellThrough { get; set; } = [];
     public Dictionary<uint, PricingRule> PerItemRules { get; set; } = [];
 
     public PricingRule GetEffectiveRule(uint itemId) =>
         PerItemRules.TryGetValue(itemId, out var rule) ? rule.Clone() : GlobalRule.Clone();
+
+    /// <summary>
+    /// The one transaction-cost model. Planning, the displayed ROI, the live
+    /// pre-purchase re-check and the resale floor all read it, so the bot cannot
+    /// enforce one margin and report another.
+    /// </summary>
+    public FeeModel Fees => FeeModel.Default with { MarketTaxPercent = ObservedMarketTaxPercent };
 
     /// <summary>The portfolio shape every purchase plan is built against.</summary>
     public ProcurementEconomicPolicy EconomicPolicy => new(
@@ -603,6 +624,10 @@ public sealed class Configuration : IPluginConfiguration
         ProcurementLowValueRoiPercent = Math.Clamp(ProcurementLowValueRoiPercent, 8m, 1_000m);
         ProcurementAnchorAbsorptionDays = Math.Clamp(ProcurementAnchorAbsorptionDays, 0m, 0.5m);
         ProcurementEmergencyMaximumSlotsPerItem = Math.Clamp(ProcurementEmergencyMaximumSlotsPerItem, 1, 60);
+        // A nonsense reading must never widen a margin. Anything outside the range
+        // the game can actually charge falls back to the standard rate.
+        if (ObservedMarketTaxPercent is < 0m or >= 100m)
+            ObservedMarketTaxPercent = 5m;
         PreferredPortfolioTargetPercent = Math.Clamp(PreferredPortfolioTargetPercent, 0m, 100m);
         OpportunisticPortfolioMaximumPercent = Math.Clamp(OpportunisticPortfolioMaximumPercent, 0m, 100m);
         ProcurementMinimumProfitPerSaleSlot = Math.Min(ProcurementMinimumProfitPerSaleSlot, 100_000_000u);

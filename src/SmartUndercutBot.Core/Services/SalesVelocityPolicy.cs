@@ -10,7 +10,12 @@ public static class SalesVelocityPolicy
     {
         if (market is null) return 0;
         var reported = highQuality ? market.HqSalesPerDay : market.NqSalesPerDay;
-        if (reported is >= 0 and <= 1_000_000_000m) return reported.Value;
+        // A reported zero is "the source has nothing to say", not "this market is
+        // dead": Universalis returns 0 for a quality it has no window for. Taking it
+        // literally used to suppress the seven-day fallback, so an item with real
+        // observed sales scored as if it never moved - which then denied it the
+        // volume-based margin bar and made coverage refuse to size a position.
+        if (reported is > 0 and <= 1_000_000_000m) return reported.Value;
         var at = now ?? DateTimeOffset.UtcNow;
         // Missing statistics stay conservative; a burst of sales in a tiny sample
         // must not manufacture a huge daily rate.
