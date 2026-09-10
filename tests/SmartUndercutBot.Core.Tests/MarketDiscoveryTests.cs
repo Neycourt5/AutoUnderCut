@@ -105,7 +105,7 @@ public sealed class MarketDiscoveryTests
         var rule = Assert.Single(proposed);
         Assert.Equal(1u, rule.ItemId);
         Assert.Equal("Rich Stew", rule.ItemName);
-        Assert.True(rule.PreferredStock);
+        Assert.False(rule.PreferredStock);
         Assert.True(rule.DiscoveredAutomatically);
         Assert.True(rule.RequireHighQuality);
         Assert.Equal(99, rule.TargetStackSize);
@@ -218,7 +218,7 @@ public sealed class MarketDiscoveryTests
         run.Config.Current.MarketDiscoveryEnabled = true;
         run.Game.AutomaticWorldArrival = run.Game.AutomaticPurchaseConfirmation = true;
         run.Game.DemandMarkets = [
-            new(1, "Popcorn", [], [new(2_000, 99, true, DateTimeOffset.UtcNow)]),
+            new(1, "Popcorn", [], [new(2_000, 700, true, DateTimeOffset.UtcNow)]),
             new(42, "Discovered Stew", [], [new(9_000, 900, true, DateTimeOffset.UtcNow)]),
         ];
         // Only the curated flip exists on any live board.
@@ -266,7 +266,7 @@ public sealed class MarketDiscoveryTests
         Assert.True(Settles(() => !discovery.IsRefreshing && discovery.LastSuccessAt != firstSuccess));
         Assert.Equal(2, statistics.Calls);
         Assert.Equal(1, discovery.ApplyPendingDiscoveries());
-        Assert.Contains(run.Config.Current.ProcurementRules, r => r.ItemId == 42 && r.PreferredStock);
+        Assert.Contains(run.Config.Current.ProcurementRules, r => r.ItemId == 42 && !r.PreferredStock);
     }
 
     [Fact]

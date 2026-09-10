@@ -336,7 +336,9 @@ public sealed class BagListingController : IDisposable
                 PricingStrategyService.MaximumListingPrice, stock.IsHighQuality, rule.CostBasis);
             var decision = pricing.Evaluate(new PricingContext(
                 placeholder,
-                new MarketSnapshot(stock.ItemId, this.timeProvider.GetUtcNow(), listings, historicalMedian, true),
+                new MarketSnapshot(stock.ItemId, this.timeProvider.GetUtcNow(), listings, historicalMedian, true,
+                    AbsorbableUnits: market is null ? 0m : Math.Min(stock.TargetStackSize / 2m,
+                        SalesVelocityPolicy.DailyUnits(market, stock.IsHighQuality) * configuration.Current.ProcurementAnchorAbsorptionDays)),
                 rule,
                 retainerListings.OwnedRetainerIds));
             uint? target = decision.ShouldUpdate && decision.TargetPrice is { } marketTarget &&
@@ -425,7 +427,7 @@ public sealed class BagListingController : IDisposable
                 var fullStacks = ResaleStockPolicy.IsCuratedConsumable(group.Key.ItemName);
                 var stackSize = fullStacks ? 99 : Math.Max(1, buyRule?.TargetStackSize ?? 1);
                 var ownedSlots = automation.ListedStock.Where(x => x.ItemId == group.Key.ItemId).Sum(x => x.SaleSlots);
-                var slotLimit = Math.Max(0, (buyRule?.MaximumSaleSlots ?? 8) - ownedSlots);
+                var slotLimit = Math.Max(0, (buyRule?.LiquidateOnly == true ? buyRule.MaximumSaleSlots : configuration.Current.ProcurementEmergencyMaximumSlotsPerItem) - ownedSlots);
                 var surplus = total > reserve ? total - reserve : 0;
                 var listable = eligible ? Math.Min(surplus, (uint)(slotLimit * stackSize)) : 0;
                 if (fullStacks)

@@ -62,12 +62,33 @@ public sealed record PortfolioDecision(
     uint ExpectedProfit,
     decimal RoiPercent,
     decimal DaysToSell,
-    ulong ResaleValue)
+    ulong ResaleValue,
+    ulong LandedCost = 0,
+    ulong ExpectedNetProceeds = 0,
+    decimal ExpectedGilPerDay = 0m,
+    decimal CoverageDaysBefore = 0m,
+    decimal CoverageDaysAfter = 0m,
+    uint Quantity = 0)
 {
-    public override string ToString() =>
-        $"{ItemName}{(IsHighQuality ? " HQ" : string.Empty)} {Tier.ToString().ToUpperInvariant()} " +
-        $"{SalesPerDay:N0} units/day, {ExpectedProfit:N0} expected profit, {RoiPercent:N0}% ROI, " +
-        $"estimated turnover {DaysToSell:N2} days; {(Selected ? "selected" : "skipped")}: {Reason}";
+    /// <summary>
+    /// The decision line as it appears in the log. It has to answer "why did this
+    /// win?" on its own, so it carries the money, the margin, the demand and how
+    /// much inventory the purchase creates.
+    /// </summary>
+    public override string ToString()
+    {
+        var head = $"{(Selected ? "BUY" : "SKIP")} {ItemName}{(IsHighQuality ? " HQ" : string.Empty)}" +
+                   $"{(Quantity > 0 ? $" x{Quantity}" : string.Empty)} [{Tier.ToString().ToUpperInvariant()}]";
+        var money = LandedCost > 0
+            ? $"cost {LandedCost:N0}, sale {ExpectedNetProceeds:N0} net, profit {ExpectedProfit:N0} " +
+              $"({RoiPercent:N1}% ROI)"
+            : $"profit {ExpectedProfit:N0} ({RoiPercent:N1}% ROI), resale value {ResaleValue:N0}";
+        var market = $"{SalesPerDay:N0}/day, turnover {DaysToSell:N2}d, {ExpectedGilPerDay:N0} gil/day";
+        var coverage = CoverageDaysAfter > 0
+            ? $", coverage {CoverageDaysBefore:N1}d -> {CoverageDaysAfter:N1}d"
+            : string.Empty;
+        return $"{head}: {money}; {market}{coverage}; {Reason}";
+    }
 }
 
 public sealed class ProcurementRule
@@ -163,9 +184,10 @@ public sealed record ProcurementPlanRequest(
     IReadOnlyList<ProcurementMarketListing>? ResaleListings = null,
     PortfolioGates? Portfolio = null,
     int PortfolioCapacitySlots = 0,
-    // The lower margin accepted on high-volume stock. Negative means "not set",
-    // and then everything is held to MinimumRoiPercent.
-    decimal FastMoverRoiPercent = -1m);
+    // Coverage targets, margin bars by class of stock, and scoring weights. Null
+    // keeps the flat MinimumRoiPercent bar and no coverage shaping, so a caller
+    // that has not opted in gets plain profitability behaviour.
+    ProcurementEconomicPolicy? Economics = null);
 
 public sealed record LiveMarketPlanRequest(
     IReadOnlyList<ProcurementMarketItem> Markets,
@@ -183,7 +205,7 @@ public sealed record LiveMarketPlanRequest(
     bool HighQualityOnly = false,
     PortfolioGates? Portfolio = null,
     int PortfolioCapacitySlots = 0,
-    decimal FastMoverRoiPercent = -1m);
+    ProcurementEconomicPolicy? Economics = null);
 
 public sealed record ProcurementOrder(
     uint ItemId,
@@ -201,28 +223,55 @@ public sealed record ProcurementOrder(
     int SaleSlots,
     decimal SalesPerDay = 0m,
     bool IsFillOrder = false,
-    PortfolioTier Tier = PortfolioTier.Opportunistic)
+    PortfolioTier Tier = PortfolioTier.Opportunistic,
+    // Purchase price plus the buyer fee: the gil actually put at risk. Supplied by
+    // the planner from the canonical fee model so every consumer reports and
+    // enforces the same ROI. Zero means "not costed", and the raw price stands in.
+    ulong LandedCost = 0,
+    // Units of this item already held or listed when the plan was built, and the
+    // sizing target it was measured against. Carried for logging and for the live
+    // re-check, so a decision can be explained without recomputing the market.
+    ulong OwnedUnitsBefore = 0,
+    ulong TargetUnits = 0,
+    decimal AllocationScore = 0m,
+    decimal RequiredRoiPercent = 0m)
 {
     private int Slots => Math.Max(1, SaleSlots);
 
+    /// <summary>Gil actually at risk in this purchase, fee included.</summary>
+    public ulong CapitalAtRisk => LandedCost > 0 ? LandedCost : FeeModel.Default.LandedCost(PricePerUnit, Quantity);
+
     /// <summary>Gil the stack is expected to return at the resale anchor, before fees.</summary>
     public ulong ExpectedResaleValue => (ulong)TargetSalePrice * Quantity;
+
+    /// <summary>Proceeds after the sale tax. Profit is defined as this minus the landed cost.</summary>
+    public ulong ExpectedNetProceeds => CapitalAtRisk + ExpectedProfit;
+
     public ulong ResaleValuePerSaleSlot => ExpectedResaleValue / (ulong)Slots;
     public ulong ExpectedProfitPerSaleSlot => ExpectedProfit / (ulong)Slots;
     public decimal EstimatedDaysToSell => PortfolioPolicy.DaysToSell(Quantity, SalesPerDay);
 
-    /// <summary>Expected profit per day of sale-slot occupancy.</summary>
-    public decimal ProfitVelocity => PortfolioPolicy.ProfitVelocity(ExpectedProfit, EstimatedDaysToSell) / Slots;
+    /// <summary>
+    /// Expected gil generated per day of sale-slot occupancy. The primary measure of
+    /// how hard this purchase makes the capital and the slot work.
+    /// </summary>
+    public decimal ExpectedGilPerDay =>
+        PortfolioPolicy.ExpectedGilPerDay(ExpectedProfit, EstimatedDaysToSell) / Slots;
 
-    /// <summary>ROI on the landed cost, kept as a safety guard rather than the objective.</summary>
-    public decimal RoiPercent
-    {
-        get
-        {
-            var cost = (decimal)PricePerUnit * Quantity;
-            return cost <= 0 ? 0 : ExpectedProfit / cost * 100m;
-        }
-    }
+    /// <summary>Days of this market's demand already held before the purchase.</summary>
+    public decimal InventoryCoverageDays =>
+        InventoryCoveragePolicy.CoverageDays(OwnedUnitsBefore, SalesPerDay);
+
+    /// <summary>Days of demand held once this stack lands.</summary>
+    public decimal CoverageDaysAfterPurchase =>
+        InventoryCoveragePolicy.CoverageDays(OwnedUnitsBefore + Quantity, SalesPerDay);
+
+    /// <summary>
+    /// The one ROI definition in the codebase: profit over the gil actually put at
+    /// risk, buyer fee included. Displayed, enforced and re-checked identically.
+    /// </summary>
+    public decimal RoiPercent => NetRoiPercent;
+    public decimal NetRoiPercent => FeeModel.NetRoiPercent(ExpectedNetProceeds, CapitalAtRisk);
 }
 
 public sealed record ProcurementPlan(

@@ -61,14 +61,31 @@ public sealed record MarketSnapshot(
     DateTimeOffset CapturedAt,
     IReadOnlyList<MarketListing> Listings,
     uint? HistoricalMedianPrice,
-    bool IsFromCache = false);
+    bool IsFromCache = false,
+    // Competing units the market absorbs before our own stack is realistically
+    // reached. Zero keeps the plain "cheapest listing wins" behaviour; a positive
+    // value lets a big stack ignore a trivial undercut it would outlive anyway.
+    decimal AbsorbableUnits = 0m);
 
 public sealed class PricingRule
 {
     public PricingMode Mode { get; set; } = PricingMode.Undercut;
     public uint UndercutAmount { get; set; } = 1;
     public uint MinimumPrice { get; set; } = 1;
+    /// <summary>
+    /// Weighted average landed cost of the inventory currently held. Blended on each
+    /// purchase against what is still on hand, so selling a position out and re-buying
+    /// cheaper lowers the basis instead of stranding the item at an old high price.
+    /// </summary>
     public uint CostBasis { get; set; }
+    /// <summary>Units backing <see cref="CostBasis"/>, so a new purchase can be weighted against it.</summary>
+    public uint CostBasisUnits { get; set; }
+    /// <summary>
+    /// Resale floor implied by what the stock actually cost. Kept apart from
+    /// <see cref="MinimumPrice"/> so recomputing it from a changed basis never
+    /// overwrites a floor the user set by hand.
+    /// </summary>
+    public uint AcquisitionFloor { get; set; }
     public decimal MinimumMarginPercent { get; set; }
     public uint AbsoluteTolerance { get; set; }
     public decimal PercentageTolerance { get; set; }

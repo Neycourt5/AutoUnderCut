@@ -273,9 +273,9 @@ public sealed class ProcurementControllerTests
         Assert.Contains("Siren", run.Controller.Status.Detail);
     }
     [Theory]
-    [InlineData(false, 1)]
+    [InlineData(false, 0)]
     [InlineData(true, 0)]
-    public void LiveAllWorldTourBuildsPlanAndCompletes(bool cheapOversizedHomeStack, int expectedPurchases)
+    public void LiveAllWorldTourWithoutDemandDoesNotBuy(bool cheapOversizedHomeStack, int expectedPurchases)
     {
         using var run = new Route();
         run.Game.AutomaticWorldArrival = true;
@@ -888,7 +888,7 @@ public sealed class ProcurementControllerTests
     }
 
     [Fact]
-    public void ExceptionalHomeBargainCanBeBoughtBeforeAnyWorldTransfer()
+    public void ExceptionalHomeBargainDoesNotPreemptScouting()
     {
         using var run = new Route(priority: true);
         run.Game.AutomaticPurchaseConfirmation = true;
@@ -896,8 +896,8 @@ public sealed class ProcurementControllerTests
             [new(0, item, 10, 20, 100, 99, true, 495), new(1, item, 11, 21, 2000, 99, true, 0)];
         run.Controller.RunNow();
         for (var i = 0; i < 100 && run.Game.Purchases == 0; i++) run.Tick(2);
-        Assert.Equal(("Siren", 1u, 99u), Assert.Single(run.Game.Bought));
-        Assert.Empty(run.Game.Commands);
+        Assert.Empty(run.Game.Bought);
+        Assert.Contains(run.Game.Commands, c => c.StartsWith("/li "));
     }
 
     [Fact]
@@ -970,12 +970,13 @@ public sealed class ProcurementControllerTests
     [Theory]
     [InlineData(5, true)]
     [InlineData(0, false)]
-    public void LowerFillMarginCanPurchaseOnlyForUncoveredRetainerSlots(int emptySlots, bool shouldBuy)
+    public void LiquidPreferredMarginCanPurchaseWithinAvailableCapacity(int emptySlots, bool shouldBuy)
     {
         using var run = new Route(priority: true);
         run.Repricing.LastKnownFreeSaleSlots = emptySlots;
         run.Config.Current.ProcurementMinimumRoiPercent = 20;
         run.Config.Current.ProcurementFillRoiPercent = 10;
+        run.Config.Current.ProcurementRules[0].PreferredStock = true;
         run.Game.AutomaticWorldArrival = run.Game.AutomaticPurchaseConfirmation = true;
         run.Game.LiveProvider = (world, item) => world switch
         {
@@ -1117,6 +1118,7 @@ public sealed class ProcurementControllerTests
         using var run = new Route(priority: true);
         run.Config.Current.ProcurementMinimumRoiPercent = 20;
         run.Config.Current.ProcurementFillRoiPercent = 10;
+        run.Config.Current.ProcurementRules[0].PreferredStock = true;
         run.Config.Current.OpportunisticPortfolioMaximumPercent = (decimal)opportunisticCapPercent;
         run.Config.Current.ProcurementRules.Add(new()
         {
@@ -1124,7 +1126,7 @@ public sealed class ProcurementControllerTests
         });
         run.Game.AutomaticWorldArrival = run.Game.AutomaticPurchaseConfirmation = true;
         run.Game.DemandMarkets = [
-            new(1, "Popcorn", [], [new(2_000, 99, true, DateTimeOffset.UtcNow)]),
+            new(1, "Popcorn", [], [new(2_000, 700, true, DateTimeOffset.UtcNow)]),
             new(2, "Yellow Dye", [], [new(1_500, 700, false, DateTimeOffset.UtcNow)]),
         ];
         // The curated flip is nowhere to be found away from home, so only the dye
@@ -1161,7 +1163,7 @@ public sealed class ProcurementControllerTests
         });
         run.Game.AutomaticWorldArrival = run.Game.AutomaticPurchaseConfirmation = true;
         run.Game.DemandMarkets = [
-            new(1, "Popcorn", [], [new(2_000, 99, true, DateTimeOffset.UtcNow)]),
+            new(1, "Popcorn", [], [new(2_000, 700, true, DateTimeOffset.UtcNow)]),
             new(2, "Yellow Dye", [], [new(1_500, 700, false, DateTimeOffset.UtcNow)]),
         ];
         run.Game.LiveProvider = (world, item) => world == "Siren"
@@ -1186,12 +1188,13 @@ public sealed class ProcurementControllerTests
     }
 
     [Fact]
-    public void FillPurchaseIsCancelledIfExistingBagsCoverTheEmptySlots()
+    public void PurchaseIsCancelledIfExistingBagsCoverTheEmptySlots()
     {
         using var run = new Route(priority: true);
         run.Repricing.LastKnownFreeSaleSlots = 1;
         run.Config.Current.ProcurementMinimumRoiPercent = 20;
         run.Config.Current.ProcurementFillRoiPercent = 10;
+        run.Config.Current.ProcurementRules[0].PreferredStock = true;
         run.Game.AutomaticWorldArrival = run.Game.AutomaticPurchaseConfirmation = true;
         run.Game.LiveProvider = (world, item) => world switch
         {
@@ -1200,8 +1203,8 @@ public sealed class ProcurementControllerTests
             _ => [],
         };
         run.Controller.RunNow();
-        for (var i = 0; i < 600 && !run.Controller.Plan.Orders.Any(o => o.IsFillOrder); i++) run.Tick(2);
-        Assert.Contains(run.Controller.Plan.Orders, o => o.IsFillOrder);
+        for (var i = 0; i < 600 && !run.Controller.Plan.Orders.Any(); i++) run.Tick(2);
+        Assert.NotEmpty(run.Controller.Plan.Orders);
         run.Game.Inventory = 99;
         for (var i = 0; i < 300 && run.Controller.IsActive; i++) run.Tick(2);
         Assert.Equal(ProcurementState.Completed, run.Controller.State);
@@ -1365,7 +1368,7 @@ public sealed class ProcurementControllerTests
     }
 
     [Fact]
-    public void ExceptionalAwayDealBuysImmediatelyWithoutWaitingForTheCircuit()
+    public void ExceptionalAwayDealWaitsForCircuitComparison()
     {
         using var run = new Route(priority: true);
         run.Game.AutomaticWorldArrival = run.Game.AutomaticPurchaseConfirmation = true;
@@ -1374,9 +1377,9 @@ public sealed class ProcurementControllerTests
             : [new(0, item, 10, 20, 100, 99, true, 495)];
         run.Controller.RunNow();
         for (var i = 0; i < 100 && run.Game.Purchases == 0; i++) run.Tick(2);
-        Assert.Equal(("Cactuar", 1u, 99u), Assert.Single(run.Game.Bought));
-        Assert.Single(run.Game.Commands);
-        Assert.Contains(run.Controller.RecentPrices, p => p.Decision.Contains("Buy exceptional"));
+        Assert.Empty(run.Game.Bought);
+        Assert.True(run.Game.Commands.Count > 1);
+        Assert.DoesNotContain(run.Controller.RecentPrices, p => p.Decision.Contains("Buy exceptional"));
     }
 
     [Fact]
@@ -1633,7 +1636,7 @@ public sealed class ProcurementControllerTests
         public bool CheapOversizedHomeStack { get; set; }
         public bool MissingHomeListings { get; set; }
         public string BuyingWorld { get; set; } = "Cactuar";
-        public uint WeeklySalesQuantity { get; set; } = 99;
+        public uint WeeklySalesQuantity { get; set; } = 700;
         public int ExtraBuyListings { get; set; }
         public List<BagListingCandidate> OtherBagItems { get; } = [];
         public override bool IsRetainerListOpen => BellOpen;
@@ -1713,7 +1716,7 @@ public sealed class ProcurementControllerTests
                         ? [new(1, 11, 21, "Siren", 2, 2_000, 99, true)]
                         : Enumerable.Range(0, 1 + ExtraBuyListings)
                             .Select(i => new ProcurementMarketListing(1, (ulong)(10 + i), (ulong)(20 + i), BuyingWorld, 1, 1_000, 99, true)).ToArray(),
-                    [new(2_000, WeeklySalesQuantity, true, DateTimeOffset.UtcNow)])]);
+                    Enumerable.Range(1, 3).Select(i => new ProcurementSale(2_000, WeeklySalesQuantity / 3, true, DateTimeOffset.UtcNow.AddDays(-i))).ToArray())]);
         }
         public int GetInventoryCount(uint itemId, bool highQuality) => itemId == 1 && highQuality ? Inventory : 0;
         public override IReadOnlyList<BagListingCandidate> ReadBagListingCandidates() => Inventory <= 0 ? OtherBagItems :

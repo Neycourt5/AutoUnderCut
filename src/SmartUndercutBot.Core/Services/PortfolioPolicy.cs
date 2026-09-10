@@ -29,19 +29,43 @@ public static class PortfolioPolicy
     public const uint SecondaryMinimumValuePerSlot = 150_000;
 
     /// <summary>
-    /// The margin a purchase has to clear. Stock that turns over daily earns its
-    /// return from velocity rather than from the size of each flip: a stack of
-    /// something selling ten-plus units a day is gone in hours and the gil is back
-    /// out working, so demanding a fat margin on it mostly leaves the gil idle.
-    /// Slower stock keeps the full bar, because there the margin is the whole
-    /// return. A negative fast-mover value means the caller did not set one.
+    /// Days used to normalise profit into a rate. A stack that would clear in two
+    /// hours does not thereby produce twelve times the gil: the bot would have to
+    /// travel, find another underpriced listing and buy it again, and none of that
+    /// is free or guaranteed. Normalising to a full day stops tiny stacks from
+    /// manufacturing a spectacular profit rate out of replenishment that will not
+    /// actually happen.
     /// </summary>
-    public static decimal RequiredRoiPercent(decimal minimumRoi, decimal fastMoverRoi, decimal salesPerDay) =>
-        fastMoverRoi >= 0 && salesPerDay >= SecondaryMinimumSalesPerDay
-            ? Math.Min(minimumRoi, fastMoverRoi)
-            : minimumRoi;
+    public const decimal ProfitNormalizationDays = 1m;
+
+    /// <summary>
+    /// The margin a purchase has to clear, by what kind of market it is.
+    ///
+    /// Velocity alone does not earn the thin bar. A market qualifies as high volume
+    /// only if it both moves quickly and carries real value per sale slot, because
+    /// the point of accepting a thinner margin is that the gil comes back fast and
+    /// in quantity - which a cheap fast item does not do. Low-value stock is held to
+    /// a deliberately stricter bar; it is welcome as a side profit, not as a
+    /// destination for capital. Nothing ever goes below the absolute floor.
+    /// </summary>
+    public static decimal RequiredRoiPercent(
+        ProcurementEconomicPolicy policy, bool preferred, decimal salesPerDay, ulong resaleValuePerSlot)
+    {
+        ArgumentNullException.ThrowIfNull(policy);
+        var liquid = salesPerDay >= policy.HighVolumeMinimumSalesPerDay;
+        var valuable = resaleValuePerSlot >= policy.HighVolumeMinimumValuePerSlot;
+        var required = (liquid, valuable) switch
+        {
+            (true, true) => preferred ? policy.CoreHighVolumeRoiPercent : policy.HighVolumeRoiPercent,
+            (_, false) => policy.LowValueRoiPercent,
+            _ => policy.StandardRoiPercent,
+        };
+        return Math.Max(required, policy.AbsoluteMinimumRoiPercent);
+    }
 
     /// <summary>Ranking order. Core stock is considered before anything else.</summary>
+    public static decimal ProfitVelocity(uint profit, decimal days) => ExpectedGilPerDay(profit, days);
+
     public static int Rank(PortfolioTier tier) => tier switch
     {
         PortfolioTier.Core => 0,
@@ -59,9 +83,13 @@ public static class PortfolioPolicy
             ? MaximumDaysToSell
             : Math.Clamp(quantity / salesPerDay, MinimumDaysToSell, MaximumDaysToSell);
 
-    /// <summary>Expected profit per day of sale-slot occupancy.</summary>
-    public static decimal ProfitVelocity(uint expectedProfit, decimal daysToSell) =>
-        expectedProfit / Math.Max(MinimumDaysToSell, daysToSell);
+    /// <summary>
+    /// Expected gil generated per day of sale-slot occupancy - the primary measure of
+    /// how productive a purchase is. Normalised to at least a full day so a small
+    /// stack cannot out-score a large one purely by being small.
+    /// </summary>
+    public static decimal ExpectedGilPerDay(uint expectedProfit, decimal daysToSell) =>
+        expectedProfit / Math.Max(ProfitNormalizationDays, daysToSell);
 
     /// <summary>
     /// Tier for something we are considering buying. Pinned stock is always core.
@@ -71,13 +99,16 @@ public static class PortfolioPolicy
     /// worthless item is exactly what this tiering exists to demote.
     /// </summary>
     public static PortfolioTier ClassifyCandidate(
-        bool preferred, decimal salesPerDay, ulong valuePerSlot, ulong profitPerSlot, PortfolioGates gates)
+        bool preferred, decimal salesPerDay, ulong valuePerSlot, ulong profitPerSlot, PortfolioGates gates,
+        ProcurementEconomicPolicy? policy = null)
     {
         ArgumentNullException.ThrowIfNull(gates);
         if (preferred)
             return PortfolioTier.Core;
-        return salesPerDay >= SecondaryMinimumSalesPerDay &&
-               valuePerSlot >= SecondaryMinimumValuePerSlot &&
+        var liquidityFloor = policy?.HighVolumeMinimumSalesPerDay ?? SecondaryMinimumSalesPerDay;
+        var valueFloor = policy?.HighVolumeMinimumValuePerSlot ?? SecondaryMinimumValuePerSlot;
+        return salesPerDay >= liquidityFloor &&
+               valuePerSlot >= valueFloor &&
                profitPerSlot >= gates.MinimumProfitPerSaleSlot
             ? PortfolioTier.Secondary
             : PortfolioTier.Opportunistic;

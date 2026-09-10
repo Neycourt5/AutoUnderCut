@@ -1,3 +1,14 @@
+# Active: v1.0.0.66 economic allocation update
+
+- [x] Read the requested implementation and existing audit; reviewed unfinished changes.
+- [ ] Finish planner/controller/configuration integration, fee and inventory safeguards.
+- [ ] Add economic regression tests and implementation documentation.
+- [ ] Pass complete Release build and tests; review diff.
+- [ ] Commit and push main and unused annotated v1.0.0.66 tag.
+- [ ] Verify successful release workflow, public repo.json and ZIP.
+
+Native game actions have not been exercised. Earlier entries below are historical.
+
 # Current: v1.0.0.65 skip congested worlds, and tour one data center at a time
 
 User report against v1.0.0.64: the circuit still seemed to reach only a couple of

@@ -44,7 +44,11 @@ public sealed class PricingStrategyService : IPricingStrategyService
             return Decision(PriceDecisionKind.NoMarketData, listing, null, floor,
                 $"No competitor listings matched {QualityDescription(rule.QualityFilter, listing.IsHighQuality)}.");
 
-        var lowest = competitors.Min(x => x.PricePerUnit);
+        // Depth-aware: a one-unit undercut in a market that turns over hundreds of
+        // units a day is gone long before our stack is reached, and chasing it just
+        // walks the whole position down for nothing. Real competing volume still
+        // sets the price. With no absorption figure this is the cheapest listing.
+        var lowest = DepthAdjustedLowest(competitors, market.AbsorbableUnits);
         if (IsPriceWar(lowest, market.HistoricalMedianPrice, rule.PriceWarDropPercent))
         {
             if (rule.PriceWarAction == PriceWarAction.LeaveUnchanged)
@@ -89,12 +93,38 @@ public sealed class PricingStrategyService : IPricingStrategyService
 
     private static uint CalculateFloor(RetainerListing listing, PricingRule rule)
     {
+        // The user's own minimum and the floor implied by what the stock cost are
+        // separate promises; honour whichever binds harder.
+        var configured = Math.Max(rule.MinimumPrice, rule.AcquisitionFloor);
         var costBasis = listing.AcquisitionCost == 0 ? rule.CostBasis : listing.AcquisitionCost;
         if (costBasis == 0)
-            return Math.Max(1, rule.MinimumPrice);
+            return Math.Max(1, configured);
 
         var marginFloor = decimal.Ceiling(costBasis * (1m + (rule.MinimumMarginPercent / 100m)));
-        return Math.Max(rule.MinimumPrice, (uint)Math.Min(marginFloor, MaximumListingPrice));
+        return Math.Max(configured, (uint)Math.Min(marginFloor, MaximumListingPrice));
+    }
+
+    /// <summary>
+    /// The cheapest price with more competing inventory in front of it than the
+    /// market absorbs in the sampling window. Degrades to the cheapest listing when
+    /// no absorption allowance is supplied.
+    /// </summary>
+    private static uint DepthAdjustedLowest(IReadOnlyList<MarketListing> competitors, decimal absorbableUnits)
+    {
+        var ordered = competitors.OrderBy(x => x.PricePerUnit).ToArray();
+        if (ordered.Length == 0)
+            return 0;
+        var absorbable = absorbableUnits <= 0 ? 0m : decimal.Floor(absorbableUnits);
+        if (absorbable <= 0)
+            return ordered[0].PricePerUnit;
+        decimal cumulative = 0;
+        foreach (var listing in ordered)
+        {
+            cumulative += listing.Quantity;
+            if (cumulative > absorbable)
+                return listing.PricePerUnit;
+        }
+        return ordered[^1].PricePerUnit;
     }
 
     private static bool IsPriceWar(uint lowest, uint? historicalMedian, decimal dropPercent)

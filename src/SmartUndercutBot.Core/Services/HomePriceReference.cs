@@ -44,6 +44,50 @@ public static class HomePriceReference
         return kept.Length == 0 ? priced : kept;
     }
 
+    /// <summary>
+    /// The price our stack will realistically meet, given how much cheaper stock is
+    /// actually in front of it.
+    ///
+    /// The cheapest listing is not automatically the market. If popcorn sells 150
+    /// units a day and someone has three units up cheap, those three are gone within
+    /// minutes and never touch a 99-stack's economics. So walk the board upwards,
+    /// accumulating competing units, and take the first price at which the cheap
+    /// inventory ahead of us exceeds what the market absorbs in
+    /// <paramref name="absorptionDays"/>. Real depth still moves the anchor: a
+    /// hundred cheap units in a market selling fifty a day is a genuine problem.
+    ///
+    /// With no velocity, or no absorption allowance, this degrades exactly to the
+    /// cheapest listing - the old, conservative behaviour.
+    /// </summary>
+    public static uint DepthAdjustedLowest(
+        IReadOnlyList<ProcurementMarketListing> listings, decimal salesPerDay, decimal absorptionDays)
+    {
+        ArgumentNullException.ThrowIfNull(listings);
+        // Never discard substantial cheap inventory merely because it is a price outlier.
+        var priced = (absorptionDays > 0 ? listings.Where(x => x.PricePerUnit > 0 && x.Quantity > 0)
+            : WithoutOutliers(listings)).OrderBy(x => x.PricePerUnit).ToArray();
+        if (priced.Length == 0)
+            return 0;
+        var absorbable = salesPerDay <= 0 || absorptionDays <= 0
+            ? 0m
+            : decimal.Floor(salesPerDay * absorptionDays);
+        if (absorbable <= 0)
+            return priced[0].PricePerUnit;
+
+        decimal cumulative = 0;
+        foreach (var listing in priced)
+        {
+            cumulative += listing.Quantity;
+            // The first price with more cheap inventory ahead of it than the market
+            // eats in the absorption window is the price we must actually beat.
+            if (cumulative > absorbable)
+                return listing.PricePerUnit;
+        }
+        // Everything on the board is absorbable. The dearest listing is the best
+        // available evidence of where the market sits once the cheap stock clears.
+        return priced[^1].PricePerUnit;
+    }
+
     public static HomePriceSummary Summarize(
         uint itemId, string itemName, bool highQuality, IReadOnlyList<ProcurementMarketListing> listings)
     {

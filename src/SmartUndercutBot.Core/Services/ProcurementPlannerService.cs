@@ -8,25 +8,30 @@ public interface IProcurementPlannerService
     ProcurementPlan BuildLiveMarketPlan(LiveMarketPlanRequest request);
 }
 
+/// <summary>
+/// Turns market observations into a shopping list.
+///
+/// The objective is long-run realised gil, not percentage return. ROI is a safety
+/// floor that answers "is this deal worth doing"; it never answers "which deal is
+/// best". Once a listing clears its margin bar, candidates compete on how much gil
+/// they generate per day of sale-slot occupancy, how much absolute profit they
+/// carry, and whether the position is one the market's own demand can support.
+/// </summary>
 public sealed class ProcurementPlannerService : IProcurementPlannerService
 {
     public ProcurementPlan BuildPlan(ProcurementPlanRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
+        var fees = new FeeModel(request.MarketTaxPercent, request.BuyerFeePercent);
         if (request.GilBudget == 0 || request.FreeSaleSlots <= 0 || request.FreeInventorySlots <= 0 ||
-            request.MarketTaxPercent is < 0 or > 100 || request.BuyerFeePercent is < 0 or > 100 ||
-            request.MinimumRoiPercent is < 0 or > 1_000 || request.FastMoverRoiPercent > 1_000 ||
+            !fees.IsValid || request.MinimumRoiPercent is < 0 or > 1_000 ||
             request.MaximumWeeklySalesSharePercent is <= 0 or > 100)
             return ProcurementPlan.Empty;
 
         var gates = request.Portfolio ?? PortfolioGates.Unrestricted;
-        var rules = request.Rules
-            .Where(x => x.Enabled && x.ItemId != 0 && !x.LiquidateOnly)
-            .GroupBy(x => x.ItemId)
-            .ToDictionary(x => x.Key, x => x.First());
-        var candidates = new List<ProcurementOrder>();
-        var rejected = new List<PortfolioDecision>();
-        var remainingUnits = new Dictionary<(uint, bool), ulong>();
+        var policy = request.Economics ?? ProcurementEconomicPolicy.Flat(request.MinimumRoiPercent);
+        var rules = EnabledRules(request.Rules);
+        var context = new PlanningContext(fees, policy, gates, rules);
 
         foreach (var market in request.Markets)
         {
@@ -42,112 +47,64 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
                     .ToArray();
                 if (sales.Sum(x => (long)x.Quantity) < rule.MinimumWeeklyUnitsSold)
                     continue;
-                // Cap how much of an item may be held at once, measured against what
-                // the market actually absorbs in a week. One target stack is always
-                // permitted: the stack size is the declared trade unit, and without
-                // this floor a 20-units-per-week minimum and a 25% share can never
-                // admit a single 99-stack, so nothing would ever be bought.
+
+                var salesPerDay = SalesVelocityPolicy.DailyUnits(market, quality);
+                var ownedUnits = (ulong)(request.OwnedStock ?? []).Where(x =>
+                    x.ItemId == market.ItemId && x.IsHighQuality == quality).Sum(x => (long)x.Quantity);
+
+                // The weekly-share cap remains as a backstop for markets with no
+                // usable velocity, where demand coverage cannot size a position.
                 var observedLimit = Math.Max(
                     (ulong)Math.Max(1, rule.TargetStackSize),
                     (ulong)decimal.Floor(sales.Sum(x => (decimal)x.Quantity) *
                         request.MaximumWeeklySalesSharePercent / 100m));
-                var ownedUnits = (ulong)(request.OwnedStock ?? []).Where(x =>
-                    x.ItemId == market.ItemId && x.IsHighQuality == quality).Sum(x => (long)x.Quantity);
-                remainingUnits[(market.ItemId, quality)] = observedLimit > ownedUnits ? observedLimit - ownedUnits : 0;
+                context.WeeklyShareLimits[(market.ItemId, quality)] =
+                    observedLimit > ownedUnits ? observedLimit - ownedUnits : 0;
+                context.OwnedUnits[(market.ItemId, quality)] = ownedUnits;
 
                 var targetSalePrice = Median(sales.Select(x => x.PricePerUnit));
                 if (!string.IsNullOrWhiteSpace(request.HomeWorld))
                 {
-                    // One badly underpriced listing must not become the resale anchor,
-                    // or every away-world deal is judged against a mistake.
                     var homeListings = (request.ResaleListings ?? market.Listings)
                         .Where(x => x.ItemId == market.ItemId && x.IsHighQuality == quality &&
                                     x.Quantity > 0 && x.PricePerUnit > 0 &&
                                     string.Equals(x.WorldName, request.HomeWorld, StringComparison.OrdinalIgnoreCase) &&
                                     request.OwnedRetainerIds?.Contains(x.RetainerId) != true)
                         .ToArray();
-                    var homeLowest = HomePriceReference.WithoutOutliers(homeListings)
-                        .Select(x => x.PricePerUnit).DefaultIfEmpty().Min();
-                    // Home-world sales supply the median. Do not buy using a regional
-                    // resale estimate or a higher price than local competition supports.
+                    // Depth-aware: a handful of cheap units in a market that sells
+                    // hundreds a day is absorbed long before our stack is reached,
+                    // and must not redefine what the stack is worth. Real volume of
+                    // cheap stock still moves the anchor.
+                    var homeLowest = HomePriceReference.DepthAdjustedLowest(
+                        homeListings, salesPerDay, policy.AnchorAbsorptionDays);
                     targetSalePrice = Math.Min(targetSalePrice, homeLowest > 1 ? homeLowest - 1 : 0);
                 }
                 if (targetSalePrice == 0)
                     continue;
 
-                var netUnitProceeds = decimal.Floor(targetSalePrice * (1m - request.MarketTaxPercent / 100m));
-                var buyerFeeMultiplier = 1m + request.BuyerFeePercent / 100m;
-                var salesPerDay = SalesVelocityPolicy.DailyUnits(market, quality);
-                var roiDivisor = 1m + PortfolioPolicy.RequiredRoiPercent(
-                    request.MinimumRoiPercent, request.FastMoverRoiPercent, salesPerDay) / 100m;
-                var roiCeiling = roiDivisor <= 0 || buyerFeeMultiplier <= 0
-                    ? 0
-                    : decimal.Floor(netUnitProceeds / roiDivisor / buyerFeeMultiplier);
-                var profitCeiling = buyerFeeMultiplier <= 0
-                    ? 0
-                    : decimal.Floor(Math.Max(0, netUnitProceeds - request.MinimumProfitPerUnit) / buyerFeeMultiplier);
-                var ceiling = (uint)Math.Min(uint.MaxValue, Math.Min(roiCeiling, profitCeiling));
-                if (rule.MaximumUnitPrice > 0)
-                    ceiling = Math.Min(ceiling, rule.MaximumUnitPrice);
-                if (ceiling == 0)
-                    continue;
-
-                foreach (var listing in market.Listings)
-                {
-                    if (listing.ItemId != market.ItemId || listing.PricePerUnit == 0 || listing.PricePerUnit > ceiling ||
-                        request.OwnedRetainerIds?.Contains(listing.RetainerId) == true ||
-                        string.IsNullOrWhiteSpace(listing.WorldName) ||
-                        listing.Quantity == 0 || listing.IsHighQuality != quality ||
-                        listing.Quantity > Math.Max(1, rule.TargetStackSize))
-                        continue;
-
-                    var totalCost = PurchaseCost(listing.PricePerUnit, listing.Quantity, request.BuyerFeePercent);
-                    var totalNet = (ulong)(uint)netUnitProceeds * listing.Quantity;
-                    if (totalCost > uint.MaxValue || totalNet <= totalCost)
-                        continue;
-                    var expectedProfit = totalNet - totalCost;
-                    if (expectedProfit > uint.MaxValue)
-                        expectedProfit = uint.MaxValue;
-
-                    AddCandidate(candidates, rejected, gates, rule, new(
-                        market.ItemId,
-                        string.IsNullOrWhiteSpace(rule.ItemName) ? market.ItemName : rule.ItemName,
-                        listing.ListingId,
-                        listing.RetainerId,
-                        listing.WorldName,
-                        listing.WorldId,
-                        listing.PricePerUnit,
-                        listing.Quantity,
-                        listing.IsHighQuality,
-                        targetSalePrice,
-                        ceiling,
-                        (uint)expectedProfit,
-                        1, SalesPerDay: salesPerDay));
-                }
+                CollectCandidates(context, market, rule, quality, targetSalePrice, salesPerDay, ownedUnits,
+                    request.MinimumProfitPerUnit, request.OwnedRetainerIds, requireWorldName: true);
             }
         }
 
-        return Allocate(candidates, rejected, rules, request.GilBudget,
-            Math.Min(request.FreeSaleSlots, request.FreeInventorySlots), request.BuyerFeePercent,
-            request.OwnedStock ?? [], remainingUnits, gates, request.PortfolioCapacitySlots);
+        return Allocate(context, request.GilBudget,
+            Math.Min(request.FreeSaleSlots, request.FreeInventorySlots),
+            request.OwnedStock ?? [], request.PortfolioCapacitySlots, useWeeklyShare: true);
     }
 
     public ProcurementPlan BuildLiveMarketPlan(LiveMarketPlanRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
+        var fees = new FeeModel(request.MarketTaxPercent, request.BuyerFeePercent);
         if (request.GilBudget == 0 || request.FreeSaleSlots <= 0 || request.FreeInventorySlots <= 0 ||
-            string.IsNullOrWhiteSpace(request.HomeWorld) || request.MarketTaxPercent is < 0 or > 100 ||
-            request.BuyerFeePercent is < 0 or > 100 || request.MinimumRoiPercent is < 0 or > 1_000 ||
-            request.FastMoverRoiPercent > 1_000)
+            string.IsNullOrWhiteSpace(request.HomeWorld) || !fees.IsValid ||
+            request.MinimumRoiPercent is < 0 or > 1_000)
             return ProcurementPlan.Empty;
 
         var gates = request.Portfolio ?? PortfolioGates.Unrestricted;
-        var rules = request.Rules
-            .Where(x => x.Enabled && x.ItemId != 0 && !x.LiquidateOnly)
-            .GroupBy(x => x.ItemId)
-            .ToDictionary(x => x.Key, x => x.First());
-        var candidates = new List<ProcurementOrder>();
-        var rejected = new List<PortfolioDecision>();
+        var policy = request.Economics ?? ProcurementEconomicPolicy.Flat(request.MinimumRoiPercent);
+        var rules = EnabledRules(request.Rules);
+        var context = new PlanningContext(fees, policy, gates, rules);
 
         foreach (var market in request.Markets)
         {
@@ -156,224 +113,295 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
 
             foreach (var quality in EligibleQualities(rule, request.HighQualityOnly))
             {
-                bool QualityMatches(ProcurementMarketListing listing) => listing.IsHighQuality == quality;
-
                 // The fallback tour deliberately ignores Universalis. Its resale anchor is
-                // the cheapest live, in-game listing on the home world, excluding the
-                // player's own retainers so a self-listing cannot manufacture a deal.
-                var targetSalePrice = market.Listings
-                    .Where(x => x.ItemId == market.ItemId && x.Quantity > 0)
+                // live in-game home-world stock, excluding the player's own retainers so a
+                // self-listing cannot manufacture a deal.
+                var homeListings = market.Listings
+                    .Where(x => x.ItemId == market.ItemId && x.Quantity > 0 && x.IsHighQuality == quality)
                     .Where(x => string.Equals(x.WorldName, request.HomeWorld, StringComparison.OrdinalIgnoreCase))
-                    .Where(QualityMatches)
                     .Where(x => x.PricePerUnit > 0 && !request.OwnedRetainerIds.Contains(x.RetainerId))
-                    .Select(x => x.PricePerUnit)
-                    .DefaultIfEmpty()
-                    .Min();
+                    .ToArray();
+                var salesPerDay = SalesVelocityPolicy.DailyUnits(market, quality);
+                var targetSalePrice = HomePriceReference.DepthAdjustedLowest(
+                    homeListings, salesPerDay, policy.AnchorAbsorptionDays);
                 if (targetSalePrice == 0)
                     continue;
 
-                var netUnitProceeds = decimal.Floor(targetSalePrice * (1m - request.MarketTaxPercent / 100m));
-                var buyerFeeMultiplier = 1m + request.BuyerFeePercent / 100m;
-                var salesPerDay = SalesVelocityPolicy.DailyUnits(market, quality);
-                var roiDivisor = 1m + PortfolioPolicy.RequiredRoiPercent(
-                    request.MinimumRoiPercent, request.FastMoverRoiPercent, salesPerDay) / 100m;
-                var roiCeiling = roiDivisor <= 0 || buyerFeeMultiplier <= 0
-                    ? 0
-                    : decimal.Floor(netUnitProceeds / roiDivisor / buyerFeeMultiplier);
-                var profitCeiling = buyerFeeMultiplier <= 0
-                    ? 0
-                    : decimal.Floor(Math.Max(0, netUnitProceeds - request.MinimumProfitPerUnit) / buyerFeeMultiplier);
-                var ceiling = (uint)Math.Min(uint.MaxValue, Math.Min(roiCeiling, profitCeiling));
-                if (rule.MaximumUnitPrice > 0)
-                    ceiling = Math.Min(ceiling, rule.MaximumUnitPrice);
-                if (ceiling == 0)
-                    continue;
+                var ownedUnits = (ulong)(request.OwnedStock ?? []).Where(x =>
+                    x.ItemId == market.ItemId && x.IsHighQuality == quality).Sum(x => (long)x.Quantity);
+                context.OwnedUnits[(market.ItemId, quality)] = ownedUnits;
 
-                foreach (var listing in market.Listings)
-                {
-                    if (listing.ItemId != market.ItemId || string.IsNullOrWhiteSpace(listing.WorldName) ||
-                        !QualityMatches(listing) || request.OwnedRetainerIds.Contains(listing.RetainerId) ||
-                        listing.PricePerUnit == 0 || listing.PricePerUnit > ceiling || listing.Quantity == 0 ||
-                        listing.Quantity > Math.Max(1, rule.TargetStackSize))
-                        continue;
-
-                    var totalCost = PurchaseCost(listing.PricePerUnit, listing.Quantity, request.BuyerFeePercent);
-                    var totalNet = (ulong)(uint)netUnitProceeds * listing.Quantity;
-                    if (totalCost > uint.MaxValue || totalNet <= totalCost)
-                        continue;
-                    var expectedProfit = Math.Min((ulong)uint.MaxValue, totalNet - totalCost);
-                    AddCandidate(candidates, rejected, gates, rule, new(
-                        market.ItemId,
-                        string.IsNullOrWhiteSpace(rule.ItemName) ? market.ItemName : rule.ItemName,
-                        listing.ListingId,
-                        listing.RetainerId,
-                        listing.WorldName,
-                        listing.WorldId,
-                        listing.PricePerUnit,
-                        listing.Quantity,
-                        listing.IsHighQuality,
-                        targetSalePrice,
-                        ceiling,
-                        (uint)expectedProfit,
-                        1, SalesPerDay: salesPerDay));
-                }
+                CollectCandidates(context, market, rule, quality, targetSalePrice, salesPerDay, ownedUnits,
+                    request.MinimumProfitPerUnit, request.OwnedRetainerIds, requireWorldName: true);
             }
         }
 
-        return Allocate(candidates, rejected, rules, request.GilBudget,
-            Math.Min(request.FreeSaleSlots, request.FreeInventorySlots), request.BuyerFeePercent,
-            request.OwnedStock ?? [], null, gates, request.PortfolioCapacitySlots);
+        return Allocate(context, request.GilBudget,
+            Math.Min(request.FreeSaleSlots, request.FreeInventorySlots),
+            request.OwnedStock ?? [], request.PortfolioCapacitySlots, useWeeklyShare: false);
     }
 
     /// <summary>
-    /// Tier the candidate and apply the value gate. ROI has already been enforced by
-    /// the price ceiling; this is the separate question of whether the deal is worth
-    /// a whole retainer slot, which is what stops a 300% margin on a worthless dye.
+    /// Price ceiling, then per-listing filtering, then costing. The margin bar is
+    /// derived from what kind of market this is, and is applied as a maximum price -
+    /// so ROI is enforced once, by the filter, and never re-derived downstream.
     /// </summary>
-    private static void AddCandidate(List<ProcurementOrder> candidates, List<PortfolioDecision> rejected,
-        PortfolioGates gates, ProcurementRule rule, ProcurementOrder candidate)
+    private static void CollectCandidates(
+        PlanningContext context, ProcurementMarketItem market, ProcurementRule rule, bool quality,
+        uint targetSalePrice, decimal salesPerDay, ulong ownedUnits, uint minimumProfitPerUnit,
+        IReadOnlySet<ulong>? ownedRetainerIds, bool requireWorldName)
+    {
+        var stackSize = (uint)Math.Max(1, rule.TargetStackSize);
+        // Value per slot is a property of the market, not of one listing, so a full
+        // target stack is what decides which margin bar applies. Otherwise a market
+        // would qualify for the thin bar or not depending on which listing was seen.
+        var referenceValuePerSlot = (ulong)targetSalePrice * stackSize;
+        var recent = market.RecentSales.Where(x => x.IsHighQuality == quality && x.PricePerUnit > 0 &&
+            x.Quantity > 0 && x.SoldAt >= DateTimeOffset.UtcNow.AddDays(-7) && x.SoldAt <= DateTimeOffset.UtcNow).ToArray();
+        var reliableHistory = recent.Length >= 3;
+
+        var requiredRoi = PortfolioPolicy.RequiredRoiPercent(
+            context.Policy, rule.PreferredStock, salesPerDay, referenceValuePerSlot);
+        if (!reliableHistory && context.Policy.AbsoluteMinimumRoiPercent > 0)
+            requiredRoi = Math.Max(requiredRoi, context.Policy.StandardRoiPercent);
+        var ceiling = context.Fees.MaximumUnitPrice(targetSalePrice, requiredRoi, minimumProfitPerUnit);
+        if (rule.MaximumUnitPrice > 0)
+            ceiling = Math.Min(ceiling, rule.MaximumUnitPrice);
+        if (ceiling == 0)
+            return;
+
+        foreach (var listing in market.Listings)
+        {
+            if (listing.ItemId != market.ItemId || listing.PricePerUnit == 0 || listing.PricePerUnit > ceiling ||
+                ownedRetainerIds?.Contains(listing.RetainerId) == true ||
+                (requireWorldName && string.IsNullOrWhiteSpace(listing.WorldName)) ||
+                listing.Quantity == 0 || listing.IsHighQuality != quality ||
+                listing.Quantity > stackSize)
+                continue;
+
+            var landedCost = context.Fees.LandedCost(listing.PricePerUnit, listing.Quantity);
+            var netProceeds = context.Fees.NetProceeds(targetSalePrice, listing.Quantity);
+            if (landedCost > uint.MaxValue || netProceeds <= landedCost)
+                continue;
+            if (FeeModel.NetRoiPercent(netProceeds, landedCost) < requiredRoi ||
+                netProceeds - landedCost < (ulong)minimumProfitPerUnit * listing.Quantity)
+                continue;
+            var expectedProfit = (uint)Math.Min(uint.MaxValue, netProceeds - landedCost);
+
+            AddCandidate(context, rule, new(
+                market.ItemId,
+                string.IsNullOrWhiteSpace(rule.ItemName) ? market.ItemName : rule.ItemName,
+                listing.ListingId,
+                listing.RetainerId,
+                listing.WorldName,
+                listing.WorldId,
+                listing.PricePerUnit,
+                listing.Quantity,
+                listing.IsHighQuality,
+                targetSalePrice,
+                ceiling,
+                expectedProfit,
+                1,
+                SalesPerDay: salesPerDay,
+                LandedCost: landedCost,
+                RequiredRoiPercent: requiredRoi,
+                OwnedUnitsBefore: ownedUnits,
+                TargetUnits: InventoryCoveragePolicy.TargetUnits(
+                    salesPerDay, context.Policy.CoverageDaysFor(PortfolioTier.Core))));
+        }
+    }
+
+    /// <summary>
+    /// Tier the candidate, apply the per-slot value gate, and score it. ROI is already
+    /// enforced by the price ceiling; this is the separate question of whether the deal
+    /// deserves a whole retainer slot, which is what stops a 300% margin on a trinket.
+    /// </summary>
+    private static void AddCandidate(PlanningContext context, ProcurementRule rule, ProcurementOrder candidate)
     {
         var tier = PortfolioPolicy.ClassifyCandidate(rule.PreferredStock, candidate.SalesPerDay,
-            candidate.ResaleValuePerSaleSlot, candidate.ExpectedProfitPerSaleSlot, gates);
-        var tiered = candidate with { Tier = tier };
-        if (tier != PortfolioTier.Core && tiered.ExpectedProfitPerSaleSlot < gates.MinimumProfitPerSaleSlot)
+            candidate.ResaleValuePerSaleSlot, candidate.ExpectedProfitPerSaleSlot, context.Gates, context.Policy);
+        var tiered = candidate with
         {
-            rejected.Add(Describe(tiered, false,
-                $"insufficient slot value ({tiered.ExpectedProfitPerSaleSlot:N0} gil per sale slot, " +
-                $"{gates.MinimumProfitPerSaleSlot:N0} required)"));
+            Tier = tier,
+            TargetUnits = InventoryCoveragePolicy.TargetUnits(
+                candidate.SalesPerDay, context.Policy.CoverageDaysFor(tier)),
+        };
+        if (tier != PortfolioTier.Core && tiered.ExpectedProfitPerSaleSlot < context.Gates.MinimumProfitPerSaleSlot)
+        {
+            context.Rejected.Add(Describe(tiered, false,
+                $"insufficient slot value ({tiered.ExpectedProfitPerSaleSlot:N0} gil, " +
+                $"{context.Gates.MinimumProfitPerSaleSlot:N0} required)"));
             return;
         }
-        candidates.Add(tiered);
+        // Preference is a weight on the economics, never a bypass of them: an
+        // outstanding non-core opportunity can still beat a poor core one.
+        context.Candidates.Add(tiered with
+        {
+            AllocationScore = tiered.ExpectedGilPerDay * context.Policy.ScoreWeightFor(tier),
+        });
     }
 
     private static PortfolioDecision Describe(ProcurementOrder order, bool selected, string reason) => new(
         order.ItemId, order.ItemName, order.IsHighQuality, order.Tier, selected, reason,
-        order.SalesPerDay, order.ExpectedProfit, order.RoiPercent, order.EstimatedDaysToSell,
-        order.ExpectedResaleValue);
+        order.SalesPerDay, order.ExpectedProfit, order.NetRoiPercent, order.EstimatedDaysToSell,
+        order.ExpectedResaleValue, order.CapitalAtRisk, order.ExpectedNetProceeds,
+        order.ExpectedGilPerDay, order.InventoryCoverageDays, order.CoverageDaysAfterPurchase, order.Quantity);
 
-    private static ProcurementPlan Allocate(List<ProcurementOrder> candidates, List<PortfolioDecision> rejected,
-        IReadOnlyDictionary<uint, ProcurementRule> rules, uint budget, int slotLimit, decimal buyerFee,
-        IReadOnlyList<StockExposure> owned, IReadOnlyDictionary<(uint, bool), ulong>? quantityLimits,
-        PortfolioGates gates, int capacitySlots)
+    /// <summary>
+    /// One greedy pass over the candidates in economic order.
+    ///
+    /// The ordering is the objective: expected gil per day first (weighted by how much
+    /// confidence the market's class earns), then absolute profit, then liquidity, then
+    /// cost. Every rejection below is a capacity or concentration limit, not a
+    /// preference - preference has already been expressed in the score.
+    /// </summary>
+    private static ProcurementPlan Allocate(
+        PlanningContext context, uint budget, int slotLimit,
+        IReadOnlyList<StockExposure> owned, int capacitySlots, bool useWeeklyShare)
     {
-        ulong Cost(ProcurementOrder x) => PurchaseCost(x.PricePerUnit, x.Quantity, buyerFee);
-        // Category preferences only ever break ties; actual value and demand decide.
-        int Priority(ProcurementOrder x) => rules.TryGetValue(x.ItemId, out var rule) ? rule.TourPriority : int.MaxValue;
-
+        var policy = context.Policy;
         var ownedSlots = owned.GroupBy(x => x.Tier).ToDictionary(x => x.Key, x => x.Sum(y => y.SaleSlots));
-        var opening = PortfolioPolicy.Summarize(ownedSlots, slotLimit, capacitySlots, gates);
-        if (candidates.Count == 0)
-            return new(DateTimeOffset.UtcNow, [], 0, 0, 0, opening, rejected);
+        var opening = PortfolioPolicy.Summarize(ownedSlots, slotLimit, capacitySlots, context.Gates);
+        if (context.Candidates.Count == 0)
+            return new(DateTimeOffset.UtcNow, [], 0, 0, 0, opening, context.Rejected);
 
-        // Absolute profit works well when slots are scarce; profit per gil can buy
-        // more combinations with a small wallet. Every ordering is tier-major, so a
-        // cheap opportunistic listing never displaces core stock in any of them.
-        var strategies = new[]
-        {
-            Tiered(candidates).ThenByDescending(x => x.ProfitVelocity).ThenBy(Cost),
-            Tiered(candidates).ThenByDescending(x => (double)x.ExpectedProfit).ThenBy(Cost),
-            Tiered(candidates).ThenByDescending(x => (double)x.ExpectedProfit / Math.Max(1UL, Cost(x))).ThenBy(Cost),
-            Tiered(candidates).ThenByDescending(x => x.SalesPerDay).ThenByDescending(x => x.ProfitVelocity).ThenBy(Cost),
-            Tiered(candidates).ThenByDescending(x => x.ResaleValuePerSaleSlot).ThenBy(Priority).ThenBy(Cost),
-        };
+        int Priority(ProcurementOrder x) =>
+            context.Rules.TryGetValue(x.ItemId, out var rule) ? rule.TourPriority : int.MaxValue;
 
-        var plans = new List<ProcurementPlan>();
-        foreach (var strategy in strategies)
+        var ordered = context.Candidates
+            .OrderByDescending(x => x.AllocationScore)
+            .ThenByDescending(x => x.ExpectedProfit)
+            .ThenBy(x => x.EstimatedDaysToSell)
+            .ThenByDescending(x => x.CapitalAtRisk)
+            .ThenBy(Priority)
+            .ThenBy(x => x.ItemId)
+            .ThenBy(x => x.ListingId)
+            .ToArray();
+
+        var itemSlots = owned.GroupBy(x => x.ItemId).ToDictionary(x => x.Key, x => x.Sum(y => y.SaleSlots));
+        var tierSlots = new Dictionary<PortfolioTier, int>(ownedSlots);
+        var heldUnits = new Dictionary<(uint, bool), ulong>(context.OwnedUnits);
+        var boughtUnits = new Dictionary<(uint, bool), ulong>();
+        var orders = new List<ProcurementOrder>();
+        var notes = new List<PortfolioDecision>();
+        ulong spent = 0, profit = 0, opportunisticSpent = 0;
+
+        foreach (var candidate in ordered)
         {
-            var itemSlots = owned.GroupBy(x => x.ItemId).ToDictionary(x => x.Key, x => x.Sum(y => y.SaleSlots));
-            var tierSlots = new Dictionary<PortfolioTier, int>(ownedSlots);
-            var boughtUnits = new Dictionary<(uint, bool), ulong>();
-            var orders = new List<ProcurementOrder>();
-            var notes = new List<PortfolioDecision>();
-            ulong spent = 0, profit = 0;
-            foreach (var candidate in strategy)
+            var key = (candidate.ItemId, candidate.IsHighQuality);
+            var cost = candidate.CapitalAtRisk;
+            var rule = context.Rules[candidate.ItemId];
+            var held = heldUnits.GetValueOrDefault(key);
+
+            if (orders.Count >= slotLimit)
             {
-                var key = (candidate.ItemId, candidate.IsHighQuality);
-                var cost = Cost(candidate);
-                var used = itemSlots.GetValueOrDefault(candidate.ItemId);
-                if (orders.Count >= slotLimit)
-                {
-                    notes.Add(Describe(candidate, false, "no free sale slot remains in this plan"));
-                    continue;
-                }
-                // The opportunistic cap counts stock already listed, so a retainer
-                // full of dye actively blocks buying more of it.
-                if (candidate.Tier == PortfolioTier.Opportunistic &&
-                    tierSlots.GetValueOrDefault(PortfolioTier.Opportunistic) + candidate.SaleSlots >
-                    opening.OpportunisticCap)
-                {
-                    notes.Add(Describe(candidate, false,
-                        $"opportunistic portfolio cap reached ({tierSlots.GetValueOrDefault(PortfolioTier.Opportunistic)}" +
-                        $"/{opening.OpportunisticCap} slots)"));
-                    continue;
-                }
-                if (used >= rules[candidate.ItemId].MaximumSaleSlots)
-                {
-                    notes.Add(Describe(candidate, false, $"already holding {used} sale slot(s) of this item"));
-                    continue;
-                }
-                if (spent + cost > budget)
-                {
-                    notes.Add(Describe(candidate, false, "the remaining budget does not cover this stack"));
-                    continue;
-                }
-                if (quantityLimits is not null &&
-                    boughtUnits.GetValueOrDefault(key) + candidate.Quantity > quantityLimits.GetValueOrDefault(key))
-                {
-                    notes.Add(Describe(candidate, false, "the weekly market-share limit for this item is reached"));
-                    continue;
-                }
-                orders.Add(candidate);
-                notes.Add(Describe(candidate, true, SelectionReason(candidate, tierSlots, opening)));
-                itemSlots[candidate.ItemId] = used + 1;
-                tierSlots[candidate.Tier] = tierSlots.GetValueOrDefault(candidate.Tier) + candidate.SaleSlots;
-                boughtUnits[key] = boughtUnits.GetValueOrDefault(key) + candidate.Quantity;
-                spent += cost;
-                profit += candidate.ExpectedProfit;
+                notes.Add(Describe(candidate, false, "no free sale slot remains"));
+                continue;
             }
-            plans.Add(new(DateTimeOffset.UtcNow, orders, (uint)spent,
-                (uint)Math.Min(profit, uint.MaxValue), orders.Count,
-                PortfolioPolicy.Summarize(tierSlots, 0, capacitySlots, gates),
-                notes));
+            // Counts stock already listed, so a retainer full of trinkets actively
+            // blocks buying more of them.
+            if (candidate.Tier == PortfolioTier.Opportunistic &&
+                tierSlots.GetValueOrDefault(PortfolioTier.Opportunistic) + candidate.SaleSlots >
+                opening.OpportunisticCap)
+            {
+                notes.Add(Describe(candidate, false,
+                    $"opportunistic portfolio cap reached ({tierSlots.GetValueOrDefault(PortfolioTier.Opportunistic)}" +
+                    $"/{opening.OpportunisticCap} slots)"));
+                continue;
+            }
+            if (candidate.Tier == PortfolioTier.Opportunistic &&
+                opportunisticSpent + cost > budget * context.Gates.OpportunisticMaximumPercent / 100m)
+            {
+                notes.Add(Describe(candidate, false, "opportunistic capital cap reached"));
+                continue;
+            }
+            var maximumSlots = EffectiveMaximumSlots(policy, rule, candidate);
+            if (itemSlots.GetValueOrDefault(candidate.ItemId) >= maximumSlots)
+            {
+                notes.Add(Describe(candidate, false,
+                    $"already holding {itemSlots.GetValueOrDefault(candidate.ItemId)} of {maximumSlots} sale slots for this item"));
+                continue;
+            }
+            if (spent + cost > budget)
+            {
+                notes.Add(Describe(candidate, false, "remaining budget does not cover this stack"));
+                continue;
+            }
+
+            var coverageDays = policy.CoverageDaysFor(candidate.Tier);
+            if (coverageDays > 0)
+            {
+                if (!InventoryCoveragePolicy.CanAdd(held, candidate.Quantity, candidate.SalesPerDay,
+                        coverageDays, policy.CoverageOvershootDays))
+                {
+                    var have = InventoryCoveragePolicy.CoverageDays(held, candidate.SalesPerDay);
+                    notes.Add(Describe(candidate with { OwnedUnitsBefore = held }, false,
+                        candidate.SalesPerDay <= 0
+                            ? "no reliable sales velocity to size a position against"
+                            : $"demand coverage reached ({have:N1}d held, {coverageDays:N1}d target)"));
+                    continue;
+                }
+            }
+            else if (useWeeklyShare &&
+                     boughtUnits.GetValueOrDefault(key) + candidate.Quantity >
+                     context.WeeklyShareLimits.GetValueOrDefault(key))
+            {
+                notes.Add(Describe(candidate, false, "weekly market-share limit reached for this item"));
+                continue;
+            }
+
+            var selected = candidate with { OwnedUnitsBefore = held };
+            orders.Add(selected);
+            notes.Add(Describe(selected, true, SelectionReason(selected, coverageDays)));
+            itemSlots[candidate.ItemId] = itemSlots.GetValueOrDefault(candidate.ItemId) + 1;
+            tierSlots[candidate.Tier] = tierSlots.GetValueOrDefault(candidate.Tier) + candidate.SaleSlots;
+            boughtUnits[key] = boughtUnits.GetValueOrDefault(key) + candidate.Quantity;
+            heldUnits[key] = held + candidate.Quantity;
+            spent += cost;
+            if (candidate.Tier == PortfolioTier.Opportunistic) opportunisticSpent += cost;
+            profit += candidate.ExpectedProfit;
         }
 
-        // The lexicographic objective. Slot occupancy is deliberately last: a cheap
-        // low-value item must never win merely by filling one more slot.
-        var best = plans
-            // 1. close the core/preferred deficit
-            .OrderByDescending(x => Math.Min(TierSlots(x, PortfolioTier.Core), opening.CoreDeficit))
-            // 2. never exceed the opportunistic cap
-            .ThenBy(x => Math.Max(0, x.Summary.OpportunisticSlots - opening.OpportunisticCap))
-            // 3. maximise high-quality, high-liquidity opportunity value
-            .ThenByDescending(x => x.Orders.Where(o => o.Tier != PortfolioTier.Opportunistic).Sum(o => o.ProfitVelocity))
-            // 4. maximise expected absolute profit
-            .ThenByDescending(x => x.Orders.Sum(o => (long)o.ExpectedProfit))
-            // 5. and only then use the remaining capacity
-            .ThenByDescending(x => x.Orders.Count)
-            .ThenByDescending(x => x.Orders.Select(o => o.ItemId).Distinct().Count())
-            .ThenBy(x => x.Orders.Select(o => o.WorldName).Distinct(StringComparer.OrdinalIgnoreCase).Count())
-            .ThenBy(x => x.TotalCost)
-            .First();
-        return best with { Decisions = rejected.Concat(best.DecisionLog).ToArray() };
+        return new(DateTimeOffset.UtcNow, orders, (uint)Math.Min(spent, uint.MaxValue),
+            (uint)Math.Min(profit, uint.MaxValue), orders.Count,
+            PortfolioPolicy.Summarize(tierSlots, 0, capacitySlots, context.Gates),
+            context.Rejected.Concat(notes).ToArray());
     }
 
-    private static int TierSlots(ProcurementPlan plan, PortfolioTier tier) =>
-        plan.Orders.Where(x => x.Tier == tier).Sum(x => x.SaleSlots);
-
-    private static string SelectionReason(ProcurementOrder order,
-        IReadOnlyDictionary<PortfolioTier, int> tierSlots, PortfolioAllocationSummary opening) => order.Tier switch
+    /// <summary>
+    /// How many sale slots one item may occupy. The fixed per-rule number is a floor,
+    /// not a ceiling: a market whose own demand supports more inventory is allowed
+    /// more, up to a hard emergency limit that no amount of demand can exceed.
+    /// </summary>
+    public static int EffectiveMaximumSlots(
+        ProcurementEconomicPolicy policy, ProcurementRule rule, ProcurementOrder candidate)
     {
-        PortfolioTier.Core => tierSlots.GetValueOrDefault(PortfolioTier.Core) < opening.CoreTarget
-            ? "core portfolio below target"
-            : "core portfolio stock",
-        PortfolioTier.Secondary => $"high-liquidity secondary stock ({order.SalesPerDay:N0} units/day, " +
-                                   $"{order.ResaleValuePerSaleSlot:N0} gil per sale slot)",
-        _ => $"opportunistic capacity available ({tierSlots.GetValueOrDefault(PortfolioTier.Opportunistic)}" +
-             $"/{opening.OpportunisticCap} slots)",
-    };
+        var days = policy.CoverageDaysFor(candidate.Tier);
+        if (days <= 0)
+            return rule.MaximumSaleSlots;
+        var demandSlots = InventoryCoveragePolicy.DemandJustifiedSlots(
+            candidate.SalesPerDay, days + policy.CoverageOvershootDays,
+            Math.Max(1, rule.TargetStackSize), policy.EmergencyMaximumSlotsPerItem);
+        return Math.Min(policy.EmergencyMaximumSlotsPerItem, Math.Max(rule.MaximumSaleSlots, demandSlots));
+    }
 
-    private static IOrderedEnumerable<ProcurementOrder> Tiered(IEnumerable<ProcurementOrder> candidates) =>
-        candidates.OrderBy(x => PortfolioPolicy.Rank(x.Tier));
+    private static string SelectionReason(ProcurementOrder order, decimal coverageDays)
+    {
+        var basis = order.Tier switch
+        {
+            PortfolioTier.Core => "preferred high-volume stock",
+            PortfolioTier.Secondary => "high-liquidity secondary stock",
+            _ => "opportunistic capacity available",
+        };
+        return coverageDays > 0
+            ? $"selected {basis}; restocking toward {coverageDays:N1}d coverage"
+            : basis;
+    }
+
+    private static Dictionary<uint, ProcurementRule> EnabledRules(IReadOnlyList<ProcurementRule> rules) =>
+        rules.Where(x => x.Enabled && x.ItemId != 0 && !x.LiquidateOnly)
+            .GroupBy(x => x.ItemId)
+            .ToDictionary(x => x.Key, x => x.First());
 
     private static IEnumerable<bool> EligibleQualities(ProcurementRule rule, bool highQualityOnly)
     {
@@ -393,9 +421,18 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
             : sorted[middle];
     }
 
-    private static ulong PurchaseCost(uint unitPrice, uint quantity, decimal buyerFeePercent)
+    /// <summary>Everything one planning run accumulates, so the two entry points share a shape.</summary>
+    private sealed class PlanningContext(
+        FeeModel fees, ProcurementEconomicPolicy policy, PortfolioGates gates,
+        IReadOnlyDictionary<uint, ProcurementRule> rules)
     {
-        var subtotal = (decimal)unitPrice * quantity;
-        return (ulong)Math.Min(ulong.MaxValue, decimal.Ceiling(subtotal * (1m + buyerFeePercent / 100m)));
+        public FeeModel Fees { get; } = fees;
+        public ProcurementEconomicPolicy Policy { get; } = policy;
+        public PortfolioGates Gates { get; } = gates;
+        public IReadOnlyDictionary<uint, ProcurementRule> Rules { get; } = rules;
+        public List<ProcurementOrder> Candidates { get; } = [];
+        public List<PortfolioDecision> Rejected { get; } = [];
+        public Dictionary<(uint, bool), ulong> WeeklyShareLimits { get; } = [];
+        public Dictionary<(uint, bool), ulong> OwnedUnits { get; } = [];
     }
 }

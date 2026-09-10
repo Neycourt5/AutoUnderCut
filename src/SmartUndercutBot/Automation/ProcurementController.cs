@@ -607,7 +607,7 @@ public sealed partial class ProcurementController : IDisposable
             HighQualityOnly: config.BuyHighQualityOnly,
             Portfolio: config.PortfolioGates,
             PortfolioCapacitySlots: PortfolioCapacitySlots(),
-            FastMoverRoiPercent: config.ProcurementFastMoverRoiPercent));
+            Economics: config.EconomicPolicy));
         LogPortfolioDecisions("DEAL SEARCH", Plan);
         lastScannedFreeSaleSlots = plannedSaleSlots;
         lastScannedBudget = ShoppingBudget;
@@ -1173,7 +1173,7 @@ public sealed partial class ProcurementController : IDisposable
             HighQualityOnly: config.BuyHighQualityOnly,
             Portfolio: config.PortfolioGates,
             PortfolioCapacitySlots: PortfolioCapacitySlots(),
-            FastMoverRoiPercent: config.ProcurementFastMoverRoiPercent));
+            Economics: config.EconomicPolicy));
         LogPortfolioDecisions("LIVE TOUR", Plan);
         detail = Plan.Orders.Count == 0
             ? $"Live tour checked {stockHuntWorlds.Count} worlds; no listing beat the live {homeWorld} resale floor and safety guards."
@@ -1284,7 +1284,8 @@ public sealed partial class ProcurementController : IDisposable
         var rule = ShoppingRules(configuration.Current.ProcurementRules).FirstOrDefault(x => x.ItemId == currentOrder.ItemId);
         if (rule is null || !rule.Enabled || rule.LiquidateOnly ||
             !ResaleStockPolicy.BuyableQuality(rule, currentOrder.IsHighQuality, configuration.Current.BuyHighQualityOnly) ||
-            CollectOwnedStock().Where(x => x.ItemId == currentOrder.ItemId).Sum(x => x.SaleSlots) >= rule.MaximumSaleSlots)
+            CollectOwnedStock().Where(x => x.ItemId == currentOrder.ItemId).Sum(x => x.SaleSlots) >=
+                ProcurementPlannerService.EffectiveMaximumSlots(configuration.Current.EconomicPolicy, rule, currentOrder))
         {
             SkipCurrentOrder($"SKIPPED BUY {currentOrder.ItemName}: its current rule no longer permits this order.");
             return;
@@ -1356,7 +1357,16 @@ public sealed partial class ProcurementController : IDisposable
             SkipCurrentOrder($"SKIPPED BUY {currentOrder.ItemName}: the selected live listing failed validation.");
             return;
         }
-        var expectedNetProceeds = decimal.Floor(currentOrder.TargetSalePrice * 0.95m) * live.Quantity;
+        var ownedUnits = (ulong)CollectOwnedStock().Where(x => x.ItemId == live.ItemId &&
+            x.IsHighQuality == live.IsHighQuality).Sum(x => (long)x.Quantity);
+        var economics = configuration.Current.EconomicPolicy;
+        if (!InventoryCoveragePolicy.CanAdd(ownedUnits, live.Quantity, currentOrder.SalesPerDay,
+                economics.CoverageDaysFor(currentOrder.Tier), economics.CoverageOvershootDays))
+        {
+            SkipCurrentOrder($"SKIPPED BUY {currentOrder.ItemName}: current demand coverage does not permit more stock.");
+            return;
+        }
+        var expectedNetProceeds = (decimal)FeeModel.Default.NetProceeds(currentOrder.TargetSalePrice, live.Quantity);
         if (expectedNetProceeds < totalCost * (1m + RequiredPurchaseRoi(currentOrder) / 100m) ||
             expectedNetProceeds - totalCost < (decimal)configuration.Current.ProcurementMinimumProfitPerUnit * live.Quantity)
         {
@@ -1382,6 +1392,8 @@ public sealed partial class ProcurementController : IDisposable
             SkipCurrentOrder($"SKIPPED BUY {currentOrder.ItemName}: budget or gil balance changed.");
             return;
         }
+        positionUnitsBeforePurchase = (ulong)CollectOwnedStock().Where(x => x.ItemId == live.ItemId)
+            .Sum(x => (long)x.Quantity);
         inventoryBefore = market.GetInventoryCount(live.ItemId, live.IsHighQuality);
         currentLiveListing = live;
         // Once submission begins, an exception cannot prove that the game did
@@ -1442,13 +1454,19 @@ public sealed partial class ProcurementController : IDisposable
         var landedCostPerUnit = (uint)Math.Min(
             PricingStrategyService.MaximumListingPrice,
             (purchaseCost + actual.Quantity - 1) / actual.Quantity);
-        pricingRule.CostBasis = Math.Max(pricingRule.CostBasis, landedCostPerUnit);
-        pricingRule.MinimumMarginPercent = Math.Max(
-            pricingRule.MinimumMarginPercent, RequiredPurchaseRoi(actual));
-        pricingRule.MinimumPrice = Math.Max(pricingRule.MinimumPrice,
-            ProcurementPriceSafety.MinimumResalePrice(pricingRule.CostBasis,
-                pricingRule.MinimumMarginPercent, configuration.Current.ProcurementMinimumProfitPerUnit));
-        actual = actual with { TargetSalePrice = Math.Max(actual.TargetSalePrice, pricingRule.MinimumPrice) };
+        // Preserve manual floors. The automatic floor is recomputed independently.
+        // Unknown old quantities cannot safely justify lowering a legacy basis.
+        PositionCostPolicy.RecordPurchase(pricingRule, positionUnitsBeforePurchase,
+            actual.Quantity, purchaseCost, RequiredPurchaseRoi(actual),
+            configuration.Current.ProcurementMinimumProfitPerUnit,
+            repricing.LastKnownFreeSaleSlots.HasValue);
+        actual = actual with
+        {
+            LandedCost = purchaseCost,
+            ExpectedProfit = (uint)Math.Clamp((decimal)FeeModel.Default.NetProceeds(actual.TargetSalePrice, actual.Quantity)
+                - purchaseCost, 0m, uint.MaxValue),
+            TargetSalePrice = Math.Max(actual.TargetSalePrice, Math.Max(pricingRule.MinimumPrice, pricingRule.AcquisitionFloor)),
+        };
         ledger.RecordPurchase(actual, stackSize);
         // Owned stock just changed, so the next cap check must not use the cache.
         portfolioSummary = null;
@@ -1478,10 +1496,16 @@ public sealed partial class ProcurementController : IDisposable
     /// be the same bar the deal was bought against - buying popcorn at a 10% margin
     /// and then refusing to list it under 20% over cost would just park the stack.
     /// </summary>
-    private decimal RequiredPurchaseRoi(ProcurementOrder order) => order.IsFillOrder
-        ? configuration.Current.ProcurementFillRoiPercent
-        : PortfolioPolicy.RequiredRoiPercent(configuration.Current.ProcurementMinimumRoiPercent,
-            configuration.Current.ProcurementFastMoverRoiPercent, order.SalesPerDay);
+    private decimal RequiredPurchaseRoi(ProcurementOrder order)
+    {
+        var config = configuration.Current;
+        var rule = config.ProcurementRules.FirstOrDefault(x => x.ItemId == order.ItemId);
+        return Math.Max(order.RequiredRoiPercent, PortfolioPolicy.RequiredRoiPercent(config.EconomicPolicy,
+            rule?.PreferredStock == true, order.SalesPerDay, order.ExpectedResaleValue));
+    }
+
+    private ulong positionUnitsBeforePurchase;
+
 
     private bool RetryListingRequest(string itemName)
     {
@@ -2000,7 +2024,10 @@ public sealed partial class ProcurementController : IDisposable
             // sale slot; counting the raw quantity made a full-looking buffer out of
             // a few deep stacks and stopped shopping entirely.
             if (rule is not null && rule.MaximumSaleSlots > 0)
-                slots = Math.Min(slots, rule.MaximumSaleSlots);
+                slots = Math.Min(slots, Math.Min(config.ProcurementEmergencyMaximumSlotsPerItem,
+                    Math.Max(rule.MaximumSaleSlots, InventoryCoveragePolicy.DemandJustifiedSlots(
+                        HomeSalesPerDay(key.ItemId, key.IsHighQuality), config.ProcurementPreferredCoverageDays,
+                        size, config.ProcurementEmergencyMaximumSlotsPerItem))));
             if (entry is not null)
                 slots = Math.Max(slots, (int)Math.Min(entry.PendingQuantity, (long)entry.MaximumListingSlots - entry.ListingsCreated));
             if (quantity > 0)
@@ -2030,22 +2057,7 @@ public sealed partial class ProcurementController : IDisposable
         return Math.Max(0, free + configuration.Current.ProcurementBagBufferStacks - held);
     }
 
-    private IReadOnlyList<ProcurementRule> ShoppingRules(IReadOnlyList<ProcurementRule> source)
-    {
-        if (!configuration.Current.ContinueShoppingWhenStocked ||
-            Math.Min(repricing.LastKnownFreeSaleSlots ?? 0, configuration.Current.ProcurementTargetSaleSlots) > ResaleBagSlots)
-            return source;
-        // A fully listed item still needs a few bag replacements. Limit spare
-        // stock to 1-3 sale stacks per item instead of letting one cheap item fill
-        // the entire buffer. Quantity/weekly-demand limits still count all stock.
-        return source.Select(rule =>
-        {
-            var listed = repricing.ListedStock.Where(x => x.ItemId == rule.ItemId).Sum(x => x.SaleSlots);
-            var copy = rule.Clone();
-            copy.MaximumSaleSlots = listed + Math.Min(rule.MaximumSaleSlots, ResaleStockPolicy.ComfortableItemTarget(listed));
-            return copy;
-        }).ToArray();
-    }
+    private IReadOnlyList<ProcurementRule> ShoppingRules(IReadOnlyList<ProcurementRule> source) => source;
 
     private static IReadOnlyList<ProcurementMarketItem> ShoppingMarkets(IReadOnlyList<ProcurementMarketItem> items) =>
         items.Select(x => x with { Listings = x.Listings.Where(y => ProcurementTravelPolicy.CanShopOnWorld(y.WorldName)).ToArray() }).ToArray();

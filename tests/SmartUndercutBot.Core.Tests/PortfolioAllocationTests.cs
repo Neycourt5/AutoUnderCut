@@ -264,6 +264,6 @@ public sealed class PortfolioAllocationTests
         Assert.Equal(PortfolioPolicy.MaximumDaysToSell, PortfolioPolicy.DaysToSell(0, 5m));
         Assert.Equal(5m, PortfolioPolicy.DaysToSell(100, 20m));
         // A one-unit listing cannot manufacture an unbounded score.
-        Assert.Equal(4_000m, PortfolioPolicy.ProfitVelocity(1_000, PortfolioPolicy.DaysToSell(1, 10_000m)));
+        Assert.Equal(1_000m, PortfolioPolicy.ProfitVelocity(1_000, PortfolioPolicy.DaysToSell(1, 10_000m)));
     }
 }

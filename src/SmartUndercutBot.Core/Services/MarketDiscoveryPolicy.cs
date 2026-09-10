@@ -75,10 +75,10 @@ public static class MarketDiscoveryPolicy
                 RequireHighQuality = highQuality,
                 ListFromBags = true,
                 HuntOnTour = true,
-                TourPriority = 0,
+                TourPriority = 3,
                 // Objectively high-value, high-volume food or medicine: exactly the
                 // kind of stock the curated list exists to hold.
-                PreferredStock = true,
+                PreferredStock = false,
                 DiscoveredAutomatically = true,
             }, price * (decimal)stack * perDay));
         }

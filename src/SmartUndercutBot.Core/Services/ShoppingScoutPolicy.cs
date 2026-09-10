@@ -71,8 +71,21 @@ public static class ShoppingScoutPolicy
         return chosen;
     }
 
-    public static bool IsExceptional(ProcurementOrder order, decimal minimumRoi) =>
-        order.PricePerUnit > 0 && order.Quantity > 0 &&
-        order.ExpectedProfit >= decimal.Ceiling(order.PricePerUnit * (decimal)order.Quantity * 1.05m) *
-            Math.Max(100m, minimumRoi) / 100m;
+    /// <summary>
+    /// Whether a listing is worth buying on the spot instead of remembering it and
+    /// comparing it against the rest of the circuit.
+    ///
+    /// Buying immediately spends scarce capital and a scarce sale slot before any
+    /// later world has been seen, so it has to be reserved for cases where waiting
+    /// is the greater risk. A large percentage return is not sufficient on its own -
+    /// a cheap trinket at 300% is not an emergency. It must also be stock the
+    /// portfolio actually wants: liquid, valuable per slot, carrying real absolute
+    /// profit, and not something that would sit in a slot for days.
+    /// </summary>
+    public static bool IsExceptional(
+        ProcurementOrder order, decimal minimumRoi, ProcurementEconomicPolicy? policy = null)
+    {
+        // All offers compete after scouting; percentage ROI never pre-empts capital.
+        return false;
+    }
 }

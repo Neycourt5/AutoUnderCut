@@ -7,7 +7,7 @@ namespace SmartUndercutBot;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 42;
+    public int Version { get; set; } = 43;
     public bool AutomationEnabled { get; set; }
     public bool ProcessAllRetainers { get; set; } = true;
     public bool RepeatBellRuns { get; set; }
@@ -40,11 +40,43 @@ public sealed class Configuration : IPluginConfiguration
     // lower fill margin only ever applies to preferred and high-liquidity stock.
     public decimal ProcurementFillRoiPercent { get; set; } = 10m;
     /// <summary>
-    /// The margin required on stock that sells ten or more units a day. Popcorn and
-    /// the other high-volume lines are back out of the bags within hours, so the
-    /// return comes from turning the gil over rather than from each flip.
+    /// The margin required on preferred stock that is both fast-moving and valuable -
+    /// popcorn, potages, raid gemdraughts. These are back out of the bags within a
+    /// day or two, so the return comes from turning the gil over repeatedly rather
+    /// than from the size of each flip, and holding out for a fat margin on them
+    /// mostly leaves millions of gil idle.
     /// </summary>
     public decimal ProcurementFastMoverRoiPercent { get; set; } = 10m;
+
+    // --- Demand-based inventory sizing -------------------------------------------
+    // How much stock to hold, measured in days of each market's own observed sales.
+    // This is what lets an exceptional high-volume line absorb real capital while
+    // stopping a slow line from accumulating dead inventory, whatever its ROI.
+    public decimal ProcurementPreferredCoverageDays { get; set; } = 3m;
+    public decimal ProcurementSecondaryCoverageDays { get; set; } = 1.5m;
+    public decimal ProcurementOpportunisticCoverageDays { get; set; } = 0.5m;
+    // Stacks rarely land exactly on target. Buying is only allowed while holdings are
+    // below target and may overshoot by at most this much, so one stack can complete
+    // a position but a second cannot pile on top of it.
+    public decimal ProcurementCoverageOvershootDays { get; set; } = 1m;
+
+    // --- What counts as a high-volume market -------------------------------------
+    // Velocity alone does not earn the thin margin: a cheap item that sells quickly
+    // is not the same capital proposition as a two-million-gil stack of raid food.
+    public decimal ProcurementHighVolumeMinimumSalesPerDay { get; set; } = 10m;
+    public uint ProcurementHighVolumeMinimumValuePerSlot { get; set; } = 150_000;
+    // Margin bar for non-preferred high-volume stock, and the deliberately stricter
+    // bar for low-value stock, which is welcome as a side profit but not as a
+    // destination for capital.
+    public decimal ProcurementHighVolumeRoiPercent { get; set; } = 14m;
+    public decimal ProcurementLowValueRoiPercent { get; set; } = 35m;
+    // Nothing is ever bought below this net return, whatever the other bars say.
+    public decimal ProcurementAbsoluteMinimumRoiPercent { get; set; } = 8m;
+    // Days of demand worth of cheap competing stock the market swallows before it
+    // should move our resale anchor or provoke an undercut.
+    public decimal ProcurementAnchorAbsorptionDays { get; set; } = 0.5m;
+    // Hard concentration limit no amount of demand may exceed.
+    public int ProcurementEmergencyMaximumSlotsPerItem { get; set; } = 20;
     // Portfolio shape. Preferred (core) stock should occupy most of the retainers;
     // opportunistic arbitrage is capped so it cannot crowd out capital or slots.
     public decimal PreferredPortfolioTargetPercent { get; set; } = 75m;
@@ -116,6 +148,21 @@ public sealed class Configuration : IPluginConfiguration
         PerItemRules.TryGetValue(itemId, out var rule) ? rule.Clone() : GlobalRule.Clone();
 
     /// <summary>The portfolio shape every purchase plan is built against.</summary>
+    public ProcurementEconomicPolicy EconomicPolicy => new(
+        PreferredCoverageDays: ProcurementPreferredCoverageDays,
+        SecondaryCoverageDays: ProcurementSecondaryCoverageDays,
+        OpportunisticCoverageDays: ProcurementOpportunisticCoverageDays,
+        CoverageOvershootDays: ProcurementCoverageOvershootDays,
+        HighVolumeMinimumSalesPerDay: ProcurementHighVolumeMinimumSalesPerDay,
+        HighVolumeMinimumValuePerSlot: ProcurementHighVolumeMinimumValuePerSlot,
+        CoreHighVolumeRoiPercent: ProcurementFastMoverRoiPercent,
+        HighVolumeRoiPercent: ProcurementHighVolumeRoiPercent,
+        StandardRoiPercent: ProcurementMinimumRoiPercent,
+        LowValueRoiPercent: ProcurementLowValueRoiPercent,
+        AbsoluteMinimumRoiPercent: ProcurementAbsoluteMinimumRoiPercent,
+        EmergencyMaximumSlotsPerItem: ProcurementEmergencyMaximumSlotsPerItem,
+        AnchorAbsorptionDays: ProcurementAnchorAbsorptionDays);
+
     public PortfolioGates PortfolioGates => new(
         PreferredPortfolioTargetPercent, OpportunisticPortfolioMaximumPercent, ProcurementMinimumProfitPerSaleSlot);
 
@@ -538,7 +585,24 @@ public sealed class Configuration : IPluginConfiguration
             ProcurementFastMoverRoiPercent = 10m;
             Version = 42;
         }
-        Version = Math.Max(Version, 42);
+        if (Version < 43)
+        {
+            foreach (var discovered in ProcurementRules.Where(x => x.DiscoveredAutomatically))
+                discovered.PreferredStock = false;
+            Version = 43;
+        }
+        Version = Math.Max(Version, 43);
+        ProcurementPreferredCoverageDays = Math.Clamp(ProcurementPreferredCoverageDays, 0.25m, 7m);
+        ProcurementSecondaryCoverageDays = Math.Clamp(ProcurementSecondaryCoverageDays, 0.25m, 7m);
+        ProcurementOpportunisticCoverageDays = Math.Clamp(ProcurementOpportunisticCoverageDays, 0.1m, 2m);
+        ProcurementCoverageOvershootDays = Math.Clamp(ProcurementCoverageOvershootDays, 0m, 1m);
+        ProcurementHighVolumeMinimumSalesPerDay = Math.Clamp(ProcurementHighVolumeMinimumSalesPerDay, 10m, 10_000m);
+        ProcurementHighVolumeMinimumValuePerSlot = Math.Clamp(ProcurementHighVolumeMinimumValuePerSlot, 150_000u, 100_000_000u);
+        ProcurementAbsoluteMinimumRoiPercent = Math.Clamp(ProcurementAbsoluteMinimumRoiPercent, 8m, 1_000m);
+        ProcurementHighVolumeRoiPercent = Math.Clamp(ProcurementHighVolumeRoiPercent, 8m, 1_000m);
+        ProcurementLowValueRoiPercent = Math.Clamp(ProcurementLowValueRoiPercent, 8m, 1_000m);
+        ProcurementAnchorAbsorptionDays = Math.Clamp(ProcurementAnchorAbsorptionDays, 0m, 0.5m);
+        ProcurementEmergencyMaximumSlotsPerItem = Math.Clamp(ProcurementEmergencyMaximumSlotsPerItem, 1, 60);
         PreferredPortfolioTargetPercent = Math.Clamp(PreferredPortfolioTargetPercent, 0m, 100m);
         OpportunisticPortfolioMaximumPercent = Math.Clamp(OpportunisticPortfolioMaximumPercent, 0m, 100m);
         ProcurementMinimumProfitPerSaleSlot = Math.Min(ProcurementMinimumProfitPerSaleSlot, 100_000_000u);

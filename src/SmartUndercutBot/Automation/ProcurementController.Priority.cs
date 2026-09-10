@@ -93,7 +93,7 @@ public sealed partial class ProcurementController
                     priorityDemand.FirstOrDefault(m => m.ItemId == x.Hint.ItemId)?.Listings
                         .Where(h => h.WorldName.Equals(homeWorld, StringComparison.OrdinalIgnoreCase)).ToArray() ?? []).Reference;
                 var units = (uint)Math.Max(1, x.Rule.TargetStackSize);
-                return (x.Hint, Score: Math.Max(0m, reference * 0.95m - x.Hint.PricePerUnit * 1.05m) * units);
+                return (x.Hint, Score: Math.Max(0m, FeeModel.Default.NetUnitProceeds(reference) - (decimal)FeeModel.Default.LandedUnitCost(x.Hint.PricePerUnit)) * units);
             })
             .ToArray();
         var scores = hints.GroupBy(x => x.Hint.WorldName, StringComparer.OrdinalIgnoreCase)
@@ -206,7 +206,7 @@ public sealed partial class ProcurementController
             OwnedStock: CollectOwnedStock(), MaximumWeeklySalesSharePercent: config.ProcurementWeeklySalesSharePercent,
             HighQualityOnly: config.BuyHighQualityOnly, ResaleListings: homePrices.Values.SelectMany(x => x).ToArray(),
             Portfolio: config.PortfolioGates, PortfolioCapacitySlots: PortfolioCapacitySlots(),
-            FastMoverRoiPercent: config.ProcurementFastMoverRoiPercent));
+            Economics: config.EconomicPolicy));
         LogPortfolioDecisions("SCOUT", compared);
         compared = TopUpEmptySaleSlots(compared, markets);
         if (compared.Orders.Count == 0)
@@ -263,7 +263,7 @@ public sealed partial class ProcurementController
             HighQualityOnly: config.BuyHighQualityOnly, ResaleListings: homePrices.Values.SelectMany(x => x).ToArray(),
             Portfolio: config.PortfolioGates with { OpportunisticMaximumPercent = 0m },
             PortfolioCapacitySlots: PortfolioCapacitySlots(),
-            FastMoverRoiPercent: config.ProcurementFastMoverRoiPercent));
+            Economics: config.EconomicPolicy));
         // Belt and braces: the cap already excludes them, and PollListings refuses
         // one again before buying, but never carry an opportunistic fill order.
         var accepted = fill.Orders.Where(o => o.Tier != PortfolioTier.Opportunistic).ToArray();
@@ -282,7 +282,7 @@ public sealed partial class ProcurementController
         // Mirror the planner's landed cost, including the buyer fee, because
         // `accepted` may be a subset of the fill plan.
         var addedCost = accepted.Aggregate(0UL, (sum, o) => sum +
-            (ulong)decimal.Ceiling((decimal)o.PricePerUnit * o.Quantity * 1.05m));
+            o.CapitalAtRisk);
         return compared with
         {
             Orders = compared.Orders.Concat(accepted.Select(o => o with { IsFillOrder = true })).ToArray(),
@@ -508,7 +508,7 @@ public sealed partial class ProcurementController
                     OwnedStock: owned, MaximumWeeklySalesSharePercent: config.ProcurementWeeklySalesSharePercent,
                     HighQualityOnly: config.BuyHighQualityOnly, ResaleListings: resale,
                     Portfolio: config.PortfolioGates, PortfolioCapacitySlots: PortfolioCapacitySlots(),
-                    FastMoverRoiPercent: config.ProcurementFastMoverRoiPercent));
+                    Economics: config.EconomicPolicy));
                 candidates.AddRange(plan.Orders);
             }
         }
