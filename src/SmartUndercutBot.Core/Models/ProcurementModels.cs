@@ -162,7 +162,10 @@ public sealed record ProcurementPlanRequest(
     bool HighQualityOnly = false,
     IReadOnlyList<ProcurementMarketListing>? ResaleListings = null,
     PortfolioGates? Portfolio = null,
-    int PortfolioCapacitySlots = 0);
+    int PortfolioCapacitySlots = 0,
+    // The lower margin accepted on high-volume stock. Negative means "not set",
+    // and then everything is held to MinimumRoiPercent.
+    decimal FastMoverRoiPercent = -1m);
 
 public sealed record LiveMarketPlanRequest(
     IReadOnlyList<ProcurementMarketItem> Markets,
@@ -179,7 +182,8 @@ public sealed record LiveMarketPlanRequest(
     IReadOnlyList<StockExposure>? OwnedStock = null,
     bool HighQualityOnly = false,
     PortfolioGates? Portfolio = null,
-    int PortfolioCapacitySlots = 0);
+    int PortfolioCapacitySlots = 0,
+    decimal FastMoverRoiPercent = -1m);
 
 public sealed record ProcurementOrder(
     uint ItemId,

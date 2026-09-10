@@ -28,6 +28,19 @@ public static class PortfolioPolicy
     public const decimal SecondaryMinimumSalesPerDay = 10m;
     public const uint SecondaryMinimumValuePerSlot = 150_000;
 
+    /// <summary>
+    /// The margin a purchase has to clear. Stock that turns over daily earns its
+    /// return from velocity rather than from the size of each flip: a stack of
+    /// something selling ten-plus units a day is gone in hours and the gil is back
+    /// out working, so demanding a fat margin on it mostly leaves the gil idle.
+    /// Slower stock keeps the full bar, because there the margin is the whole
+    /// return. A negative fast-mover value means the caller did not set one.
+    /// </summary>
+    public static decimal RequiredRoiPercent(decimal minimumRoi, decimal fastMoverRoi, decimal salesPerDay) =>
+        fastMoverRoi >= 0 && salesPerDay >= SecondaryMinimumSalesPerDay
+            ? Math.Min(minimumRoi, fastMoverRoi)
+            : minimumRoi;
+
     /// <summary>Ranking order. Core stock is considered before anything else.</summary>
     public static int Rank(PortfolioTier tier) => tier switch
     {

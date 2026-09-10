@@ -7,7 +7,7 @@ namespace SmartUndercutBot;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 41;
+    public int Version { get; set; } = 42;
     public bool AutomationEnabled { get; set; }
     public bool ProcessAllRetainers { get; set; } = true;
     public bool RepeatBellRuns { get; set; }
@@ -39,6 +39,12 @@ public sealed class Configuration : IPluginConfiguration
     // Filling a sale slot is not the objective; holding a good portfolio is. The
     // lower fill margin only ever applies to preferred and high-liquidity stock.
     public decimal ProcurementFillRoiPercent { get; set; } = 10m;
+    /// <summary>
+    /// The margin required on stock that sells ten or more units a day. Popcorn and
+    /// the other high-volume lines are back out of the bags within hours, so the
+    /// return comes from turning the gil over rather than from each flip.
+    /// </summary>
+    public decimal ProcurementFastMoverRoiPercent { get; set; } = 10m;
     // Portfolio shape. Preferred (core) stock should occupy most of the retainers;
     // opportunistic arbitrage is capped so it cannot crowd out capital or slots.
     public decimal PreferredPortfolioTargetPercent { get; set; } = 75m;
@@ -523,7 +529,16 @@ public sealed class Configuration : IPluginConfiguration
             PriorityNextItem = 0;
             Version = 41;
         }
-        Version = Math.Max(Version, 41);
+        if (Version < 42)
+        {
+            // High-volume stock was held to the same 20% as a slow flip, so a trip
+            // could walk past popcorn that was a thousand gil cheaper than home and
+            // come back having bought nothing. Idle gil earns less than a thin
+            // margin that turns over daily.
+            ProcurementFastMoverRoiPercent = 10m;
+            Version = 42;
+        }
+        Version = Math.Max(Version, 42);
         PreferredPortfolioTargetPercent = Math.Clamp(PreferredPortfolioTargetPercent, 0m, 100m);
         OpportunisticPortfolioMaximumPercent = Math.Clamp(OpportunisticPortfolioMaximumPercent, 0m, 100m);
         ProcurementMinimumProfitPerSaleSlot = Math.Min(ProcurementMinimumProfitPerSaleSlot, 100_000_000u);
@@ -531,6 +546,7 @@ public sealed class Configuration : IPluginConfiguration
         MarketDiscoveryRegion = string.IsNullOrWhiteSpace(MarketDiscoveryRegion) ? "NA" : MarketDiscoveryRegion.Trim();
         ScoutKnowledgeMaxAgeHours = Math.Clamp(ScoutKnowledgeMaxAgeHours, 1, 168);
         ProcurementFillRoiPercent = Math.Clamp(ProcurementFillRoiPercent, 0m, 1_000m);
+        ProcurementFastMoverRoiPercent = Math.Clamp(ProcurementFastMoverRoiPercent, 0m, 1_000m);
         PriorityScoutRoute ??= [];
         PriorityItemsPerWorld = Math.Clamp(PriorityItemsPerWorld, 1, 40);
         ProcurementBufferValueTarget = Math.Min(ProcurementBufferValueTarget, 999_999_999u);

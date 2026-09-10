@@ -15,7 +15,7 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
         ArgumentNullException.ThrowIfNull(request);
         if (request.GilBudget == 0 || request.FreeSaleSlots <= 0 || request.FreeInventorySlots <= 0 ||
             request.MarketTaxPercent is < 0 or > 100 || request.BuyerFeePercent is < 0 or > 100 ||
-            request.MinimumRoiPercent is < 0 or > 1_000 ||
+            request.MinimumRoiPercent is < 0 or > 1_000 || request.FastMoverRoiPercent > 1_000 ||
             request.MaximumWeeklySalesSharePercent is <= 0 or > 100)
             return ProcurementPlan.Empty;
 
@@ -77,7 +77,9 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
 
                 var netUnitProceeds = decimal.Floor(targetSalePrice * (1m - request.MarketTaxPercent / 100m));
                 var buyerFeeMultiplier = 1m + request.BuyerFeePercent / 100m;
-                var roiDivisor = 1m + request.MinimumRoiPercent / 100m;
+                var salesPerDay = SalesVelocityPolicy.DailyUnits(market, quality);
+                var roiDivisor = 1m + PortfolioPolicy.RequiredRoiPercent(
+                    request.MinimumRoiPercent, request.FastMoverRoiPercent, salesPerDay) / 100m;
                 var roiCeiling = roiDivisor <= 0 || buyerFeeMultiplier <= 0
                     ? 0
                     : decimal.Floor(netUnitProceeds / roiDivisor / buyerFeeMultiplier);
@@ -90,7 +92,6 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
                 if (ceiling == 0)
                     continue;
 
-                var salesPerDay = SalesVelocityPolicy.DailyUnits(market, quality);
                 foreach (var listing in market.Listings)
                 {
                     if (listing.ItemId != market.ItemId || listing.PricePerUnit == 0 || listing.PricePerUnit > ceiling ||
@@ -136,7 +137,8 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
         ArgumentNullException.ThrowIfNull(request);
         if (request.GilBudget == 0 || request.FreeSaleSlots <= 0 || request.FreeInventorySlots <= 0 ||
             string.IsNullOrWhiteSpace(request.HomeWorld) || request.MarketTaxPercent is < 0 or > 100 ||
-            request.BuyerFeePercent is < 0 or > 100 || request.MinimumRoiPercent is < 0 or > 1_000)
+            request.BuyerFeePercent is < 0 or > 100 || request.MinimumRoiPercent is < 0 or > 1_000 ||
+            request.FastMoverRoiPercent > 1_000)
             return ProcurementPlan.Empty;
 
         var gates = request.Portfolio ?? PortfolioGates.Unrestricted;
@@ -172,7 +174,9 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
 
                 var netUnitProceeds = decimal.Floor(targetSalePrice * (1m - request.MarketTaxPercent / 100m));
                 var buyerFeeMultiplier = 1m + request.BuyerFeePercent / 100m;
-                var roiDivisor = 1m + request.MinimumRoiPercent / 100m;
+                var salesPerDay = SalesVelocityPolicy.DailyUnits(market, quality);
+                var roiDivisor = 1m + PortfolioPolicy.RequiredRoiPercent(
+                    request.MinimumRoiPercent, request.FastMoverRoiPercent, salesPerDay) / 100m;
                 var roiCeiling = roiDivisor <= 0 || buyerFeeMultiplier <= 0
                     ? 0
                     : decimal.Floor(netUnitProceeds / roiDivisor / buyerFeeMultiplier);
@@ -185,7 +189,6 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
                 if (ceiling == 0)
                     continue;
 
-                var salesPerDay = SalesVelocityPolicy.DailyUnits(market, quality);
                 foreach (var listing in market.Listings)
                 {
                     if (listing.ItemId != market.ItemId || string.IsNullOrWhiteSpace(listing.WorldName) ||

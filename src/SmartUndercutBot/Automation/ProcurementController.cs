@@ -606,7 +606,8 @@ public sealed partial class ProcurementController : IDisposable
             MaximumWeeklySalesSharePercent: config.ProcurementWeeklySalesSharePercent,
             HighQualityOnly: config.BuyHighQualityOnly,
             Portfolio: config.PortfolioGates,
-            PortfolioCapacitySlots: PortfolioCapacitySlots()));
+            PortfolioCapacitySlots: PortfolioCapacitySlots(),
+            FastMoverRoiPercent: config.ProcurementFastMoverRoiPercent));
         LogPortfolioDecisions("DEAL SEARCH", Plan);
         lastScannedFreeSaleSlots = plannedSaleSlots;
         lastScannedBudget = ShoppingBudget;
@@ -1171,7 +1172,8 @@ public sealed partial class ProcurementController : IDisposable
             OwnedStock: CollectOwnedStock(),
             HighQualityOnly: config.BuyHighQualityOnly,
             Portfolio: config.PortfolioGates,
-            PortfolioCapacitySlots: PortfolioCapacitySlots()));
+            PortfolioCapacitySlots: PortfolioCapacitySlots(),
+            FastMoverRoiPercent: config.ProcurementFastMoverRoiPercent));
         LogPortfolioDecisions("LIVE TOUR", Plan);
         detail = Plan.Orders.Count == 0
             ? $"Live tour checked {stockHuntWorlds.Count} worlds; no listing beat the live {homeWorld} resale floor and safety guards."
@@ -1471,8 +1473,15 @@ public sealed partial class ProcurementController : IDisposable
         AdvanceOrder();
     }
 
+    /// <summary>
+    /// The resale margin this purchase pins onto the item's pricing rule. It has to
+    /// be the same bar the deal was bought against - buying popcorn at a 10% margin
+    /// and then refusing to list it under 20% over cost would just park the stack.
+    /// </summary>
     private decimal RequiredPurchaseRoi(ProcurementOrder order) => order.IsFillOrder
-        ? configuration.Current.ProcurementFillRoiPercent : configuration.Current.ProcurementMinimumRoiPercent;
+        ? configuration.Current.ProcurementFillRoiPercent
+        : PortfolioPolicy.RequiredRoiPercent(configuration.Current.ProcurementMinimumRoiPercent,
+            configuration.Current.ProcurementFastMoverRoiPercent, order.SalesPerDay);
 
     private bool RetryListingRequest(string itemName)
     {

@@ -205,7 +205,8 @@ public sealed partial class ProcurementController
             HomeWorld: homeWorld, OwnedRetainerIds: retainerListings.OwnedRetainerIds,
             OwnedStock: CollectOwnedStock(), MaximumWeeklySalesSharePercent: config.ProcurementWeeklySalesSharePercent,
             HighQualityOnly: config.BuyHighQualityOnly, ResaleListings: homePrices.Values.SelectMany(x => x).ToArray(),
-            Portfolio: config.PortfolioGates, PortfolioCapacitySlots: PortfolioCapacitySlots()));
+            Portfolio: config.PortfolioGates, PortfolioCapacitySlots: PortfolioCapacitySlots(),
+            FastMoverRoiPercent: config.ProcurementFastMoverRoiPercent));
         LogPortfolioDecisions("SCOUT", compared);
         compared = TopUpEmptySaleSlots(compared, markets);
         if (compared.Orders.Count == 0)
@@ -261,7 +262,8 @@ public sealed partial class ProcurementController
             OwnedStock: owned, MaximumWeeklySalesSharePercent: config.ProcurementWeeklySalesSharePercent,
             HighQualityOnly: config.BuyHighQualityOnly, ResaleListings: homePrices.Values.SelectMany(x => x).ToArray(),
             Portfolio: config.PortfolioGates with { OpportunisticMaximumPercent = 0m },
-            PortfolioCapacitySlots: PortfolioCapacitySlots()));
+            PortfolioCapacitySlots: PortfolioCapacitySlots(),
+            FastMoverRoiPercent: config.ProcurementFastMoverRoiPercent));
         // Belt and braces: the cap already excludes them, and PollListings refuses
         // one again before buying, but never carry an opportunistic fill order.
         var accepted = fill.Orders.Where(o => o.Tier != PortfolioTier.Opportunistic).ToArray();
@@ -505,7 +507,8 @@ public sealed partial class ProcurementController
                     HomeWorld: homeWorld, OwnedRetainerIds: retainerListings.OwnedRetainerIds,
                     OwnedStock: owned, MaximumWeeklySalesSharePercent: config.ProcurementWeeklySalesSharePercent,
                     HighQualityOnly: config.BuyHighQualityOnly, ResaleListings: resale,
-                    Portfolio: config.PortfolioGates, PortfolioCapacitySlots: PortfolioCapacitySlots()));
+                    Portfolio: config.PortfolioGates, PortfolioCapacitySlots: PortfolioCapacitySlots(),
+                    FastMoverRoiPercent: config.ProcurementFastMoverRoiPercent));
                 candidates.AddRange(plan.Orders);
             }
         }

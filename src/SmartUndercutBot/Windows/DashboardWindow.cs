@@ -1088,6 +1088,13 @@ public sealed class DashboardWindow : Window
                 configurationDirty = true;
             }
             ImGui.TextDisabled("When the plan still leaves sale slots empty, preferred and high-liquidity stock may be taken at this lower margin. Opportunistic stock never can: an empty slot beats a slot of junk.");
+            var fastRoi = (float)config.ProcurementFastMoverRoiPercent;
+            if (ImGui.DragFloat("High-volume ROI %", ref fastRoi, 0.5f, 0, 1_000, "%.1f%%"))
+            {
+                config.ProcurementFastMoverRoiPercent = (decimal)Math.Max(0, fastRoi);
+                configurationDirty = true;
+            }
+            ImGui.TextDisabled("The margin required on anything selling 10+ units a day at home - popcorn and the other fast lines. Their return comes from turning the gil over, so holding out for the full margin mostly leaves the gil idle. The per-unit profit floor and every safety check still apply.");
 
             ImGui.Separator();
             ImGui.TextUnformatted("Portfolio shape");
