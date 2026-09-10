@@ -9,8 +9,10 @@ Publishing requested by the user; AGENTS.md standing authorization applies.
 - [x] PROFIT_OPTIMIZATION_IMPLEMENTATION.md and PURCHASING_RESALE_LOGIC.md updated,
       with the 15M example reproduced from code by a test.
 - [x] Version bumped 1.0.0.66 -> 1.0.0.67 (1.0.0.66 was never released; live was .65).
-- [ ] Push main + annotated tag v1.0.0.67; verify the release workflow, published
-      repo.json AssemblyVersion and SmartUndercutBot.zip.
+- [x] Pushed main (a3b9f0e) + annotated tag v1.0.0.67. Release workflow run
+      34516051646 concluded success; published repo.json reports AssemblyVersion
+      1.0.0.67 and SmartUndercutBot.zip resolves (591,917 bytes) from the installer
+      URL. Verified 2026-09-10; ready to update in-game via the Dalamud installer.
 
 Personal sell-through forecasting remains deferred: inventory differences are not
 verified sales, and every confound biases the estimate toward buying more. The
