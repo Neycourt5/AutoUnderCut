@@ -1,4 +1,4 @@
-# Active: v1.0.0.68 adaptive reinvestment
+# Completed: v1.0.0.68 adaptive reinvestment
 
 User reports ~4M idle gil while full retainers repeatedly list/reprice cheap
 materia; wants stock clearing to stay first, then deal hunting when food/potions
@@ -24,7 +24,13 @@ are thin. Also requested surrounding logic improvements, build and publication.
       Use local SDK 10.0.301 with -m:1 -nr:false -p:UseSharedCompilation=false
       because the sandbox cannot use the normal multi-process MSBuild path.
       Version 1.0.0.68 confirmed unused on origin; diff reviewed.
-- [ ] Commit/push main and annotated tag; verify workflow, repo.json and ZIP.
+- [x] Commit 8418ee9 pushed to origin/main with annotated tag v1.0.0.68.
+- [x] Release workflow 34565623675 and Build 34565622494 both succeeded.
+- [x] Verified 2026-09-11: unchanged public latest repo.json reports 1.0.0.68,
+      API 15 and unchanged ZIP install/update URLs. ZIP is 597,403 bytes, contains
+      both DLLs, and its manifest and plugin assembly both report 1.0.0.68.
+      SHA-256: 5C15D10517BE0A741DC141A4A442B166CEF062F67E2CA5BEDE49F40ECE2201D6.
+      Ready to update through the in-game Dalamud installer.
 
 Native game operations have not been exercised in this session.
 
