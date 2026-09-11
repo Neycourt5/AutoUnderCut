@@ -31,7 +31,11 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
         var gates = request.Portfolio ?? PortfolioGates.Unrestricted;
         var policy = request.Economics ?? ProcurementEconomicPolicy.Flat(request.MinimumRoiPercent);
         var rules = EnabledRules(request.Rules);
-        var context = new PlanningContext(fees, policy, gates, rules);
+        var context = new PlanningContext(fees, policy, gates, rules)
+        {
+            NonPreferredGilBudget = request.NonPreferredGilBudget,
+            NonPreferredSaleSlots = request.NonPreferredSaleSlots,
+        };
 
         foreach (var market in request.Markets)
         {
@@ -110,7 +114,11 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
         var gates = request.Portfolio ?? PortfolioGates.Unrestricted;
         var policy = request.Economics ?? ProcurementEconomicPolicy.Flat(request.MinimumRoiPercent);
         var rules = EnabledRules(request.Rules);
-        var context = new PlanningContext(fees, policy, gates, rules);
+        var context = new PlanningContext(fees, policy, gates, rules)
+        {
+            NonPreferredGilBudget = request.NonPreferredGilBudget,
+            NonPreferredSaleSlots = request.NonPreferredSaleSlots,
+        };
 
         foreach (var market in request.Markets)
         {
@@ -325,6 +333,8 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
         var orders = new List<ProcurementOrder>();
         var notes = new List<PortfolioDecision>();
         ulong spent = 0, profit = 0, opportunisticSpent = 0;
+        ulong nonPreferredSpent = 0;
+        var nonPreferredSlots = 0;
         decimal objective = 0;
         var budgetBlocked = false;
 
@@ -402,6 +412,15 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
                     notes.Add(Describe(candidate, false, "weekly market-share limit reached for this item"));
                     continue;
                 }
+                if (!rule.PreferredStock &&
+                    ((context.NonPreferredGilBudget is { } otherBudget && nonPreferredSpent + cost > otherBudget) ||
+                     (context.NonPreferredSaleSlots is { } otherSlots && nonPreferredSlots + candidate.SaleSlots > otherSlots)))
+                {
+                    if (context.NonPreferredGilBudget is { } constrainedBudget && nonPreferredSpent + cost > constrainedBudget)
+                        budgetBlocked = true;
+                    notes.Add(Describe(candidate, false, "non-preferred spare-stock allowance reached; remaining capacity is for preferred stock"));
+                    continue;
+                }
                 if (spent + cost > budget)
                 {
                     // Spending only grows in this pass. A trial starts afresh, so
@@ -433,6 +452,11 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
             addedByKey[chosenKey] = addedByKey.GetValueOrDefault(chosenKey) + 1;
             heldUnits[chosenKey] = heldUnits.GetValueOrDefault(chosenKey) + chosen.Quantity;
             spent += chosen.CapitalAtRisk;
+            if (!context.Rules[chosen.ItemId].PreferredStock)
+            {
+                nonPreferredSpent += chosen.CapitalAtRisk;
+                nonPreferredSlots += chosen.SaleSlots;
+            }
             if (chosen.Tier == PortfolioTier.Opportunistic) opportunisticSpent += chosen.CapitalAtRisk;
             profit += chosen.ExpectedProfit;
             objective += chosen.AllocationScore;
@@ -631,6 +655,8 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
         public ProcurementEconomicPolicy Policy { get; } = policy;
         public PortfolioGates Gates { get; } = gates;
         public IReadOnlyDictionary<uint, ProcurementRule> Rules { get; } = rules;
+        public uint? NonPreferredGilBudget { get; init; }
+        public int? NonPreferredSaleSlots { get; init; }
         public List<ProcurementOrder> Candidates { get; } = [];
         public List<PortfolioDecision> Rejected { get; } = [];
         public Dictionary<(uint, bool), ulong> WeeklyShareLimits { get; } = [];

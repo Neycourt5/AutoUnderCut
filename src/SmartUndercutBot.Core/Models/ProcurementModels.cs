@@ -220,7 +220,11 @@ public sealed record ProcurementPlanRequest(
     // Coverage targets, margin bars by class of stock, and scoring weights. Null
     // keeps the flat MinimumRoiPercent bar and no coverage shaping, so a caller
     // that has not opted in gets plain profitability behaviour.
-    ProcurementEconomicPolicy? Economics = null);
+    ProcurementEconomicPolicy? Economics = null,
+    // Sub-limits within GilBudget/FreeSaleSlots. PreferredStock rules alone can
+    // use the remainder; all purchases still consume the total budget and slots.
+    uint? NonPreferredGilBudget = null,
+    int? NonPreferredSaleSlots = null);
 
 public sealed record LiveMarketPlanRequest(
     IReadOnlyList<ProcurementMarketItem> Markets,
@@ -238,7 +242,9 @@ public sealed record LiveMarketPlanRequest(
     bool HighQualityOnly = false,
     PortfolioGates? Portfolio = null,
     int PortfolioCapacitySlots = 0,
-    ProcurementEconomicPolicy? Economics = null);
+    ProcurementEconomicPolicy? Economics = null,
+    uint? NonPreferredGilBudget = null,
+    int? NonPreferredSaleSlots = null);
 
 public sealed record ProcurementOrder(
     uint ItemId,

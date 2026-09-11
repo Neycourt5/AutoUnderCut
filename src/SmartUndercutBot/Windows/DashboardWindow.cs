@@ -118,9 +118,9 @@ public sealed class DashboardWindow : Window
         var config = configuration.Current;
         ImGui.TextWrapped("Check retainers > fill from bags > buy good deals > return home and list > repeat.");
         if (config.PriorityShoppingEnabled)
-            ImGui.TextWrapped("Shopping: compare regional prices, then sweep every world, two stops at a time across Aether > Primal > Crystal > Dynamis. " +
+            ImGui.TextWrapped("Shopping: compare regional prices, then sweep the worlds one data center at a time. " +
                               $"Every stop prices the food and potions first, then rotating flips, up to {config.PriorityItemsPerWorld} items. " +
-                              "Compare ordinary deals before buying; 100%+ expected return after fees can buy immediately. " +
+                              "Compare deals before buying and refresh aging home resale prices. " +
                               "Return home to list and collect, then resume the remaining worlds. Use nearby boards and bells before teleporting.");
         ImGui.TextWrapped("Start enables price changes, automatic purchases, listing, gil collection, and repeat checks. " +
                           "It uses your limits below. Keep the game running and leave the retainer list open between trips.");
@@ -333,14 +333,14 @@ public sealed class DashboardWindow : Window
             config.ProcurementBufferGilPercent = (decimal)Math.Clamp(bufferPercent, 0f, 100f);
             configurationDirty = true;
         }
-        ImGui.TextWrapped("Fill empty sale slots first, using existing stock before buying. Spare stock has a smaller budget, " +
-            "including the saved purchase cost of trading stock already in your bags. Sale-only stock does not consume that budget. " +
-            "Comfortable stock targets about 20% of retainer capacity, with 1-3 spare sale stacks per item to spread your stock. " +
-            "Purchases still need profit, demand, gil and bag space.");
+        ImGui.TextWrapped("List existing stock first. If preferred food and potions are below their portfolio target, " +
+            "hunt deals for a replacement buffer even while other listings occupy the retainers. Preferred deals can use " +
+            "available gil after the travel reserve; other spare stock keeps the smaller budget, including its existing purchase cost. " +
+            "The replacement buffer is bounded at about 20% of retainer capacity, and every purchase still needs profit and demand.");
         ImGui.Text($"Available for the next trip: {procurement.ShoppingBudget:N0} gil   |   room for {procurement.PurchaseCapacity} stack(s)");
+        ImGui.TextWrapped(procurement.ShoppingStrategy);
         if (procurement.ShoppingWaitReason is { } shoppingWait)
-            ImGui.TextWrapped($"Not buying right now: {shoppingWait}. Once every sale slot is covered, the figure " +
-                              "above is the spare-stock allowance rather than the whole wallet.");
+            ImGui.TextWrapped($"Not buying right now: {shoppingWait}.");
     }
 
     private void DrawAdvanced()
@@ -1221,14 +1221,14 @@ public sealed class DashboardWindow : Window
                 config.ShoppingTripMinimumFreeSaleSlots = minimumSlots;
                 configurationDirty = true;
             }
-            ImGui.TextDisabled("Below this many free retainer slots the bot stays home and keeps undercutting, which is what frees them. 0 shops at any vacancy.");
+            ImGui.TextWrapped("Wait for this many vacancies when preferred stock is covered. Continuous shopping can leave sooner to rebuild a thin food/potion position. 0 disables the vacancy hold.");
             var minimumGil = config.ShoppingTripMinimumGil;
             if (InputUInt("Gil needed before a trip", ref minimumGil, 0, 100_000_000))
             {
                 config.ShoppingTripMinimumGil = minimumGil;
                 configurationDirty = true;
             }
-            ImGui.TextDisabled("Spendable gil, after the travel reserve and buffer cap. Travelling with pocket change buys one cheap stack and wastes the trip.");
+            ImGui.TextDisabled("Spendable gil after the travel reserve and any trip cap. Preferred stock is exempt from the smaller spare-stock budget.");
             var worldsPerTrip = config.PriorityWorldsPerTrip;
             if (InputInt("Worlds to scout before comparing", ref worldsPerTrip, 1, 40))
             {

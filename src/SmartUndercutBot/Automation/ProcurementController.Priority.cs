@@ -24,6 +24,9 @@ public sealed partial class ProcurementController
     private readonly Dictionary<(string World, uint Item), DateTimeOffset> scoutObservedAt = new();
     private readonly Dictionary<string, HashSet<uint>> scoutItems = new(StringComparer.OrdinalIgnoreCase);
     private DateTimeOffset? comparisonBuyingStarted;
+    private bool priorityRefreshingHome;
+    private bool priorityHomeRefreshAttempted;
+    private string priorityComparisonReason = string.Empty;
     public IReadOnlyList<ShoppingObservation> RecentPrices => observations;
 
     /// <summary>The home-world prices every away deal is measured against.</summary>
@@ -196,6 +199,33 @@ public sealed partial class ProcurementController
 
     private void FinishPriorityScouting(string reason)
     {
+        // A regional circuit may outlast the resale quote. Observations remain
+        // useful routing hints: refresh the home anchor before allocating capital
+        // instead of throwing away the trip or buying against expired prices.
+        var observedItems = scoutListings.Select(x => x.ItemId).ToHashSet();
+        var refreshRules = stockHuntRules.Where(x => observedItems.Contains(x.ItemId)).ToList();
+        if (!priorityHomeRefreshAttempted && AvailablePurchaseSlots() > 0 && SpendableGil() > 0 && refreshRules.Any(x =>
+                !homePriceTimes.TryGetValue(x.ItemId, out var at) ||
+                timeProvider.GetUtcNow() - at >= HomeReferenceMaxAge / 2))
+        {
+            priorityHomeRefreshAttempted = priorityRefreshingHome = true;
+            priorityComparisonReason = reason;
+            stockHuntRules = refreshRules;
+            foreach (var rule in refreshRules)
+            {
+                homePrices.Remove(rule.ItemId);
+                homePriceTimes.Remove(rule.ItemId);
+            }
+            stockHuntWorlds = [homeWorld];
+            stockHuntWorldIndex = stockHuntRuleIndex = worldSuccessfulScans = 0;
+            currentStockHuntRule = null;
+            priorityDepartedAt = timeProvider.GetUtcNow();
+            market.CloseMarketBoard();
+            log.Add(AutomationLogLevel.Information,
+                $"Refreshing {refreshRules.Count} home resale price(s) before comparing the circuit's deals; old quotes cannot authorize a purchase.");
+            TravelToCurrentWorld();
+            return;
+        }
         var config = configuration.Current;
         var markets = priorityDemand.Select(m => m with
         {
@@ -209,7 +239,9 @@ public sealed partial class ProcurementController
             HighQualityOnly: config.BuyHighQualityOnly, ResaleListings: homePrices.Values.SelectMany(x => x).ToArray(),
             Portfolio: config.PortfolioGates, PortfolioCapacitySlots: PortfolioCapacitySlots(),
             MarketTaxPercent: config.Fees.MarketTaxPercent,
-            Economics: config.EconomicPolicy));
+            Economics: config.EconomicPolicy,
+            NonPreferredGilBudget: NonPreferredSpendableGil(),
+            NonPreferredSaleSlots: OrdinaryPurchaseSlots()));
         LogPortfolioDecisions("SCOUT", compared);
         compared = TopUpEmptySaleSlots(compared, markets);
         if (compared.Orders.Count == 0)
@@ -271,7 +303,11 @@ public sealed partial class ProcurementController
             // absolute floor, the low-value bar and every coverage target stand, so
             // this can buy good stock a little cheaper - never junk, and never more
             // than the market's own demand supports.
-            Economics: config.EconomicPolicy.RelaxedTo(config.ProcurementFillRoiPercent)));
+            Economics: config.EconomicPolicy.RelaxedTo(config.ProcurementFillRoiPercent),
+            NonPreferredGilBudget: (uint)Math.Max(0m, NonPreferredSpendableGil() -
+                compared.Orders.Where(o => !IsPreferredStock(o.ItemId)).Sum(o => (decimal)o.CapitalAtRisk)),
+            NonPreferredSaleSlots: Math.Max(0, OrdinaryPurchaseSlots() -
+                compared.Orders.Where(o => !IsPreferredStock(o.ItemId)).Sum(o => o.SaleSlots))));
         // Belt and braces: the cap already excludes them, and PollListings refuses
         // one again before buying, but never carry an opportunistic fill order.
         var accepted = fill.Orders.Where(o => o.Tier != PortfolioTier.Opportunistic).ToArray();
@@ -341,6 +377,7 @@ public sealed partial class ProcurementController
         PruneStaleScoutKnowledge();
         PrepareScoutRoute();
         comparisonBuyingStarted = null;
+        priorityRefreshingHome = priorityHomeRefreshAttempted = false;
         purchasedSlotsByItem.Clear();
         stockHuntWorldIndex = stockHuntRuleIndex = 0;
         successfulLiveScans = failedLiveScans = consecutiveFailedWorlds = worldSuccessfulScans = 0;
@@ -359,11 +396,14 @@ public sealed partial class ProcurementController
         ownsRetainerPause = true;
         market.CloseRetainerList();
         log.Add(AutomationLogLevel.Information,
+            $"SHOPPING STRATEGY: {ShoppingStrategy} {FreeSaleSlots} open sale slots; " +
+            $"{ShoppingBudget:N0} gil available for preferred deals, {NonPreferredSpendableGil():N0} for other stock.");
+        log.Add(AutomationLogLevel.Information,
             $"PRIORITY SHOPPING: check {stockHuntRules.Count} flips on {homeWorld}, then one data center at a time, " +
             "starting with this character's own. " +
             $"Check the {stockHuntRules.Count(IsScoutBlock)} snipe line(s) on every world plus " +
             $"rotating flips, up to {config.PriorityItemsPerWorld} items per away world. " +
-            $"Compare after {config.PriorityWorldsPerTrip} worlds or {config.PriorityMinutesPerTrip} minutes; buy early only at 100%+ net ROI.");
+            $"Compare after {config.PriorityWorldsPerTrip} worlds or {config.PriorityMinutesPerTrip} minutes; refresh aging home prices before buying.");
         TravelToCurrentWorld();
     }
 
@@ -485,12 +525,6 @@ public sealed partial class ProcurementController
             homePrices[rule.ItemId] = rows;
             homePriceTimes[rule.ItemId] = timeProvider.GetUtcNow();
         }
-        else if (!HomePriceIsFresh(rule.ItemId))
-        {
-            SavePriorityCursor();
-            FinishPriorityScouting("Home resale prices need refreshing.");
-            return;
-        }
         var sales = priorityDemand.FirstOrDefault(x => x.ItemId == rule.ItemId)?.RecentSales ?? [];
         var config = configuration.Current;
         var candidates = new List<ProcurementOrder>();
@@ -498,7 +532,7 @@ public sealed partial class ProcurementController
         var owned = CollectOwnedStock();
         var budget = SpendableGil();
         var slots = AvailablePurchaseSlots();
-        if (homePrices.TryGetValue(rule.ItemId, out var home) && home.Length > 0)
+        if (HomePriceIsFresh(rule.ItemId) && homePrices.TryGetValue(rule.ItemId, out var home) && home.Length > 0)
         {
             // On the home world, a bargain must beat BOTH recorded sales and the
             // next competing listing. Never use the bargain itself as the resale
@@ -517,7 +551,9 @@ public sealed partial class ProcurementController
                     HighQualityOnly: config.BuyHighQualityOnly, ResaleListings: resale,
                     Portfolio: config.PortfolioGates, PortfolioCapacitySlots: PortfolioCapacitySlots(),
                     MarketTaxPercent: config.Fees.MarketTaxPercent,
-                    Economics: config.EconomicPolicy));
+                    Economics: config.EconomicPolicy,
+                    NonPreferredGilBudget: NonPreferredSpendableGil(),
+                    NonPreferredSaleSlots: OrdinaryPurchaseSlots()));
                 candidates.AddRange(plan.Orders);
             }
         }
@@ -539,6 +575,7 @@ public sealed partial class ProcurementController
                   $"expected profit {order.ExpectedProfit:N0} ({order.NetRoiPercent:N1}% net ROI), " +
                   $"{order.ExpectedGilPerDay:N0} gil/day, coverage {order.InventoryCoverageDays:N1}d -> {order.CoverageDaysAfterPurchase:N1}d, " +
                   $"estimated turnover {order.EstimatedDaysToSell:N2} days."
+                : !HomePriceIsFresh(rule.ItemId) ? "Saved for comparison after refreshing the home resale price."
                 : homePrices.GetValueOrDefault(rule.ItemId)?.Length is not > 0 ? "No confirmed home resale listings; skip buying."
                 : "No deal passes home sales, ROI, portfolio quality, demand, budget and stock limits.";
             observations.Add(new(timeProvider.GetUtcNow(), WorldName, rule.ItemName, quality,

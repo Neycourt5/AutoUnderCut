@@ -10,6 +10,161 @@ namespace SmartUndercutBot.Core.Tests.Automation;
 
 public sealed class ProcurementControllerTests
 {
+    [Theory]
+    [InlineData(2000u, 1)]
+    [InlineData(900u, 0)]
+    [InlineData(0u, 0)]
+    public void LongCircuitsRefreshHomePricesBeforeBuyingAndRejectCollapsedOrMissingMarkets(uint refreshedPrice, int expectedBuys)
+    {
+        using var run = new Route(priority: true);
+        run.Config.Current.ProcurementRules[0].PreferredStock = true;
+        run.Config.Current.PriorityWorldsPerTrip = 31;
+        run.Game.AutomaticWorldArrival = run.Game.AutomaticPurchaseConfirmation = true;
+        var aged = false;
+        run.Game.LiveProvider = (world, item) => world switch
+        {
+            "Siren" when aged && refreshedPrice == 0 => [],
+            "Siren" => [new(0, item, 11, 21, aged ? refreshedPrice : 2000, 99, true, 0)],
+            "Cactuar" => [new(0, item, 10, 20, 1000, 99, true, 4950)],
+            _ => [],
+        };
+        run.Controller.RunNow();
+        for (var i = 0; i < 1500 && run.Controller.IsActive; i++)
+        {
+            if (!aged && run.Controller.RecentPrices.Any(x => x.World == "Cactuar"))
+            {
+                aged = true;
+                run.Tick(1860); // old home quote is now unusable; finish the scout circuit
+            }
+            else run.Tick(2);
+        }
+        Assert.True(aged);
+        Assert.Equal(ProcurementState.Completed, run.Controller.State);
+        Assert.Equal(31, run.Game.Searches.Where(x => x.World != "Siren").Select(x => x.World).Distinct().Count());
+        Assert.Equal(2, run.Game.Searches.Count(x => x.World == "Siren"));
+        Assert.Equal(expectedBuys, run.Game.Purchases);
+        Assert.Equal("Siren", run.Game.World);
+        Assert.Contains(run.Log.Messages, x => x.Contains("Refreshing 1 home resale price"));
+    }
+
+    [Fact]
+    public void FailedHomeRefreshCannotBuyAgainstTheOldAnchor()
+    {
+        using var run = new Route(priority: true);
+        run.Game.AutomaticWorldArrival = run.Game.AutomaticPurchaseConfirmation = true;
+        var aged = false;
+        run.Controller.RunNow();
+        for (var i = 0; i < 800 && run.Controller.IsActive; i++)
+        {
+            if (!aged && run.Controller.RecentPrices.Any(x => x.World == "Cactuar"))
+            {
+                aged = true;
+                run.Tick(1860);
+            }
+            else
+            {
+                if (aged && run.Game.World == "Siren") run.Game.ListingsReady = false;
+                run.Tick(2);
+            }
+        }
+        Assert.True(aged);
+        Assert.Equal(ProcurementState.Completed, run.Controller.State);
+        Assert.Equal(0, run.Game.Purchases);
+        Assert.Contains(run.Log.Messages, x => x.Contains("SKIPPED Popcorn on Siren"));
+    }
+
+    [Fact]
+    public void FourMillionAndFullMateriaShelvesAutomaticallyShopForMissingPreferredStock()
+    {
+        using var run = new Route(priority: true);
+        run.Config.Current.EnableStockAutomation();
+        run.Config.Current.ContinueShoppingWhenStocked = true;
+        run.Config.Current.ShoppingTripMinimumFreeSaleSlots = 10;
+        run.Config.Current.ShoppingTripMinimumGil = 1_000_000;
+        run.Config.Current.ProcurementRules[0].PreferredStock = true;
+        run.Repricing.LastKnownFreeSaleSlots = 0;
+        run.Repricing.ListedStock = [new(999, false, 1200, 60)];
+        run.Game.Gil = 4_000_000;
+        run.Game.AutomaticWorldArrival = run.Game.AutomaticPurchaseConfirmation = true;
+        run.Game.DemandMarkets = [new(1, "Popcorn", [],
+            Enumerable.Range(1, 3).Select(i => new ProcurementSale(15_000, 700, true,
+                DateTimeOffset.UtcNow.AddDays(-i))).ToArray(), HqSalesPerDay: 300m)];
+        run.Game.LiveProvider = (world, item) => world switch
+        {
+            "Siren" => [new(0, item, 11, 21, 15_000, 99, true, 0)],
+            // About 13% net ROI; a 20% check or the old 799k budget rejects it.
+            "Cactuar" => [new(0, item, 10, 20, 12_000, 99, true, 59_400)],
+            _ => [],
+        };
+        Assert.Equal(3_995_000u, run.Controller.ShoppingBudget);
+        Assert.Equal(12, run.Controller.PreferredRestockSlots);
+        Assert.False(run.Controller.HoldingForSaleSlots);
+        Assert.Null(run.Controller.ShoppingWaitReason);
+        run.Tick();
+        for (var i = 0; i < 500 && run.Controller.IsActive; i++) run.Tick(2);
+        Assert.Equal(ProcurementState.Completed, run.Controller.State);
+        Assert.Equal(1, run.Game.Purchases);
+        Assert.Equal(1_247_400u, run.Controller.Status.GilSpent);
+        Assert.Equal(2_752_600u, run.Game.Gil);
+        Assert.Equal("Siren", run.Game.World);
+        // The newly bought fast mover must also be sellable below the old 20% floor.
+        Assert.InRange(run.Config.Current.PerItemRules[1].AcquisitionFloor, 14_000u, 14_999u);
+    }
+
+    [Fact]
+    public void DeepPreferredBufferStopsAdaptiveTripsEvenBeforeDemandIsLoaded()
+    {
+        using var run = new Route(priority: true);
+        run.Config.Current.EnableStockAutomation();
+        run.Config.Current.ContinueShoppingWhenStocked = true;
+        run.Config.Current.ShoppingTripMinimumFreeSaleSlots = 10;
+        run.Config.Current.ProcurementRules[0].PreferredStock = true;
+        run.Repricing.LastKnownFreeSaleSlots = 0;
+        run.Repricing.ListedStock = [new(999, false, 60, 60)];
+        run.Game.Inventory = 12 * 99;
+        run.Game.Gil = 4_000_000;
+        Assert.Equal(0, run.Controller.PreferredRestockSlots);
+        Assert.True(run.Controller.HoldingForSaleSlots);
+        run.Tick(601);
+        Assert.Equal(0, run.Game.Scans);
+        Assert.Empty(run.Game.Commands);
+    }
+
+    [Fact]
+    public void CheapTradingBufferCannotConsumeThePreferredReplacementAllowance()
+    {
+        using var run = new Route();
+        run.Config.Current.ContinueShoppingWhenStocked = true;
+        run.Config.Current.ProcurementRules[0].PreferredStock = true;
+        run.Config.Current.ProcurementRules.Add(new() { ItemId = 2, ItemName = "Materia", TargetStackSize = 20,
+            MaximumSaleSlots = 20, BagReserveQuantity = 0 });
+        run.Repricing.LastKnownFreeSaleSlots = 0;
+        run.Repricing.ListedStock = [new(2, false, 1200, 60)];
+        run.Game.OtherBagItems.Add(new(FFXIVClientStructs.FFXIV.Client.Game.InventoryType.Inventory1,
+            1, 2, "Materia", 240, false, 999));
+        Assert.Equal(12, run.Controller.ResaleBagSlots);
+        Assert.Equal(12, run.Controller.PurchaseCapacity);
+        run.Game.FreeInventorySlots = (uint)run.Config.Current.ProcurementInventoryReserve;
+        Assert.Equal(0, run.Controller.PurchaseCapacity);
+        Assert.Contains("bag space", run.Controller.ShoppingWaitReason);
+    }
+
+    [Theory]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    public void AdaptiveTripsRespectFixedBufferModeAndCompleteRetainerChecks(bool continuous, bool allRetainers)
+    {
+        using var run = new Route();
+        run.Config.Current.ContinueShoppingWhenStocked = continuous;
+        run.Config.Current.ProcessAllRetainers = allRetainers;
+        run.Config.Current.ProcurementRules[0].PreferredStock = true;
+        run.Config.Current.ShoppingTripMinimumFreeSaleSlots = 10;
+        run.Repricing.LastKnownFreeSaleSlots = 0;
+        run.Repricing.ListedStock = [new(999, false, 60, 60)];
+        Assert.Equal(0, run.Controller.PreferredRestockSlots);
+        Assert.True(run.Controller.HoldingForSaleSlots);
+    }
+
     [Fact]
     public void SaleOnlyBacklogCannotBlockComfortableStockShoppingOnFullRetainers()
     {

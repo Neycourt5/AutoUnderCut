@@ -1,4 +1,34 @@
-# Active: v1.0.0.67 marginal-allocation economics release
+# Active: v1.0.0.68 adaptive reinvestment
+
+User reports ~4M idle gil while full retainers repeatedly list/reprice cheap
+materia; wants stock clearing to stay first, then deal hunting when food/potions
+are thin. Also requested surrounding logic improvements, build and publication.
+
+- [x] Inspect scheduling, capacity, budgets and latest local session logs.
+      The 2026-09-10 23:57 pass has 60/60 occupied slots, mostly materia.
+      The flat 10-vacancy hold blocks shopping regardless of portfolio mix;
+      the global 20% buffer cap also incorrectly limits preferred purchases.
+- [x] Make shopping capacity and trip holds respond to preferred listed/bag stock.
+- [x] Scope spare-stock budget/capacity limits to non-preferred purchases in both
+      planning and live purchase checks; retain demand, fee and reserve guards.
+- [x] Prevent long bag-listing passes from immediately taking another turn.
+- [x] Review ROI consistency: retain volume/value ladder (10/14/20/35% net),
+      verify a ~13% deal buys and receives the 10% resale floor. Do not weaken
+      evidence, fee, coverage, personal reserve or travel reserve requirements.
+- [x] Fix expired home quotes ending long circuits: retain scouting observations,
+      refresh home anchors once before comparison when half their lifetime is
+      used, then re-plan. Failed/empty/collapsed anchors cannot authorize buys.
+- [x] Add 21 regressions, update dashboard explanations and logic documentation.
+      Fix test logger concurrency to match production after a discovery-log race.
+- [x] Release solution build: 0 warnings/errors; full suite: 384 passed.
+      Use local SDK 10.0.301 with -m:1 -nr:false -p:UseSharedCompilation=false
+      because the sandbox cannot use the normal multi-process MSBuild path.
+      Version 1.0.0.68 confirmed unused on origin; diff reviewed.
+- [ ] Commit/push main and annotated tag; verify workflow, repo.json and ZIP.
+
+Native game operations have not been exercised in this session.
+
+# Completed: v1.0.0.67 marginal-allocation economics release
 
 Publishing requested by the user; AGENTS.md standing authorization applies.
 

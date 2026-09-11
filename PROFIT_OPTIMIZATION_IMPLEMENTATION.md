@@ -5,8 +5,24 @@ strategy, from the percentage-driven, fixed-slot model documented in
 `PURCHASING_RESALE_LOGIC.md` (commit `ad1fa36`) to a demand-driven model whose objective is
 long-run realised gil.
 
-**Status.** Implemented, built and tested. `dotnet build SmartUndercutBot.sln -c Release`
-succeeds with zero warnings; `dotnet test` reports **325 passed, 0 failed**.
+**Status (v1.0.0.68).** Plugin Release build succeeds with zero warnings; the full
+test suite reports **384 passed, 0 failed**. Native game operations have not been
+exercised for this update.
+
+The follow-up closes three gaps between economics and execution: a flat vacancy
+hold ignored a retainer portfolio dominated by cheap materia; the global buffer
+budget limited preferred buys despite their intended exemption; and home anchors
+could expire mid-circuit, ending the hunt and excluding its finds. Scheduling now
+allows bounded preferred replacements, planner/live guards scope buffer limits to
+other stock, and long circuits refresh home anchors before allocating capital.
+Long bag fills also restart their retry delay on completion, giving shopping a turn.
+
+The 10% fast-preferred / 14% high-volume / 20% ordinary / 35% low-value net ROI
+ladder remains. It is already volume-sensitive, and the marginal gil-per-day
+allocator already accounts for units held ahead of the next purchase. Lowering
+every margin would not cure a scheduler that cannot depart. A controller regression
+now buys a ~13% net preferred deal from a 4M wallet with 60 occupied sale slots,
+and checks that the resulting resale floor preserves the same 10% requirement.
 
 ---
 

@@ -393,7 +393,9 @@ public sealed class BagListingController : IDisposable
         if (awaitingFillCompletion && !automation.IsActive)
         {
             awaitingFillCompletion = false;
-            lastAttemptFreeSaleSlots = automation.LastKnownFreeSaleSlots;
+            // A long fill pass can outlast the delay set when it started. Give
+            // shopping a turn after completion instead of immediately filling again.
+            ScheduleNextAttempt();
         }
         if (!IsAutomaticRunDue || procurement.IsActive)
             return;

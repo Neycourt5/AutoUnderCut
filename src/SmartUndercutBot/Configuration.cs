@@ -111,10 +111,9 @@ public sealed class Configuration : IPluginConfiguration
     // re-reads it for free anyway. Away-world observations only decide where to look
     // and what to compare, and those barely move within a day.
     public int ScoutKnowledgeMaxAgeHours { get; set; } = 24;
-    // A shopping trip costs 15-45 minutes away from the retainers, so it is only
-    // worth taking when there is real shelf space to fill. Below this many free
-    // sale slots the bot stays home and keeps undercutting instead; the repricing
-    // loop is what frees the slots in the first place. Zero disables the hold.
+    // A healthy portfolio waits for a batch of vacancies. Continuous shopping can
+    // leave sooner when preferred listed stock is below target and its bounded
+    // replacement buffer is short. Zero disables the vacancy hold entirely.
     public int ShoppingTripMinimumFreeSaleSlots { get; set; } = 10;
     // Travelling with pocket change buys one cheap stack and wastes the trip. Hold
     // until there is a real war chest to shop with. Zero disables the hold.

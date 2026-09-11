@@ -4,6 +4,14 @@
 (config schema `Version = 43`), after the profit-optimization rework described in
 `PROFIT_OPTIMIZATION_IMPLEMENTATION.md`.
 
+**v1.0.0.68:** adaptive scheduling now considers preferred listed stock and its
+replacement buffer. Full materia shelves no longer force idle gil to wait for ten
+vacancies. Preferred purchases use the spendable wallet; non-preferred purchases
+retain separate spare-stock budget and capacity limits. Long circuits refresh
+aging home anchors before comparison. The margin ladder remains 10% / 14% / 20% /
+35% net after fees, with an 8% absolute floor and stronger evidence required for
+thin margins. Market volume is a ranking signal, not a promise of personal sales.
+
 **How to read this document.** Claims are tagged:
 
 - **[IMPL]** — current implemented behaviour, verified by reading the code.
@@ -143,7 +151,7 @@ IF HoldingForSaleSlots OR HoldingForGil                         -> RETURN
 
 | Gate | Condition | Meaning |
 |---|---|---|
-| `HoldingForSaleSlots` (L188) | `FreeSaleSlots < ShoppingTripMinimumFreeSaleSlots` (10) | Not enough empty slots to justify a trip |
+| `HoldingForSaleSlots` | Fewer than 10 free slots **and** no preferred replacement shortfall | Healthy portfolios wait for vacancies; thin preferred positions can shop sooner |
 | `HoldingForGil` (L196) | `ShoppingBudget < ShoppingTripMinimumGil` (1,000,000) | Travelling with pocket change wastes the trip |
 
 `StartScan` (L307) first calls **`ReconcilePositionCosts()`** (L1948), which retires tracked
@@ -162,6 +170,11 @@ cost basis for stock that has since sold. See §6.4.
    plus hinted bargains, plus busiest secondary lines, plus a rotation.
 6. **Nothing is bought during scouting.** `ObservePriorityItem` (L478) records the observation,
    logs the economics, and advances.
+7. Before comparison, if an observed item's home anchor has used half its freshness
+   window, return to the home board and refresh the observed item set once. Old
+   anchors are cleared before reading, so a failed search cannot fall back to them.
+   Rebuild the plan against these prices, then revisit selected deals for live
+   price/tax checks. The final purchase guard still rejects expired home quotes.
 
 ### 2.3 Per-item pipeline — one item, discovery → BUY/REJECT
 
@@ -632,7 +645,7 @@ than as tier dominance.
 | `ProcurementBagBufferStacks` | 5 | U (0–50) | Spare stacks when not "continue stocked" |
 | `ProcurementTargetSaleSlots` | 60 | U (1–200) | Portfolio size |
 | `ProcurementInventoryReserve` | 10 | U (1–100) | Bag slots kept free |
-| `ShoppingTripMinimumFreeSaleSlots` | 10 | U (0–60) | Won't travel below this |
+| `ShoppingTripMinimumFreeSaleSlots` | 10 | U (0–60) | Wait for vacancies unless continuous shopping needs preferred replacements |
 | `ShoppingTripMinimumGil` | 1,000,000 | U (≤100M) | Won't travel below this |
 | `HomePriceMaxAgeMinutes` | 30 | U (5–30) | Resale-anchor staleness |
 | `ScoutKnowledgeMaxAgeHours` | 24 | U (1–168) | Away-observation reuse |
@@ -841,7 +854,7 @@ backstop. The check is applied in the planner *and* re-applied at the board (§2
 ```
 AvailablePurchaseSlots() = PlannedSaleSlots(repricing.LastKnownFreeSaleSlots ?? 0)
 
-PlannedSaleSlots(free):
+OrdinaryPurchaseSlots(free):
     free = MIN(free, ProcurementTargetSaleSlots)
     held = ResaleBagSlots                              ; bag stock as sale-stacks
     IF free > held            -> free − held
@@ -849,6 +862,14 @@ PlannedSaleSlots(free):
         MIN(MAX(0, free + ComfortableStockTarget − held),
             MAX(0, FreeInventorySlots − ProcurementInventoryReserve))
     ELSE                      -> MAX(0, free + ProcurementBagBufferStacks − held)
+
+preferredTarget = CEIL(actual retainer capacity * PreferredPortfolioTargetPercent / 100)
+preferredGap = MAX(0, preferredTarget - eligible preferred listed slots)
+preferredReplacementSlots = MAX(0, MIN(preferredGap, ComfortableStockTarget) - preferred bag lots)
+; Replacement exception requires continuous shopping and a complete all-retainer check.
+; Count actual bag lots, excluding personal reserves and ineligible qualities.
+PlannedSaleSlots = MIN(MAX(OrdinaryPurchaseSlots, preferredReplacementSlots), usable bag slots)
+NonPreferredSaleSlots = OrdinaryPurchaseSlots
 
 slotLimit (planner)   = MIN(FreeSaleSlots, FreeInventorySlots)
 per-item slot ceiling = EffectiveMaximumSlots(policy, rule, candidate)
@@ -865,6 +886,11 @@ liquid line no longer make a few bag slots look like a full portfolio.
 ```
 SpendableGil(newTrip):
   available = reinvest ? wallet − reserve : MIN(wallet − reserve, tripCap − spent)
+  IF any enabled, non-liquidate preferred rule -> return available
+  ELSE -> NonPreferredSpendableGil(newTrip)
+
+NonPreferredSpendableGil(newTrip):
+  available = reinvest ? wallet − reserve : MIN(wallet − reserve, tripCap − spent)
   bags = CollectBagStock() EXCLUDING PreferredStock items
   IF MIN(freeSlots, targetSlots) > bags.SaleSlots -> return available
   ; bags already cover the vacancies: apply the buffer cap
@@ -873,7 +899,11 @@ SpendableGil(newTrip):
   return MIN(available, cap)
 ```
 
-Preferred (Core) stock is **exempt** from the buffer cap. [OBS]
+Preferred stock is **exempt** from the buffer cap. [IMPL] Both planner entry points,
+the top-up pass and the live purchase guard enforce the non-preferred sub-budget.
+The planner charges buyer fees and accumulates spending across the whole basket;
+the top-up pass subtracts previously selected non-preferred spending and slots.
+Reinvestment off still respects the configured trip cap, and travel gil stays reserved.
 
 `TopUpEmptySaleSlots` (`ProcurementController.Priority.cs` L242) runs when the comparison plan
 still leaves slots empty:
@@ -1106,6 +1136,8 @@ FOR world IN route (<= 31 worlds, <= 180 minutes):
     IF !roomToBuy OR spendableGil == 0 OR bags full: BREAK
 
 # ---------- COMPARISON ----------
+IF observed home anchors have used half their lifetime:
+    refresh observed items once at the home board (clear old quotes first)
 markets  = remembered listings WHERE home anchor still fresh
 compared = BuildPlan(markets, Economics = configured policy)
 IF free slots remain:

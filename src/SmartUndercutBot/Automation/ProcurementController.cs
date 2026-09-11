@@ -179,14 +179,40 @@ public sealed partial class ProcurementController : IDisposable
         (repricing.LastKnownFreeSaleSlots ?? 0) + repricing.ListedStock.Sum(x => x.SaleSlots));
     public int PurchaseCapacity => AvailablePurchaseSlots();
     public uint ShoppingBudget => SpendableGil(newTrip: true);
-    /// <summary>
-    /// Free retainer shelf space, and whether there is enough of it to be worth a
-    /// trip. Repricing runs every few minutes and is what frees the slots, so
-    /// travelling to fill one or two of them spends most of the trip in transit.
-    /// </summary>
+    // A healthy portfolio waits for a batch of vacancies. A thin core position
+    // can shop for a bounded replacement buffer while existing stock sells.
     public int FreeSaleSlots => repricing.LastKnownFreeSaleSlots ?? 0;
     public bool HoldingForSaleSlots => repricing.LastKnownFreeSaleSlots is not null &&
-        FreeSaleSlots < configuration.Current.ShoppingTripMinimumFreeSaleSlots;
+        FreeSaleSlots < configuration.Current.ShoppingTripMinimumFreeSaleSlots && PreferredRestockSlots == 0;
+
+    public int PreferredRestockSlots
+    {
+        get
+        {
+            var config = configuration.Current;
+            if (!config.ContinueShoppingWhenStocked || !config.ProcessAllRetainers ||
+                repricing.LastKnownFreeSaleSlots is null)
+                return 0;
+            var rules = config.ProcurementRules.Where(x => x.Enabled && x.ItemId != 0 &&
+                x.PreferredStock && !x.LiquidateOnly).DistinctBy(x => x.ItemId).ToDictionary(x => x.ItemId);
+            if (rules.Count == 0) return 0;
+            bool IsCore(StockExposure stock) => rules.TryGetValue(stock.ItemId, out var rule) &&
+                ResaleStockPolicy.BuyableQuality(rule, stock.IsHighQuality, config.BuyHighQualityOnly);
+            var listed = repricing.ListedStock;
+            return AdaptiveShoppingPolicy.PreferredRestockSlots(
+                FreeSaleSlots + listed.Sum(x => x.SaleSlots),
+                listed.Where(IsCore).Sum(x => x.SaleSlots),
+                // Count actual replacement lots even before demand is loaded. The
+                // general buffer can cap a deep holding by its old per-rule limit.
+                CollectBagStock().Where(IsCore).Sum(x => (int)Math.Min(int.MaxValue,
+                    ((long)x.Quantity + Math.Max(1, rules[x.ItemId].TargetStackSize) - 1) /
+                    Math.Max(1, rules[x.ItemId].TargetStackSize))), config.PreferredPortfolioTargetPercent);
+        }
+    }
+
+    public string ShoppingStrategy => PreferredRestockSlots is > 0 and var slots
+        ? $"Preferred stock is below its portfolio target: hunt deals for up to {slots} replacement stack(s) while existing listings sell."
+        : "Preferred replacements are covered; clear stock and wait for a worthwhile batch of vacancies.";
 
     /// <summary>
     /// Travelling with pocket change spends the trip to buy one cheap stack, so the
@@ -611,7 +637,9 @@ public sealed partial class ProcurementController : IDisposable
             Portfolio: config.PortfolioGates,
             PortfolioCapacitySlots: PortfolioCapacitySlots(),
             MarketTaxPercent: config.Fees.MarketTaxPercent,
-            Economics: config.EconomicPolicy));
+            Economics: config.EconomicPolicy,
+            NonPreferredGilBudget: NonPreferredSpendableGil(),
+            NonPreferredSaleSlots: OrdinaryPurchaseSlots()));
         LogPortfolioDecisions("DEAL SEARCH", Plan);
         lastScannedFreeSaleSlots = plannedSaleSlots;
         lastScannedBudget = ShoppingBudget;
@@ -1026,6 +1054,14 @@ public sealed partial class ProcurementController : IDisposable
 
     private void FinishStockHuntWorld()
     {
+        if (priorityShopping && priorityRefreshingHome)
+        {
+            priorityRefreshingHome = false;
+            currentStockHuntRule = null;
+            market.CloseMarketBoard();
+            FinishPriorityScouting(priorityComparisonReason + " Home resale refresh completed.");
+            return;
+        }
         var completedWorld = WorldName;
         if (priorityShopping && stockHuntWorldIndex == 0 && homePrices.Values.All(x => x.Length == 0))
         {
@@ -1071,6 +1107,11 @@ public sealed partial class ProcurementController : IDisposable
 
     private void SkipStockHuntWorld(string reason)
     {
+        if (priorityShopping && priorityRefreshingHome)
+        {
+            FinishShopping("Home resale refresh failed; no purchases authorized. " + reason);
+            return;
+        }
         log.Add(AutomationLogLevel.Warning, reason);
         lifestream.Abort();
         vnavmesh.Stop();
@@ -1098,6 +1139,11 @@ public sealed partial class ProcurementController : IDisposable
     /// </summary>
     private void SkipUnreachableWorld(string reason)
     {
+        if (priorityShopping && priorityRefreshingHome)
+        {
+            FinishShopping("Could not reach home to refresh resale prices; no purchases authorized. " + reason);
+            return;
+        }
         var world = WorldName;
         log.Add(AutomationLogLevel.Warning, reason);
         lifestream.Abort();
@@ -1178,7 +1224,9 @@ public sealed partial class ProcurementController : IDisposable
             Portfolio: config.PortfolioGates,
             PortfolioCapacitySlots: PortfolioCapacitySlots(),
             MarketTaxPercent: config.Fees.MarketTaxPercent,
-            Economics: config.EconomicPolicy));
+            Economics: config.EconomicPolicy,
+            NonPreferredGilBudget: NonPreferredSpendableGil(),
+            NonPreferredSaleSlots: OrdinaryPurchaseSlots()));
         LogPortfolioDecisions("LIVE TOUR", Plan);
         detail = Plan.Orders.Count == 0
             ? $"Live tour checked {stockHuntWorlds.Count} worlds; no listing beat the live {homeWorld} resale floor and safety guards."
@@ -1395,6 +1443,12 @@ public sealed partial class ProcurementController : IDisposable
                 return;
             }
             SkipCurrentOrder($"SKIPPED BUY {currentOrder.ItemName}: budget or gil balance changed.");
+            return;
+        }
+        if (!IsPreferredStock(currentOrder.ItemId) &&
+            (OrdinaryPurchaseSlots() <= 0 || totalCost > NonPreferredSpendableGil()))
+        {
+            SkipCurrentOrder($"SKIPPED BUY {currentOrder.ItemName}: non-preferred spare-stock allowance is full; remaining gil and space are for preferred stock.");
             return;
         }
         positionUnitsBeforePurchase = (ulong)CollectOwnedStock().Where(x => x.ItemId == live.ItemId)
@@ -1888,7 +1942,13 @@ public sealed partial class ProcurementController : IDisposable
     // compound sales into the next trip - and the per-trip cap only applies when
     // the user turns reinvestment off. The travel reserve is always withheld so a
     // purchase cannot strand the character without teleport fare.
-    private uint SpendableGil(bool newTrip = false)
+    private uint SpendableGil(bool newTrip = false) => configuration.Current.ProcurementRules.Any(x =>
+        x.Enabled && x.ItemId != 0 && x.PreferredStock && !x.LiquidateOnly)
+        ? ResaleStockPolicy.SpendableGil(market.Gil, configuration.Current.ProcurementTravelReserve,
+            configuration.Current.ReinvestAvailableGil, configuration.Current.ProcurementBudget, newTrip ? 0 : gilSpent)
+        : NonPreferredSpendableGil(newTrip);
+
+    private uint NonPreferredSpendableGil(bool newTrip = false)
     {
         var config = configuration.Current;
         var available = ResaleStockPolicy.SpendableGil(market.Gil, config.ProcurementTravelReserve,
@@ -1914,7 +1974,7 @@ public sealed partial class ProcurementController : IDisposable
     /// re-read on every world and is exempt from the buffer spending cap.
     /// </summary>
     private bool IsPreferredStock(uint itemId) => configuration.Current.ProcurementRules
-        .Any(x => x.ItemId == itemId && x.PreferredStock && !x.LiquidateOnly);
+        .Any(x => x.ItemId == itemId && x.Enabled && x.PreferredStock && !x.LiquidateOnly);
 
     /// <summary>
     /// Priced on every world of the circuit: the preferred stock plus anything
@@ -2106,9 +2166,13 @@ public sealed partial class ProcurementController : IDisposable
     // Beyond the free retainer slots, keep buying a small buffer of stacks that sit
     // in the bags ready to list the moment something sells. Without it, full
     // retainers stop shopping entirely and every sale waits a whole trip to refill.
-    private int PlannedSaleSlots(int freeSaleSlots)
+    private int PlannedSaleSlots(int freeSaleSlots) => Math.Min(
+        Math.Max(OrdinaryPurchaseSlots(freeSaleSlots), PreferredRestockSlots),
+        Math.Max(0, (int)market.FreeInventorySlots - configuration.Current.ProcurementInventoryReserve));
+
+    private int OrdinaryPurchaseSlots(int? freeSaleSlots = null)
     {
-        var free = Math.Min(freeSaleSlots, configuration.Current.ProcurementTargetSaleSlots);
+        var free = Math.Min(freeSaleSlots ?? FreeSaleSlots, configuration.Current.ProcurementTargetSaleSlots);
         var held = ResaleBagSlots;
         // Fill real vacancies first. Buffer shopping gets a separate, smaller
         // budget once bags can cover those vacancies.

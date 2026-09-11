@@ -94,8 +94,11 @@ namespace SmartUndercutBot.Services
     public enum AutomationLogLevel { Debug, Information, Warning, Error }
     public sealed class AutomationLog
     {
-        public List<string> Messages { get; } = [];
-        public void Add(AutomationLogLevel level, string message) => Messages.Add(message);
+        // Discovery logs from a worker while the controller logs on the test
+        // thread. Match production's concurrent queue instead of losing writes.
+        private readonly System.Collections.Concurrent.ConcurrentQueue<string> messages = new();
+        public IReadOnlyList<string> Messages => messages.ToArray();
+        public void Add(AutomationLogLevel level, string message) => messages.Enqueue(message);
     }
     public interface IUniversalisService
     {
