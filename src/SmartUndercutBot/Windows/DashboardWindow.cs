@@ -336,7 +336,8 @@ public sealed class DashboardWindow : Window
         ImGui.TextWrapped("List existing stock first. If preferred food and potions are below their portfolio target, " +
             "hunt deals for a replacement buffer even while other listings occupy the retainers. Preferred deals can use " +
             "available gil after the travel reserve; other spare stock keeps the smaller budget, including its existing purchase cost. " +
-            "The replacement buffer is bounded at about 20% of retainer capacity, and every purchase still needs profit and demand.");
+            "On a buying visit, sweep preferred fast-mover bargains at the selected price or better, sized by demand and actual bag space. " +
+            "Then focus on listing and undercutting until the purchased replacement supply runs low.");
         ImGui.Text($"Available for the next trip: {procurement.ShoppingBudget:N0} gil   |   room for {procurement.PurchaseCapacity} stack(s)");
         ImGui.TextWrapped(procurement.ShoppingStrategy);
         if (procurement.ShoppingWaitReason is { } shoppingWait)
@@ -1160,7 +1161,7 @@ public sealed class DashboardWindow : Window
                 config.ProcurementEmergencyMaximumSlotsPerItem = emergencySlots;
                 configurationDirty = true;
             }
-            ImGui.TextDisabled("A hard concentration limit no amount of demand may exceed, so one market cannot become the entire portfolio.");
+            ImGui.TextDisabled("Limits ordinary purchase plans. Bulk preferred fast-mover bargains use the coverage target and actual bag space instead, so cheap food and potions can be bought in thousands.");
             var absorptionDays = (float)config.ProcurementAnchorAbsorptionDays;
             if (ImGui.DragFloat("Undercut absorption days", ref absorptionDays, 0.05f, 0f, 0.5f, "%.2f d"))
             {

@@ -12,7 +12,7 @@ Smart Undercutter is a Dalamud SDK 15 plugin for guarded retainer-market reprici
 
 The loop checks every retainer, fills empty slots from eligible bag stock, searches
 for profitable purchases when capacity remains, travels to buy them, then returns
-home to list them. Retainer checks repeat every 5–10 minutes by default, so sold
+home to list them. Retainer checks repeat every 5 minutes by default, so sold
 slots are detected on the next check. Bag refills get priority before shopping.
 The default priority shopper checks recent home-world sales, then live home
 prices for every configured buyable flip with sufficient demand. Item priority

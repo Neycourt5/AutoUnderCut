@@ -4,10 +4,40 @@ Running record of what changed and why, so another agent (or a later session) ca
 pick up without re-deriving the history. Newest first. `PLAN.md` holds the current
 task plan; this file holds the trail.
 
-Build: use `C:/Users/Acour/.dotnet/dotnet.exe` (SDK 10.0.400), **not** the PATH
+Build: use `C:/Users/Acour/.dotnet/dotnet.exe` (SDK 10.0.301 verified this session), **not** the PATH
 `dotnet`, which is runtime-only and fails with NETSDK1045. Set
 `DOTNET_ROOT=C:\Users\Acour\.dotnet`. `gh` is not installed; verify releases with
 `curl` against the GitHub REST API. Publishing is pre-authorized (see `AGENTS.md`).
+
+---
+## v1.0.0.69 - bulk bargain purchases, then sustained selling
+
+User wants cheap popcorn, potions and food bought in thousands when worthwhile,
+then wants the bot to stay home undercutting until more stock is needed.
+
+- Session 20260911-180428: 19:47 popcorn planning stopped at eight purchases for
+  sale capacity (seven confirmed, eighth disappeared). The later basket also
+  ran out of budget. These are different limits, not failed purchase clicks.
+- Preferred fast-mover buying visits now replan one live purchase after each
+  confirmed buy, at the selected price or better, beyond the initial basket and
+  replacement-buffer cap. Remember confirmed listing IDs and skip exhausted
+  same-item plan entries. All live identity, tax, profit, budget, demand, freshness
+  and inventory checks remain; unknown outcomes still require manual restart.
+- Bulk preferred holdings use unit coverage instead of the 20-slot ceiling.
+  Schema 44 migrates the untouched preferred target from 3 to 7 days. Custom
+  coverage settings remain. Purchased partial rows consolidate for bag counts.
+- User clarified shopping should ONLY start when relisting stock is low and gil
+  is available. The hold now applies to all existing trading stock on startup,
+  without a prior-purchase flag, and to automatic live tours too. Shopping waits
+  while the replacement buffer is at least half full and bags cover vacancies.
+  Default/migrated repeat checks and Start stock automation use five minutes.
+- Release solution build: 0 warnings/errors. Full suite: 403 passed, including
+  clearing 97 x25 listings, buying 3,960 units, wallet/trip/bag/demand limits,
+  new offers, price/quality/tax rejection, duplicate prevention, unknown outcomes,
+  expired home prices, restock scheduling and configuration migration.
+- Version 1.0.0.69 confirmed unused on origin. Publication pending; see PLAN.md.
+
+Native game operations were not exercised in this session.
 
 ---
 ## v1.0.0.65 - congested worlds are skipped, and the circuit tours by data center

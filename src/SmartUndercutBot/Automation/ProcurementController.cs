@@ -122,6 +122,8 @@ public sealed partial class ProcurementController : IDisposable
     private readonly HashSet<string> deferredWorlds = new(StringComparer.OrdinalIgnoreCase);
     private int worldSuccessfulScans;
     private readonly Dictionary<uint, int> purchasedSlotsByItem = [];
+    private readonly HashSet<(string World, uint Item, bool Hq)> finishedBargainSweeps = [];
+    private readonly HashSet<(string World, ulong Listing)> confirmedListingIds = [];
     private IReadOnlyList<PortfolioDecision> portfolioDecisions = [];
     private readonly MarketDiscoveryService? discovery;
     private PortfolioAllocationSummary? portfolioSummary;
@@ -185,6 +187,14 @@ public sealed partial class ProcurementController : IDisposable
     public bool HoldingForSaleSlots => repricing.LastKnownFreeSaleSlots is not null &&
         FreeSaleSlots < configuration.Current.ShoppingTripMinimumFreeSaleSlots && PreferredRestockSlots == 0;
 
+    private int PreferredStackSize(uint itemId) => Math.Max(1,
+        configuration.Current.ProcurementRules.FirstOrDefault(x => x.ItemId == itemId)?.TargetStackSize ?? 99);
+
+    public bool HoldingForResaleStock => configuration.Current.ContinueShoppingWhenStocked &&
+        repricing.LastKnownFreeSaleSlots is not null &&
+        ResaleBagSlots >= Math.Max(1, (ComfortableStockTarget + 1) / 2) &&
+        ResaleBagSlots >= FreeSaleSlots;
+
     public int PreferredRestockSlots
     {
         get
@@ -210,7 +220,9 @@ public sealed partial class ProcurementController : IDisposable
         }
     }
 
-    public string ShoppingStrategy => PreferredRestockSlots is > 0 and var slots
+    public string ShoppingStrategy => HoldingForResaleStock
+        ? "Relisting stock covers the next sales. Keep listing and undercutting until the replacement supply runs low."
+        : PreferredRestockSlots is > 0 and var slots
         ? $"Preferred stock is below its portfolio target: hunt deals for up to {slots} replacement stack(s) while existing listings sell."
         : "Preferred replacements are covered; clear stock and wait for a worthwhile batch of vacancies.";
 
@@ -224,6 +236,7 @@ public sealed partial class ProcurementController : IDisposable
     public string? ShoppingWaitReason => repricing.LastKnownFreeSaleSlots is null
         ? "waiting for a complete retainer check"
         : market.FreeInventorySlots <= configuration.Current.ProcurementInventoryReserve ? "waiting for free bag space"
+        : HoldingForResaleStock ? "selling existing stock first; undercutting continues until replacements run low"
         : HoldingForSaleSlots
             ? $"holding for {configuration.Current.ShoppingTripMinimumFreeSaleSlots} free sale slots " +
               $"({FreeSaleSlots} open); undercutting continues until stock sells"
@@ -818,6 +831,8 @@ public sealed partial class ProcurementController : IDisposable
             skippedPurchases = 0;
             purchasedSlotsByItem.Clear();
         }
+        finishedBargainSweeps.Clear();
+        confirmedListingIds.Clear();
         routeOutcome = string.Empty;
         TravelToCurrentWorld();
     }
@@ -1266,8 +1281,18 @@ public sealed partial class ProcurementController : IDisposable
             TravelToCurrentWorld();
             return;
         }
+        while (orderIndex < orders.Length && finishedBargainSweeps.Contains(
+                   (WorldName, orders[orderIndex].ItemId, orders[orderIndex].IsHighQuality)))
+            orderIndex++;
+        if (orderIndex >= orders.Length)
+        {
+            worldIndex++;
+            orderIndex = 0;
+            TravelToCurrentWorld();
+            return;
+        }
         currentOrder = orders[orderIndex];
-        if (AvailablePurchaseSlots() == 0)
+        if (AvailablePurchaseSlots() == 0 && !CanSweepBargains(currentOrder))
         {
             FinishShopping("Shopping stopped: all available retainer slots are reserved for purchased stock.");
             return;
@@ -1289,7 +1314,7 @@ public sealed partial class ProcurementController : IDisposable
         if (priorityShopping && !stockHuntScanning && comparisonBuyingStarted is { } started &&
             timeProvider.GetUtcNow() - started >= TimeSpan.FromMinutes(20))
         {
-            FinishShopping("Compared buying pass reached its time limit; returning to list stock and collect sales.");
+            FinishShopping("Compared buying made no purchase progress for 20 minutes; returning to list stock and collect sales.");
             return;
         }
         if (priorityShopping && currentOrder is { } checkedOrder && !HomePriceIsFresh(checkedOrder.ItemId))
@@ -1337,8 +1362,9 @@ public sealed partial class ProcurementController : IDisposable
         var rule = ShoppingRules(configuration.Current.ProcurementRules).FirstOrDefault(x => x.ItemId == currentOrder.ItemId);
         if (rule is null || !rule.Enabled || rule.LiquidateOnly ||
             !ResaleStockPolicy.BuyableQuality(rule, currentOrder.IsHighQuality, configuration.Current.BuyHighQualityOnly) ||
-            CollectOwnedStock().Where(x => x.ItemId == currentOrder.ItemId).Sum(x => x.SaleSlots) >=
-                ProcurementPlannerService.EffectiveMaximumSlots(configuration.Current.EconomicPolicy, rule, currentOrder))
+            (!CanSweepBargains(currentOrder) &&
+             CollectOwnedStock().Where(x => x.ItemId == currentOrder.ItemId).Sum(x => x.SaleSlots) >=
+                ProcurementPlannerService.EffectiveMaximumSlots(configuration.Current.EconomicPolicy, rule, currentOrder)))
         {
             SkipCurrentOrder($"SKIPPED BUY {currentOrder.ItemName}: its current rule no longer permits this order.");
             return;
@@ -1382,6 +1408,8 @@ public sealed partial class ProcurementController : IDisposable
                 x.ItemId, x.ListingId, x.RetainerId, WorldName, 0, x.PricePerUnit, x.Quantity, x.IsHighQuality)));
             scoutObservedAt[(WorldName, currentOrder.ItemId)] = timeProvider.GetUtcNow();
         }
+        if (CanSweepBargains(currentOrder) && !RefreshBargainOrder(rule))
+            return;
         if (!market.TrySelectLiveListing(currentOrder, retainerListings.OwnedRetainerIds, out var live) || live is null)
         {
             // This is the most common skip, so say what the board actually held
@@ -1405,7 +1433,8 @@ public sealed partial class ProcurementController : IDisposable
         // Validate the returned candidate independently of the UI adapter.
         if (live.ItemId != currentOrder.ItemId || live.IsHighQuality != currentOrder.IsHighQuality ||
             live.Quantity == 0 || live.Quantity > currentOrder.Quantity || live.PricePerUnit == 0 ||
-            live.PricePerUnit > currentOrder.MaximumAcceptableUnitPrice || retainerListings.OwnedRetainerIds.Contains(live.RetainerId))
+            live.PricePerUnit > currentOrder.MaximumAcceptableUnitPrice || retainerListings.OwnedRetainerIds.Contains(live.RetainerId) ||
+            confirmedListingIds.Contains((WorldName, live.ListingId)))
         {
             SkipCurrentOrder($"SKIPPED BUY {currentOrder.ItemName}: the selected live listing failed validation.");
             return;
@@ -1426,7 +1455,8 @@ public sealed partial class ProcurementController : IDisposable
             SkipCurrentOrder($"SKIPPED BUY {currentOrder.ItemName}: the live buyer tax no longer meets the profit guards.");
             return;
         }
-        if (AvailablePurchaseSlots() == 0 || market.FreeInventorySlots <= configuration.Current.ProcurementInventoryReserve)
+        if ((!CanSweepBargains(currentOrder) && AvailablePurchaseSlots() == 0) ||
+            market.FreeInventorySlots <= configuration.Current.ProcurementInventoryReserve)
         {
             FinishShopping("Resale capacity or the inventory reserve was reached; returning home to list stock.");
             return;
@@ -1530,9 +1560,14 @@ public sealed partial class ProcurementController : IDisposable
         // Owned stock just changed, so the next cap check must not use the cache.
         portfolioSummary = null;
         configuration.Current.PerItemRules[actual.ItemId] = pricingRule;
+        var sweep = CanSweepBargains(actual);
         configuration.Save();
         gilSpent += (uint)Math.Min(purchaseCost, uint.MaxValue - gilSpent);
         confirmedPurchases++;
+        // Bulk part-stack buys can legitimately take longer than 20 minutes. The
+        // watchdog measures stalled progress; home-quote freshness still applies.
+        if (priorityShopping) comparisonBuyingStarted = timeProvider.GetUtcNow();
+        confirmedListingIds.Add((WorldName, actual.ListingId));
         if (priorityShopping && stockHuntScanning && stockHuntWorldIndex == 0 && homePrices.TryGetValue(actual.ItemId, out var home))
             homePrices[actual.ItemId] = home.Where(x => x.ListingId != actual.ListingId).ToArray();
         scoutListings.RemoveAll(x => x.WorldName == actual.WorldName && x.ListingId == actual.ListingId);
@@ -1540,7 +1575,7 @@ public sealed partial class ProcurementController : IDisposable
         log.Add(AutomationLogLevel.Information,
             $"PURCHASED {actual.ItemName} x{actual.Quantity} on {actual.WorldName} at {actual.PricePerUnit:N0} gil each; " +
             $"buyer tax {currentLiveListing.TotalTax:N0} gil, tracked landed cost {landedCostPerUnit:N0} gil each.");
-        AdvanceOrder();
+        AdvanceOrder(repeatBargain: sweep);
     }
 
     private void SkipCurrentOrder(string message)
@@ -1593,7 +1628,7 @@ public sealed partial class ProcurementController : IDisposable
         return true;
     }
 
-    private void AdvanceOrder()
+    private void AdvanceOrder(bool repeatBargain = false)
     {
         if (priorityShopping && stockHuntScanning)
         {
@@ -1606,11 +1641,13 @@ public sealed partial class ProcurementController : IDisposable
         // a fresh request. This is essential when consecutive plan entries are
         // the same item: never submit against a stale listing snapshot.
         market.ResetListingRequest();
-        orderIndex++;
+        if (!repeatBargain) orderIndex++;
         currentOrder = null;
         currentLiveListing = null;
         nextActionAt = timeProvider.GetUtcNow().AddMilliseconds(1_200);
-        detail = "Waiting before the next live market request.";
+        detail = repeatBargain
+            ? "Refreshing this bargain market before buying more qualifying listings."
+            : "Waiting before the next live market request.";
         // Reuse the listings state as a throttled handoff; it will call BeginCurrentOrder.
         State = ProcurementState.WaitingForListings;
     }
@@ -1812,6 +1849,12 @@ public sealed partial class ProcurementController : IDisposable
             (AvailablePurchaseSlots() <= 0 || market.FreeInventorySlots <= configuration.Current.ProcurementInventoryReserve || ShoppingBudget == 0))
             return;
 
+        // Apply to every automatic shopping mode, including live tours, before
+        // starting a demand scan or pausing the retainer loop. Bag contents make
+        // this decision after reload too; no previous-trip flag is required.
+        if (HoldingForResaleStock || HoldingForSaleSlots || HoldingForGil)
+            return;
+
         if (configuration.Current.LiveWorldStockHuntEnabled)
         {
             if (configuration.Current.AllowAutomaticPurchases &&
@@ -1837,8 +1880,6 @@ public sealed partial class ProcurementController : IDisposable
         // Holding for shelf space or gil means no trip can result from this scan, so
         // do not spend a regional Universalis pass to reach that conclusion. The
         // capacity and income triggers above still wake it the moment a hold lifts.
-        if (HoldingForSaleSlots || HoldingForGil)
-            return;
         nextAutomaticScan = timeProvider.GetUtcNow().AddMinutes(configuration.Current.ProcurementIntervalMinutes);
         StartScan(ProcurementRunMode.AutomaticPurchase);
     }
@@ -2146,12 +2187,12 @@ public sealed partial class ProcurementController : IDisposable
             // 999 materia is not 50 stacks of trading buffer when its rule allows one
             // sale slot; counting the raw quantity made a full-looking buffer out of
             // a few deep stacks and stopped shopping entirely.
-            if (rule is not null && rule.MaximumSaleSlots > 0)
+            if (rule is not null && !rule.PreferredStock && rule.MaximumSaleSlots > 0)
                 slots = Math.Min(slots, Math.Min(config.ProcurementEmergencyMaximumSlotsPerItem,
                     Math.Max(rule.MaximumSaleSlots, InventoryCoveragePolicy.DemandJustifiedSlots(
                         HomeSalesPerDay(key.ItemId, key.IsHighQuality), config.ProcurementPreferredCoverageDays,
                         size, config.ProcurementEmergencyMaximumSlotsPerItem))));
-            if (entry is not null)
+            if (entry is not null && rule?.PreferredStock != true)
                 slots = Math.Max(slots, (int)Math.Min(entry.PendingQuantity, (long)entry.MaximumListingSlots - entry.ListingsCreated));
             if (quantity > 0)
                 stock.Add(new(key.ItemId, key.IsHighQuality, quantity, slots));

@@ -204,7 +204,7 @@ public sealed class ProcurementControllerTests
     }
 
     [Fact]
-    public void FullRetainersSearchOnScheduleEvenWhenComfortableStockIsReady()
+    public void FullRetainersKeepSellingWithoutScheduledShoppingScansWhenStockIsReady()
     {
         using var run = new Route();
         run.Config.Current.EnableStockAutomation();
@@ -217,14 +217,14 @@ public sealed class ProcurementControllerTests
         run.Game.Inventory = 12 * 99;
         Assert.Equal(0, run.Controller.PurchaseCapacity);
         run.Tick(); run.Tick();
-        Assert.Equal(2, run.Game.Scans);
+        Assert.Equal(0, run.Game.Scans);
         Assert.Equal(0, run.Game.Purchases);
         for (var i = 0; i < 50; i++) run.Tick();
-        Assert.Equal(2, run.Game.Scans);
+        Assert.Equal(0, run.Game.Scans);
         run.Tick(601); run.Tick();
-        Assert.Equal(4, run.Game.Scans);
+        Assert.Equal(0, run.Game.Scans);
         Assert.Equal(0, run.Game.Purchases);
-        Assert.Contains("comfortable trading stock", run.Controller.Status.Detail);
+        Assert.True(run.Controller.HoldingForResaleStock);
     }
 
     [Fact]
@@ -1499,7 +1499,7 @@ public sealed class ProcurementControllerTests
     }
 
     [Fact]
-    public void PriorityModeSearchesWithoutTravellingWhenTheBagTargetIsAlreadyMet()
+    public void PriorityModeWaitsAtHomeWithoutScanningWhenRelistingStockIsReady()
     {
         using var run = new Route(priority: true);
         run.Config.Current.EnableStockAutomation();
@@ -1507,15 +1507,14 @@ public sealed class ProcurementControllerTests
         run.Game.Inventory = 20 * 99;
         run.Config.Current.ProcurementRules[0].MaximumSaleSlots = 20;
         run.Tick(); run.Tick();
-        // The home world needs a full listings-and-history scan; the rest of the
-        // region only needs the cached aggregate hints.
-        Assert.Equal(1, run.Game.Scans);
-        Assert.Equal(1, run.Game.HintRequests);
+        Assert.True(run.Controller.HoldingForResaleStock);
+        Assert.Equal(0, run.Game.Scans);
+        Assert.Equal(0, run.Game.HintRequests);
         Assert.Empty(run.Game.Commands);
         Assert.Equal(0, run.Game.Purchases);
         run.Tick(601); run.Tick();
-        Assert.Equal(2, run.Game.Scans);
-        Assert.Equal(2, run.Game.HintRequests);
+        Assert.Equal(0, run.Game.Scans);
+        Assert.Equal(0, run.Game.HintRequests);
     }
 
     [Theory]

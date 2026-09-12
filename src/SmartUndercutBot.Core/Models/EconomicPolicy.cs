@@ -39,9 +39,16 @@ public sealed record ProcurementEconomicPolicy(
     int EmergencyMaximumSlotsPerItem = 20,
     // How much cheap competing inventory the market swallows before it should move
     // our resale anchor, expressed in days of demand.
-    decimal AnchorAbsorptionDays = 0.5m)
+    decimal AnchorAbsorptionDays = 0.5m,
+    // Bulk preferred fast movers are held for repeated resale, so their unit
+    // coverage replaces the ordinary per-item listing-count limit.
+    bool BulkPreferredPurchases = false)
 {
     public static ProcurementEconomicPolicy Default { get; } = new();
+
+    public bool UsesBulkStockTarget(bool preferred, decimal salesPerDay, ulong valuePerStack) =>
+        BulkPreferredPurchases && preferred && PreferredCoverageDays > 0 &&
+        salesPerDay >= HighVolumeMinimumSalesPerDay && valuePerStack >= HighVolumeMinimumValuePerSlot;
 
     /// <summary>
     /// Behaviour for callers that have not opted in: no coverage shaping, no tier

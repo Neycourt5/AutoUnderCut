@@ -1,8 +1,22 @@
 # AutoUndercutter — Purchasing, Resale & Prioritization Logic
 
 **Scope:** a factual map of the economic decision system as currently implemented
-(config schema `Version = 43`), after the profit-optimization rework described in
+(config schema `Version = 44`), after the profit-optimization rework described in
 `PROFIT_OPTIMIZATION_IMPLEMENTATION.md`.
+
+**v1.0.0.69:** preferred fast-mover buying visits now refresh and buy additional
+qualifying listings at the selected price or better, until the offers, spendable
+gil, actual bag space, fresh home reference, or unit-demand coverage runs out.
+Bulk purchases can exceed the original basket, small replacement buffer and
+ordinary per-item slot ceiling. Preferred coverage defaults to seven days (the
+old untouched three-day setting migrates; custom settings remain). Automatic
+shopping waits while relisting stock covers at least half the comfortable buffer
+and current vacancies. This applies on startup, without a previous-purchase flag,
+and to automatic live tours as well as priority shopping. Checks repeat every
+five minutes by default and when stock automation is started. Preferred
+bag capacity counts consolidated resale lots, not the number of purchase rows.
+The 20-minute buying watchdog now measures time without a confirmed purchase;
+the existing home-price freshness limit still stops buying against expired quotes.
 
 **v1.0.0.68:** adaptive scheduling now considers preferred listed stock and its
 replacement buffer. Full materia shelves no longer force idle gil to wait for ten
@@ -145,7 +159,7 @@ IF repricing.LastKnownFreeSaleSlots is null                     -> RETURN   (no 
 IF SpendableGil(...) == 0                                       -> RETURN
 IF LiveWorldStockHuntEnabled                                    -> live-hunt branch  [DEAD in shipped config]
 IF !newlyAvailableCapacity AND !incomeArrived AND now < nextAutomaticScan -> RETURN
-IF HoldingForSaleSlots OR HoldingForGil                         -> RETURN
+IF HoldingForSaleSlots OR HoldingForGil OR HoldingForResaleStock -> RETURN
 -> StartScan(AutomaticPurchase)
 ```
 
@@ -271,7 +285,7 @@ STEP 11 Live re-validation before submit  PollListings      [L1238]
 
 | # | Check | On failure |
 |---|---|---|
-| 1 | comparison pass under its 20-minute limit | FinishShopping |
+| 1 | fewer than 20 minutes since comparison began or last confirmed buy | FinishShopping |
 | 2 | home reference still fresh (≤ `HomePriceMaxAgeMinutes`, 30) | SkipCurrentOrder |
 | 3 | `AllowAutomaticPurchases` still armed | FinishShopping |
 | 4 | still on the right world, board open, Lifestream idle | FinishShopping |
@@ -622,11 +636,11 @@ than as tier dominance.
 
 | Setting | Default | Kind | Meaning |
 |---|---|---|---|
-| `ProcurementPreferredCoverageDays` | 3.0 | U (0.25–7) | Days of demand held in Core stock |
+| `ProcurementPreferredCoverageDays` | 7.0 | U (0.25–7) | Days of demand held in Core stock |
 | `ProcurementSecondaryCoverageDays` | 1.5 | U (0.25–7) | Days of demand held in Secondary stock |
 | `ProcurementOpportunisticCoverageDays` | 0.5 | U (0.1–2) | Days of demand held in cheap stock |
 | `ProcurementCoverageOvershootDays` | 1.0 | U (0–1) | How far one stack may carry holdings past target |
-| `ProcurementEmergencyMaximumSlotsPerItem` | 20 | U (1–60) | Hard concentration limit |
+| `ProcurementEmergencyMaximumSlotsPerItem` | 20 | U (1–60) | Ordinary per-item cap; bulk preferred fast movers use demand coverage |
 | `ProcurementAnchorAbsorptionDays` | 0.5 | U (0–0.5) | Cheap competing stock the market swallows |
 | `rule.MaximumSaleSlots` | 8 / 2 / 1 / 5 | U (1–60) | **A floor** beneath the demand-derived cap |
 | `ProcurementWeeklySalesSharePercent` | 25% | U (1–100) | Backstop; only used when velocity is unusable |
@@ -878,8 +892,12 @@ per-item slot ceiling = EffectiveMaximumSlots(policy, rule, candidate)
                                 CEIL(ceilingUnits / stackSize)))
 ```
 
-`ResaleBagSlots` is capped per item by the same demand-derived figure, so deep stacks of a
-liquid line no longer make a few bag slots look like a full portfolio.
+Preferred fast movers in continuous shopping use unit coverage instead of this
+per-item slot ceiling. On the buying visit, `RefreshBargainOrder` plans one more
+live purchase at a time against the current wallet and bag space. It does not
+reserve a separate physical bag slot for every small purchase row across the
+whole sweep. `ResaleBagSlots` counts preferred units as consolidated target-size
+resale lots; non-preferred holdings retain the capped calculation above.
 
 ### 8.4 Gil budget and the top-up pass
 
@@ -926,8 +944,8 @@ pass can buy good stock a little cheaper and cannot buy junk or overstock. [IMPL
 | Mechanism | Effect |
 |---|---|
 | **Inventory coverage** | The primary control: days of the market's own demand |
-| `EffectiveMaximumSlots` | Demand-derived per-item slot cap, floored at `rule.MaximumSaleSlots` |
-| `EmergencyMaximumSlotsPerItem` | Hard limit (20) no amount of demand may exceed |
+| `EffectiveMaximumSlots` | Demand-derived ordinary cap; bulk preferred fast movers use unit coverage |
+| `EmergencyMaximumSlotsPerItem` | Ordinary limit (20); does not restrict bulk preferred fast movers |
 | Opportunistic slot cap | ≤10% of portfolio slots, counting stock already listed |
 | Opportunistic capital cap | ≤10% of the shopping budget |
 | Slot-value gate | ≥`MinimumProfitPerSaleSlot` profit per slot for non-Core |
@@ -939,8 +957,11 @@ pass can buy good stock a little cheaper and cannot buy junk or overstock. [IMPL
 Opportunistic, is held to the 35% bar, is limited to half a day of its own demand (typically one
 stack), is weighted 0.6× in the ranking, and is capped at a tenth of both slots and capital.
 
-**Can it overspend on one excellent item?** Deliberately, yes — up to its coverage target and
-the 20-slot emergency limit. That is the intended behaviour for markets like Caramel Popcorn.
+**Can it concentrate on one excellent item?** Yes: bulk preferred fast movers such
+as Caramel Popcorn can use the spendable wallet up to their coverage target and
+actual bag-space limit. Thousands of units are allowed when demand supports them.
+This is an explicit preference for finishing a good local stock-up before moving
+on, rather than preserving the original regional basket's exact allocation.
 
 ---
 

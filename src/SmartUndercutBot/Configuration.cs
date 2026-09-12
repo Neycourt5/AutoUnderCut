@@ -7,12 +7,12 @@ namespace SmartUndercutBot;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 43;
+    public int Version { get; set; } = 44;
     public bool AutomationEnabled { get; set; }
     public bool ProcessAllRetainers { get; set; } = true;
     public bool RepeatBellRuns { get; set; }
     public int RepeatMinimumMinutes { get; set; } = 5;
-    public int RepeatMaximumMinutes { get; set; } = 10;
+    public int RepeatMaximumMinutes { get; set; } = 5;
     public bool AllowAutomaticWrites { get; set; }
     public bool OpenDashboardOnRetainer { get; set; } = true;
     public int MinimumDelayMs { get; set; } = 250;
@@ -52,7 +52,7 @@ public sealed class Configuration : IPluginConfiguration
     // How much stock to hold, measured in days of each market's own observed sales.
     // This is what lets an exceptional high-volume line absorb real capital while
     // stopping a slow line from accumulating dead inventory, whatever its ROI.
-    public decimal ProcurementPreferredCoverageDays { get; set; } = 3m;
+    public decimal ProcurementPreferredCoverageDays { get; set; } = 7m;
     public decimal ProcurementSecondaryCoverageDays { get; set; } = 1.5m;
     public decimal ProcurementOpportunisticCoverageDays { get; set; } = 0.5m;
     // Stacks rarely land exactly on target. Buying is only allowed while holdings are
@@ -181,7 +181,8 @@ public sealed class Configuration : IPluginConfiguration
         LowValueRoiPercent: ProcurementLowValueRoiPercent,
         AbsoluteMinimumRoiPercent: ProcurementAbsoluteMinimumRoiPercent,
         EmergencyMaximumSlotsPerItem: ProcurementEmergencyMaximumSlotsPerItem,
-        AnchorAbsorptionDays: ProcurementAnchorAbsorptionDays);
+        AnchorAbsorptionDays: ProcurementAnchorAbsorptionDays,
+        BulkPreferredPurchases: ContinueShoppingWhenStocked);
 
     public PortfolioGates PortfolioGates => new(
         PreferredPortfolioTargetPercent, OpportunisticPortfolioMaximumPercent, ProcurementMinimumProfitPerSaleSlot);
@@ -195,6 +196,7 @@ public sealed class Configuration : IPluginConfiguration
         AutomationEnabled = true;
         ProcessAllRetainers = true;
         RepeatBellRuns = true;
+        RepeatMinimumMinutes = RepeatMaximumMinutes = 5;
         AllowAutomaticWrites = true;
         AutomaticProcurementEnabled = true;
         AllowAutomaticPurchases = true;
@@ -611,7 +613,15 @@ public sealed class Configuration : IPluginConfiguration
                 discovered.PreferredStock = false;
             Version = 43;
         }
-        Version = Math.Max(Version, 43);
+        if (Version < 44)
+        {
+            // Bulk food/potion trips should supply thousands of units when demand
+            // supports them. Preserve a target the user explicitly changed.
+            if (ProcurementPreferredCoverageDays == 3m) ProcurementPreferredCoverageDays = 7m;
+            RepeatMinimumMinutes = RepeatMaximumMinutes = 5;
+            Version = 44;
+        }
+        Version = Math.Max(Version, 44);
         ProcurementPreferredCoverageDays = Math.Clamp(ProcurementPreferredCoverageDays, 0.25m, 7m);
         ProcurementSecondaryCoverageDays = Math.Clamp(ProcurementSecondaryCoverageDays, 0.25m, 7m);
         ProcurementOpportunisticCoverageDays = Math.Clamp(ProcurementOpportunisticCoverageDays, 0.1m, 2m);

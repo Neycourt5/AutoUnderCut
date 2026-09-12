@@ -19,6 +19,7 @@
     <Compile Include="../../src/SmartUndercutBot/Services/IMarketDataService.cs" Link="Production/IMarketDataService.cs" />
     <Compile Include="../../src/SmartUndercutBot/Automation/ProcurementController.cs" Link="Production/ProcurementController.cs" />
     <Compile Include="../../src/SmartUndercutBot/Automation/ProcurementController.Priority.cs" Link="Production/ProcurementController.Priority.cs" />
+    <Compile Include="../../src/SmartUndercutBot/Automation/ProcurementController.Bargains.cs" Link="Production/ProcurementController.Bargains.cs" />
     <Compile Include="../../src/SmartUndercutBot/Automation/StockAutomationController.cs" Link="Production/StockAutomationController.cs" />
     <Compile Include="../../src/SmartUndercutBot/Configuration.cs" Link="Production/Configuration.cs" />
     <Compile Include="../../src/SmartUndercutBot/Services/ProcurementLedger.cs" Link="Production/ProcurementLedger.cs" />

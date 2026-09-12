@@ -601,6 +601,9 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
     public static int EffectiveMaximumSlots(
         ProcurementEconomicPolicy policy, ProcurementRule rule, ProcurementOrder candidate)
     {
+        if (policy.UsesBulkStockTarget(rule.PreferredStock, candidate.SalesPerDay,
+                (ulong)candidate.TargetSalePrice * (uint)Math.Max(1, rule.TargetStackSize)))
+            return int.MaxValue;
         var days = policy.CoverageDaysFor(candidate.Tier);
         if (days <= 0)
             return rule.MaximumSaleSlots;

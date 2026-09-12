@@ -1,3 +1,25 @@
+# Current: finish preferred bargain purchases, then sell stock
+
+User reports leaving many cheap popcorn listings after only a few buys. Standing
+AGENTS.md authorization covers validation and GitHub/Dalamud publication.
+
+- [x] Inspect controller, planner and live session log. At 19:47 the planner chose
+      eight x99 popcorn orders and rejected more for sale capacity; seven bought,
+      one disappeared. At 21:32 the next basket also reached its budget limit.
+- [x] Refresh and sweep affordable preferred fast-mover bargains at the selected
+      price or better, beyond the small buffer and original order count. Preserve
+      demand coverage, current home prices, ROI/tax, wallet and bag reserves.
+- [x] Hold new shopping while relisting stock covers sales, including startup and
+      live tours. User clarified only shop when low on stock with enough gil;
+      default, migrated and Start stock automation checks now use five minutes.
+- [x] Add 19 controller regressions, update explanations, pass Release build/tests:
+      403 passed; solution build 0 warnings/errors with SDK 10.0.301.
+      Preferred coverage defaults/migrates from 3 to 7 days; custom values kept.
+- [ ] Bump to unused higher version, commit/push main and annotated tag.
+- [ ] Wait for Actions and verify public latest repo.json and ZIP.
+
+Native game operations have not been exercised in this session.
+
 # Completed: v1.0.0.68 adaptive reinvestment
 
 User reports ~4M idle gil while full retainers repeatedly list/reprice cheap
