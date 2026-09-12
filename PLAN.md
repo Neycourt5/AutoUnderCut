@@ -1,4 +1,4 @@
-# Current: finish preferred bargain purchases, then sell stock
+# Completed: v1.0.0.69 bulk bargains, then five-minute undercuts
 
 User reports leaving many cheap popcorn listings after only a few buys. Standing
 AGENTS.md authorization covers validation and GitHub/Dalamud publication.
@@ -15,8 +15,13 @@ AGENTS.md authorization covers validation and GitHub/Dalamud publication.
 - [x] Add 19 controller regressions, update explanations, pass Release build/tests:
       403 passed; solution build 0 warnings/errors with SDK 10.0.301.
       Preferred coverage defaults/migrates from 3 to 7 days; custom values kept.
-- [ ] Bump to unused higher version, commit/push main and annotated tag.
-- [ ] Wait for Actions and verify public latest repo.json and ZIP.
+- [x] Version 1.0.0.69, commit f75f7e2 pushed to origin/main with annotated tag.
+      Release workflow 34668817044 and Build 34668816525 both succeeded.
+- [x] Verified public latest repo.json and SmartUndercutBot.zip. Installer and ZIP
+      manifests plus plugin assembly all report 1.0.0.69; API 15; both DLLs present.
+      ZIP 602,127 bytes; install/update URLs unchanged. SHA-256:
+      91B4EAD4EF049A99FC967295195867F11F661DB9D601773A2EE9F93DD18E9A80.
+      Ready to update through the in-game Dalamud installer.
 
 Native game operations have not been exercised in this session.
 

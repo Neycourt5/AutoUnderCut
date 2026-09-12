@@ -35,7 +35,12 @@ then wants the bot to stay home undercutting until more stock is needed.
   clearing 97 x25 listings, buying 3,960 units, wallet/trip/bag/demand limits,
   new offers, price/quality/tax rejection, duplicate prevention, unknown outcomes,
   expired home prices, restock scheduling and configuration migration.
-- Version 1.0.0.69 confirmed unused on origin. Publication pending; see PLAN.md.
+- Published commit f75f7e2 to main with annotated v1.0.0.69. Release workflow
+  34668817044 and Build 34668816525 both succeeded. Public latest installer JSON,
+  ZIP manifest and plugin DLL verified at 1.0.0.69, API 15; both DLLs present.
+  ZIP: 602,127 bytes, SHA-256
+  91B4EAD4EF049A99FC967295195867F11F661DB9D601773A2EE9F93DD18E9A80.
+  Installer URL unchanged. Ready for the in-game Dalamud update.
 
 Native game operations were not exercised in this session.
 
