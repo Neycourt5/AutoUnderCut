@@ -337,7 +337,8 @@ public sealed class DashboardWindow : Window
             "hunt deals for a replacement buffer even while other listings occupy the retainers. Preferred deals can use " +
             "available gil after the travel reserve; other spare stock keeps the smaller budget, including its existing purchase cost. " +
             "On a buying visit, sweep preferred fast-mover bargains at the selected price or better, sized by demand and actual bag space. " +
-            "Then focus on listing and undercutting until the purchased replacement supply runs low.");
+            "Open sale slots allow normal shopping. Full retainers with backup stock keep listing and undercutting, " +
+            "with deal hunts at least an hour apart. Preferred purchases still follow demand and inventory limits.");
         ImGui.Text($"Available for the next trip: {procurement.ShoppingBudget:N0} gil   |   room for {procurement.PurchaseCapacity} stack(s)");
         ImGui.TextWrapped(procurement.ShoppingStrategy);
         if (procurement.ShoppingWaitReason is { } shoppingWait)
@@ -1217,12 +1218,12 @@ public sealed class DashboardWindow : Window
             }
             ImGui.TextDisabled("A world/item pair already seen this recently is not searched again, so trips skim only what is not already known.");
             var minimumSlots = config.ShoppingTripMinimumFreeSaleSlots;
-            if (InputInt("Free sale slots before a trip", ref minimumSlots, 0, 60))
+            if (InputInt("Free sale slots before a fixed-buffer trip", ref minimumSlots, 0, 60))
             {
                 config.ShoppingTripMinimumFreeSaleSlots = minimumSlots;
                 configurationDirty = true;
             }
-            ImGui.TextWrapped("Wait for this many vacancies when preferred stock is covered. Continuous shopping can leave sooner to rebuild a thin food/potion position. 0 disables the vacancy hold.");
+            ImGui.TextWrapped("Applies when comfortable-stock mode is off. With it on, any open sale slots allow shopping; full retainers with backup stock hunt every six scan intervals, at least 60 minutes apart. 0 disables the fixed-mode vacancy hold.");
             var minimumGil = config.ShoppingTripMinimumGil;
             if (InputUInt("Gil needed before a trip", ref minimumGil, 0, 100_000_000))
             {

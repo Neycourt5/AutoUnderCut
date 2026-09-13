@@ -1,3 +1,24 @@
+# Current: publish v1.0.0.70 shopping cadence fix
+
+User reports almost 7M gil and open slots but no shopping. Latest local session
+shows 36/60 occupied sale slots. v1.0.0.69's bag-stock hold can suppress trips
+indefinitely; the older vacancy hold and purchase buffer can also block scouting.
+
+- [x] Inspect scheduler, live configuration, tests and latest retainer log.
+- [x] Allow normal shopping with vacancies; full shelves plus backup stock slow
+      automatic hunts to at least hourly without suppressing them indefinitely.
+- [x] Keep listing/undercutting first; allow preferred deals within existing
+      demand, quality, fee, wallet and physical inventory limits.
+- [x] Add 15 scheduling regressions and revise superseded hold expectations.
+      Full stocked scouts visit away worlds even when purchase capacity is zero.
+      Dashboard/docs updated. Release tests: 418 passed; solution build: zero
+      warnings/errors using SDK 10.0.400, single-process MSBuild.
+      Version 1.0.0.70 confirmed unused on origin; diff reviewed.
+- [ ] Increment to unused version, commit/push main and annotated release tag.
+- [ ] Wait for release workflow and verify public latest repo.json and ZIP.
+
+Native game operations have not been exercised in this session.
+
 # Completed: v1.0.0.69 bulk bargains, then five-minute undercuts
 
 User reports leaving many cheap popcorn listings after only a few buys. Standing

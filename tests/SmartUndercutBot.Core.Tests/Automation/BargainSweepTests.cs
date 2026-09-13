@@ -159,7 +159,7 @@ public sealed class BargainSweepTests
     [InlineData(true, false)]
     [InlineData(false, false)]
     [InlineData(true, true)]
-    public void ExistingRelistingStockHoldsShoppingUntilReplacementsAreLow(bool preferred, bool liveTour)
+    public void ExistingRelistingStockDoesNotBlockShoppingWithOpenShelves(bool preferred, bool liveTour)
     {
         using var run = BulkRoute(97, 25);
         run.Config.Current.EnableStockAutomation();
@@ -167,19 +167,14 @@ public sealed class BargainSweepTests
         run.Config.Current.LiveWorldStockHuntEnabled = liveTour;
         run.Config.Current.ShoppingTripMinimumGil = 1_000_000;
         run.Config.Current.ShoppingTripMinimumFreeSaleSlots = 10;
+        run.Repricing.LastKnownFreeSaleSlots = 3;
         run.Game.Inventory = 11 * 99; // one sale below the old 12-stack target
-        Assert.True(run.Controller.HoldingForResaleStock);
-        Assert.Contains("selling existing stock", run.Controller.ShoppingWaitReason);
-        run.Tick(3600);
-        Assert.Equal(0, run.Game.Scans);
-        Assert.Empty(run.Game.Commands);
-        run.Game.Inventory = 5 * 99;
         Assert.False(run.Controller.HoldingForResaleStock);
-        run.Config.Current.LiveWorldStockHuntEnabled = false;
-        // Ordinary stock still waits for a batch of vacancies once it runs low.
-        run.Repricing.LastKnownFreeSaleSlots = 10;
+        Assert.False(run.Controller.HoldingForSaleSlots);
+        Assert.Null(run.Controller.ShoppingWaitReason);
         run.Tick();
-        Assert.Equal(1, run.Game.Scans);
+        Assert.True(run.Controller.IsActive);
+        Assert.Equal(liveTour ? 0 : 1, run.Game.Scans);
     }
 
     [Theory]

@@ -88,6 +88,7 @@ public sealed partial class ProcurementController : IDisposable
     private DateTimeOffset nextActionAt;
     private DateTimeOffset nextAutomaticScan;
     private DateTimeOffset nextLiveStockHunt;
+    private DateTimeOffset lastDealHuntAt;
     private DateTimeOffset resumeStoppedRouteAt = DateTimeOffset.MaxValue;
     private int worldIndex;
     private int orderIndex;
@@ -165,6 +166,7 @@ public sealed partial class ProcurementController : IDisposable
         this.timeProvider = timeProvider ?? TimeProvider.System;
         nextAutomaticScan = this.timeProvider.GetUtcNow().AddMinutes(configuration.Current.ProcurementIntervalMinutes);
         nextLiveStockHunt = this.timeProvider.GetUtcNow();
+        lastDealHuntAt = this.timeProvider.GetUtcNow();
         framework.Update += OnFrameworkUpdate;
     }
 
@@ -181,19 +183,24 @@ public sealed partial class ProcurementController : IDisposable
         (repricing.LastKnownFreeSaleSlots ?? 0) + repricing.ListedStock.Sum(x => x.SaleSlots));
     public int PurchaseCapacity => AvailablePurchaseSlots();
     public uint ShoppingBudget => SpendableGil(newTrip: true);
-    // A healthy portfolio waits for a batch of vacancies. A thin core position
-    // can shop for a bounded replacement buffer while existing stock sells.
+    // Continuous trading uses stock levels to choose its cadence. Only the
+    // optional fixed-buffer mode requires a minimum batch of vacancies.
     public int FreeSaleSlots => repricing.LastKnownFreeSaleSlots ?? 0;
-    public bool HoldingForSaleSlots => repricing.LastKnownFreeSaleSlots is not null &&
-        FreeSaleSlots < configuration.Current.ShoppingTripMinimumFreeSaleSlots && PreferredRestockSlots == 0;
+    public bool HoldingForSaleSlots => !configuration.Current.ContinueShoppingWhenStocked &&
+        repricing.LastKnownFreeSaleSlots is not null &&
+        FreeSaleSlots < configuration.Current.ShoppingTripMinimumFreeSaleSlots;
 
     private int PreferredStackSize(uint itemId) => Math.Max(1,
         configuration.Current.ProcurementRules.FirstOrDefault(x => x.ItemId == itemId)?.TargetStackSize ?? 99);
 
-    public bool HoldingForResaleStock => configuration.Current.ContinueShoppingWhenStocked &&
+    public bool HasAmpleResaleStock => configuration.Current.ContinueShoppingWhenStocked &&
         repricing.LastKnownFreeSaleSlots is not null &&
-        ResaleBagSlots >= Math.Max(1, (ComfortableStockTarget + 1) / 2) &&
-        ResaleBagSlots >= FreeSaleSlots;
+        FreeSaleSlots == 0 && PreferredRestockSlots == 0 &&
+        ResaleBagSlots >= Math.Max(1, (ComfortableStockTarget + 1) / 2);
+
+    public int StockedDealHuntIntervalMinutes => Math.Max(60, configuration.Current.ProcurementIntervalMinutes * 6);
+    private DateTimeOffset NextStockedDealHunt => lastDealHuntAt.AddMinutes(StockedDealHuntIntervalMinutes);
+    public bool HoldingForResaleStock => HasAmpleResaleStock && timeProvider.GetUtcNow() < NextStockedDealHunt;
 
     public int PreferredRestockSlots
     {
@@ -220,11 +227,13 @@ public sealed partial class ProcurementController : IDisposable
         }
     }
 
-    public string ShoppingStrategy => HoldingForResaleStock
-        ? "Relisting stock covers the next sales. Keep listing and undercutting until the replacement supply runs low."
+    public string ShoppingStrategy => HasAmpleResaleStock
+        ? $"Retainers are full with replacement stock ready. Keep listing and undercutting; hunt deals every {StockedDealHuntIntervalMinutes} minutes."
+        : FreeSaleSlots > 0 && configuration.Current.ContinueShoppingWhenStocked
+        ? "Sale slots are open: list available bag stock first, then hunt deals when gil and bag space allow."
         : PreferredRestockSlots is > 0 and var slots
         ? $"Preferred stock is below its portfolio target: hunt deals for up to {slots} replacement stack(s) while existing listings sell."
-        : "Preferred replacements are covered; clear stock and wait for a worthwhile batch of vacancies.";
+        : "Keep listing and undercutting; check for deals when gil and bag space allow.";
 
     /// <summary>
     /// Travelling with pocket change spends the trip to buy one cheap stack, so the
@@ -236,16 +245,14 @@ public sealed partial class ProcurementController : IDisposable
     public string? ShoppingWaitReason => repricing.LastKnownFreeSaleSlots is null
         ? "waiting for a complete retainer check"
         : market.FreeInventorySlots <= configuration.Current.ProcurementInventoryReserve ? "waiting for free bag space"
-        : HoldingForResaleStock ? "selling existing stock first; undercutting continues until replacements run low"
         : HoldingForSaleSlots
             ? $"holding for {configuration.Current.ShoppingTripMinimumFreeSaleSlots} free sale slots " +
               $"({FreeSaleSlots} open); undercutting continues until stock sells"
         : HoldingForGil
             ? $"holding for a {configuration.Current.ShoppingTripMinimumGil:N0} gil shopping stock " +
               $"({ShoppingBudget:N0} spendable); undercutting continues until sales build it up"
-        : AvailablePurchaseSlots() == 0 ? configuration.Current.ContinueShoppingWhenStocked
-            ? $"comfortable trading stock is ready ({ResaleBagSlots}/{ComfortableStockTarget} sale stacks); watching for restocks"
-            : "the fixed spare-stock target is reached"
+        : AvailablePurchaseSlots() == 0 && !configuration.Current.ContinueShoppingWhenStocked
+            ? "the fixed spare-stock target is reached"
         : ShoppingBudget == 0 ? "waiting for sale income or room in the buffer budget" : null;
     public string? TravelReadinessIssue => !lifestream.IsAvailable
         ? "Enable Lifestream to travel and return home."
@@ -277,7 +284,16 @@ public sealed partial class ProcurementController : IDisposable
         State, detail, confirmedPurchases, Plan.Orders.Count, gilSpent,
         configuration.Current.AutomaticProcurementEnabled && !RequiresManualRestart
             ? State is ProcurementState.Halted or ProcurementState.Faulted ? resumeStoppedRouteAt
-                : configuration.Current.LiveWorldStockHuntEnabled ? nextLiveStockHunt : nextAutomaticScan : null);
+                : NextScheduledScan : null);
+
+    private DateTimeOffset NextScheduledScan
+    {
+        get
+        {
+            var scheduled = configuration.Current.LiveWorldStockHuntEnabled ? nextLiveStockHunt : nextAutomaticScan;
+            return HasAmpleResaleStock && NextStockedDealHunt > scheduled ? NextStockedDealHunt : scheduled;
+        }
+    }
 
     public void ScanNow() => StartScan(ProcurementRunMode.None);
 
@@ -615,6 +631,7 @@ public sealed partial class ProcurementController : IDisposable
         if (priorityShopping)
         {
             var markets = scanTask.Result;
+            lastDealHuntAt = timeProvider.GetUtcNow();
             scanTask = null;
             lastScannedFreeSaleSlots = AvailablePurchaseSlots();
             lastScannedBudget = ShoppingBudget;
@@ -657,6 +674,8 @@ public sealed partial class ProcurementController : IDisposable
         lastScannedFreeSaleSlots = plannedSaleSlots;
         lastScannedBudget = ShoppingBudget;
         scanTask = null;
+        if (runAfterScan == ProcurementRunMode.AutomaticPurchase)
+            lastDealHuntAt = timeProvider.GetUtcNow();
         nextAutomaticScan = timeProvider.GetUtcNow().AddMinutes(config.ProcurementIntervalMinutes);
         State = ProcurementState.PlanReady;
         detail = Plan.Orders.Count == 0
@@ -700,15 +719,16 @@ public sealed partial class ProcurementController : IDisposable
         }
         if (HoldingForSaleSlots || HoldingForGil)
         {
-            // The same holds the priority route uses: a trip is not worth taking for
-            // a couple of slots, or with pocket change, when repricing will free a
-            // batch of slots and bring in gil shortly.
+            // Match the priority route's gil requirement and the optional
+            // fixed-buffer vacancy target. Stocked cadence is handled by the
+            // automatic scheduler so an explicit manual hunt can leave now.
             HaltForRetry(ShoppingWaitReason is { } hold
                 ? char.ToUpperInvariant(hold[0]) + hold[1..] + "."
                 : "Holding until there is shelf space and gil worth travelling for.");
             return;
         }
-        if (AvailablePurchaseSlots() == 0 || market.FreeInventorySlots <= configuration.Current.ProcurementInventoryReserve || ShoppingBudget == 0)
+        if ((!configuration.Current.ContinueShoppingWhenStocked && AvailablePurchaseSlots() == 0) ||
+            market.FreeInventorySlots <= configuration.Current.ProcurementInventoryReserve || ShoppingBudget == 0)
         {
             HaltForRetry("No shopping capacity: list pending stock first and keep bag space and gil available.");
             return;
@@ -720,7 +740,7 @@ public sealed partial class ProcurementController : IDisposable
             return;
         }
         stockHuntRules = ResaleStockPolicy.SelectTourRules(
-            configuration.Current.ProcurementRules, IsBelowStockThreshold,
+            configuration.Current.ProcurementRules, ShouldScoutRule,
             configuration.Current.LiveWorldStockHuntMaximumItems).ToList();
         if (stockHuntRules.Count == 0)
         {
@@ -764,7 +784,8 @@ public sealed partial class ProcurementController : IDisposable
         currentStockHuntRule = null;
         stockHuntScanning = true;
         nextLiveStockHunt = timeProvider.GetUtcNow().AddMinutes(configuration.Current.LiveWorldStockHuntCooldownMinutes);
-        detail = $"Starting live stock hunt for {stockHuntRules.Count} low-stock item(s) (maximum 8) across {stockHuntWorlds.Count} North American worlds.";
+        lastDealHuntAt = timeProvider.GetUtcNow();
+        detail = $"Starting live stock hunt for {stockHuntRules.Count} configured item(s) (maximum 8) across {stockHuntWorlds.Count} North American worlds.";
         log.Add(AutomationLogLevel.Information, detail);
         TravelToCurrentWorld();
     }
@@ -1845,20 +1866,19 @@ public sealed partial class ProcurementController : IDisposable
         if (repricing.LastKnownFreeSaleSlots is null ||
             ResaleStockPolicy.SpendableGil(market.Gil, configuration.Current.ProcurementTravelReserve, true, 0) == 0)
             return;
-        if (!configuration.Current.ContinueShoppingWhenStocked &&
-            (AvailablePurchaseSlots() <= 0 || market.FreeInventorySlots <= configuration.Current.ProcurementInventoryReserve || ShoppingBudget == 0))
+        if (ShoppingWaitReason is not null)
             return;
 
-        // Apply to every automatic shopping mode, including live tours, before
-        // starting a demand scan or pausing the retainer loop. Bag contents make
-        // this decision after reload too; no previous-trip flag is required.
-        if (HoldingForResaleStock || HoldingForSaleSlots || HoldingForGil)
+        // A stocked portfolio slows hunts rather than disabling them. Keep this
+        // ahead of income/capacity triggers so routine collections cannot bypass
+        // the cooldown. Open shelves or thin preferred stock lift it immediately.
+        if (HoldingForResaleStock)
             return;
 
         if (configuration.Current.LiveWorldStockHuntEnabled)
         {
             if (configuration.Current.AllowAutomaticPurchases &&
-                timeProvider.GetUtcNow() >= nextLiveStockHunt && HasLowCuratedStock())
+                timeProvider.GetUtcNow() >= nextLiveStockHunt && HasScoutableStock())
                 StartLiveStockHunt();
 
             // Live-market mode deliberately does not fall through to an automatic
@@ -1884,9 +1904,12 @@ public sealed partial class ProcurementController : IDisposable
         StartScan(ProcurementRunMode.AutomaticPurchase);
     }
 
-    private bool HasLowCuratedStock() => ResaleStockPolicy.SelectTourRules(
-        configuration.Current.ProcurementRules, IsBelowStockThreshold,
+    private bool HasScoutableStock() => ResaleStockPolicy.SelectTourRules(
+        configuration.Current.ProcurementRules, ShouldScoutRule,
         configuration.Current.LiveWorldStockHuntMaximumItems).Count > 0;
+
+    private bool ShouldScoutRule(ProcurementRule rule) =>
+        configuration.Current.ContinueShoppingWhenStocked || IsBelowStockThreshold(rule);
 
     // Count only the qualities a rule actually trades, so a normal-quality food or
     // potion is not judged by an HQ stock level it will never have.
@@ -1942,6 +1965,7 @@ public sealed partial class ProcurementController : IDisposable
         State = ProcurementState.Completed;
         detail = message;
         nextAutomaticScan = timeProvider.GetUtcNow().AddMinutes(configuration.Current.ProcurementIntervalMinutes);
+        lastDealHuntAt = timeProvider.GetUtcNow();
         log.Add(AutomationLogLevel.Information, message);
     }
 
@@ -2208,8 +2232,18 @@ public sealed partial class ProcurementController : IDisposable
     // in the bags ready to list the moment something sells. Without it, full
     // retainers stop shopping entirely and every sale waits a whole trip to refill.
     private int PlannedSaleSlots(int freeSaleSlots) => Math.Min(
-        Math.Max(OrdinaryPurchaseSlots(freeSaleSlots), PreferredRestockSlots),
+        Math.Max(OrdinaryPurchaseSlots(freeSaleSlots), PreferredDealSlots),
         Math.Max(0, (int)market.FreeInventorySlots - configuration.Current.ProcurementInventoryReserve));
+
+    // Give preferred deals room to reach the planner even when the small general
+    // buffer is covered. Existing listed/bag units still count against demand and
+    // concentration limits there and at purchase time. Ordinary stock keeps its
+    // separate capacity and spending caps; physical bag space remains mandatory.
+    private int PreferredDealSlots => configuration.Current.ContinueShoppingWhenStocked &&
+        configuration.Current.ProcessAllRetainers && repricing.LastKnownFreeSaleSlots is not null &&
+        FreeSaleSlots + repricing.ListedStock.Sum(x => x.SaleSlots) > 0 &&
+        configuration.Current.ProcurementRules.Any(x => x.Enabled && x.ItemId != 0 && x.PreferredStock && !x.LiquidateOnly)
+            ? ComfortableStockTarget : 0;
 
     private int OrdinaryPurchaseSlots(int? freeSaleSlots = null)
     {

@@ -111,9 +111,9 @@ public sealed class Configuration : IPluginConfiguration
     // re-reads it for free anyway. Away-world observations only decide where to look
     // and what to compare, and those barely move within a day.
     public int ScoutKnowledgeMaxAgeHours { get; set; } = 24;
-    // A healthy portfolio waits for a batch of vacancies. Continuous shopping can
-    // leave sooner when preferred listed stock is below target and its bounded
-    // replacement buffer is short. Zero disables the vacancy hold entirely.
+    // Optional fixed-buffer mode waits for a batch of vacancies. Continuous
+    // trading shops with any open shelves and uses a slower cadence when stocked.
+    // Zero disables the fixed-mode vacancy hold entirely.
     public int ShoppingTripMinimumFreeSaleSlots { get; set; } = 10;
     // Travelling with pocket change buys one cheap stack and wastes the trip. Hold
     // until there is a real war chest to shop with. Zero disables the hold.

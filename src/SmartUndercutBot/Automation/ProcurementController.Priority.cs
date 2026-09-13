@@ -433,13 +433,13 @@ public sealed partial class ProcurementController
             return true;
         }
         var config = configuration.Current;
-        // Keep shopping while the buffer is short on either spread or value. A bag
-        // full of cheap dye meets the stack target without being worth selling, and
-        // returning then leaves gil idle and the good stock unbought.
-        var roomToBuy = AvailablePurchaseSlots() > 0 ||
+        // Continuous trading still scouts on its slower stocked schedule. A full
+        // buffer may prevent buys, but must not turn the scheduled hunt into an
+        // immediate return after the home price check.
+        var roomToScout = config.ContinueShoppingWhenStocked || AvailablePurchaseSlots() > 0 ||
             !ResaleStockPolicy.BufferIsComfortable(ResaleBagSlots, ComfortableStockTarget,
                 ResaleBagValue, config.ProcurementBufferValueTarget);
-        if (roomToBuy && SpendableGil() > 0 &&
+        if (roomToScout && SpendableGil() > 0 &&
             market.FreeInventorySlots > config.ProcurementInventoryReserve &&
             priorityWorldsCompleted < config.PriorityWorldsPerTrip &&
             timeProvider.GetUtcNow() - priorityDepartedAt < TimeSpan.FromMinutes(config.PriorityMinutesPerTrip))

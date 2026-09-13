@@ -112,7 +112,7 @@ public sealed class ProcurementControllerTests
     }
 
     [Fact]
-    public void DeepPreferredBufferStopsAdaptiveTripsEvenBeforeDemandIsLoaded()
+    public void DeepPreferredBufferSlowsTripsEvenBeforeDemandIsLoaded()
     {
         using var run = new Route(priority: true);
         run.Config.Current.EnableStockAutomation();
@@ -124,7 +124,8 @@ public sealed class ProcurementControllerTests
         run.Game.Inventory = 12 * 99;
         run.Game.Gil = 4_000_000;
         Assert.Equal(0, run.Controller.PreferredRestockSlots);
-        Assert.True(run.Controller.HoldingForSaleSlots);
+        Assert.False(run.Controller.HoldingForSaleSlots);
+        Assert.True(run.Controller.HoldingForResaleStock);
         run.Tick(601);
         Assert.Equal(0, run.Game.Scans);
         Assert.Empty(run.Game.Commands);
@@ -162,7 +163,7 @@ public sealed class ProcurementControllerTests
         run.Repricing.LastKnownFreeSaleSlots = 0;
         run.Repricing.ListedStock = [new(999, false, 60, 60)];
         Assert.Equal(0, run.Controller.PreferredRestockSlots);
-        Assert.True(run.Controller.HoldingForSaleSlots);
+        Assert.Equal(!continuous, run.Controller.HoldingForSaleSlots);
     }
 
     [Fact]
@@ -204,7 +205,7 @@ public sealed class ProcurementControllerTests
     }
 
     [Fact]
-    public void FullRetainersKeepSellingWithoutScheduledShoppingScansWhenStockIsReady()
+    public void FullRetainersKeepSellingBetweenHourlyDealScansWhenStockIsReady()
     {
         using var run = new Route();
         run.Config.Current.EnableStockAutomation();
@@ -223,6 +224,10 @@ public sealed class ProcurementControllerTests
         Assert.Equal(0, run.Game.Scans);
         run.Tick(601); run.Tick();
         Assert.Equal(0, run.Game.Scans);
+        Assert.Equal(0, run.Game.Purchases);
+        Assert.True(run.Controller.HoldingForResaleStock);
+        run.Tick(3000); run.Tick();
+        Assert.Equal(2, run.Game.Scans); // Buying scope plus home resale data.
         Assert.Equal(0, run.Game.Purchases);
         Assert.True(run.Controller.HoldingForResaleStock);
     }
@@ -295,10 +300,11 @@ public sealed class ProcurementControllerTests
     }
 
     [Fact]
-    public void AFewFreeSlotsAreNotWorthATripAndUndercuttingContinuesUntilABatchOpens()
+    public void FixedBufferModeWaitsForItsConfiguredBatchOfVacancies()
     {
         using var run = new Route(priority: true);
         run.Config.Current.EnableStockAutomation();
+        run.Config.Current.ContinueShoppingWhenStocked = false;
         run.Config.Current.ShoppingTripMinimumFreeSaleSlots = 10;
         run.Game.Gil = 10_000_000;
         run.Repricing.LastKnownFreeSaleSlots = 3;
@@ -1504,6 +1510,8 @@ public sealed class ProcurementControllerTests
         using var run = new Route(priority: true);
         run.Config.Current.EnableStockAutomation();
         run.Config.Current.ContinueShoppingWhenStocked = true;
+        run.Repricing.LastKnownFreeSaleSlots = 0;
+        run.Repricing.ListedStock = [new(999, false, 60, 60)];
         run.Game.Inventory = 20 * 99;
         run.Config.Current.ProcurementRules[0].MaximumSaleSlots = 20;
         run.Tick(); run.Tick();

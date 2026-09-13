@@ -119,13 +119,18 @@ checked retainer capacity, bounded between 5 and 20 spare sale stacks: 60 sale
 slots means a target of 12. Per-item targets range from 1 to 3 spare sale stacks,
 based on how many of that item are listed. Stock gets topped up as it moves onto
 retainers. Sales-volume, profit and budget checks can leave the target partly empty.
+Preferred food and potion deals can exceed that small buffer when existing stock
+still leaves room within their demand and concentration limits.
 
-Spare purchases use up to 20% of available capital by default, counting the saved
+Non-preferred spare purchases use up to 20% of available capital by default, counting the saved
 acquisition cost of trading stock already in bags. Repeated trips do not reset
 that allowance. Sale-only backlog and personal reserves do not count as trading
-stock. Real free bag space is always required. Periodic searches continue even
-when stocked; purchases and travel resume when suitable restock deals fit the
-limits. Disable comfortable-stock mode to use the older fixed spare-stack target.
+stock. Real free bag space is always required. Open sale slots allow normal
+shopping after the listing pass when spendable gil meets the trip minimum.
+Full retainers with replacement stock hunt every six scan intervals (at least
+60 minutes), while five-minute listing/undercut checks continue between trips.
+New vacancies or missing preferred replacements lift the slower schedule.
+Disable comfortable-stock mode to use the fixed spare-stack and vacancy targets.
 
 **Bag slots** means actual occupied inventory slots. **Units** means individual
 items. **Sale stacks** means future listings at each rule's selling quantity:

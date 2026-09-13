@@ -4,15 +4,28 @@
 (config schema `Version = 44`), after the profit-optimization rework described in
 `PROFIT_OPTIMIZATION_IMPLEMENTATION.md`.
 
+**v1.0.0.70:** continuous shopping no longer has a hard vacancy or bag-stock hold.
+Any open sale slots allow normal shopping after listing, subject to spendable gil
+and physical bag reserves. Full shelves with at least half the replacement buffer
+and no preferred replacement shortfall use six scan intervals, at least 60 minutes,
+between hunts. Income/capacity changes cannot bypass that stocked cooldown; open
+shelves or a preferred shortfall lift it. Completed trips start the cooldown from
+return home. Preferred candidates can use a comfortable buffer's worth of planning
+capacity even with existing bag stock; owned-unit demand and concentration guards
+still apply. Other stock retains its separate capacity and budget limits. A full
+ordinary buffer permits scouting without authorizing over-capacity purchases.
+The minimum-vacancy setting now applies only to optional fixed-buffer mode.
+
 **v1.0.0.69:** preferred fast-mover buying visits now refresh and buy additional
 qualifying listings at the selected price or better, until the offers, spendable
 gil, actual bag space, fresh home reference, or unit-demand coverage runs out.
 Bulk purchases can exceed the original basket, small replacement buffer and
 ordinary per-item slot ceiling. Preferred coverage defaults to seven days (the
 old untouched three-day setting migrates; custom settings remain). Automatic
-shopping waits while relisting stock covers at least half the comfortable buffer
+shopping originally waited while relisting stock covered at least half the comfortable buffer
 and current vacancies. This applies on startup, without a previous-purchase flag,
-and to automatic live tours as well as priority shopping. Checks repeat every
+and to automatic live tours as well as priority shopping; v1.0.0.70 replaces that
+indefinite hold with the scheduling above. Checks repeat every
 five minutes by default and when stock automation is started. Preferred
 bag capacity counts consolidated resale lots, not the number of purchase rows.
 The 20-minute buying watchdog now measures time without a confirmed purchase;
@@ -157,15 +170,16 @@ IF IsStartBlocked OR !AllowAutomaticPurchases OR !AutomaticProcurementEnabled
    OR !playerState.IsLoaded                                     -> RETURN
 IF repricing.LastKnownFreeSaleSlots is null                     -> RETURN   (no verified capacity yet)
 IF SpendableGil(...) == 0                                       -> RETURN
+IF ShoppingWaitReason is not null OR HoldingForResaleStock       -> RETURN
 IF LiveWorldStockHuntEnabled                                    -> live-hunt branch  [DEAD in shipped config]
 IF !newlyAvailableCapacity AND !incomeArrived AND now < nextAutomaticScan -> RETURN
-IF HoldingForSaleSlots OR HoldingForGil OR HoldingForResaleStock -> RETURN
 -> StartScan(AutomaticPurchase)
 ```
 
 | Gate | Condition | Meaning |
 |---|---|---|
-| `HoldingForSaleSlots` | Fewer than 10 free slots **and** no preferred replacement shortfall | Healthy portfolios wait for vacancies; thin preferred positions can shop sooner |
+| `HoldingForSaleSlots` | Fixed-buffer mode and fewer than the configured 10 free slots | Continuous trading ignores this vacancy minimum |
+| `HoldingForResaleStock` | Continuous mode, full shelves, covered preferred replacements, at least half the comfortable buffer, and stocked cooldown still running | Hunts slow to six scan intervals (minimum 60 minutes), then resume |
 | `HoldingForGil` (L196) | `ShoppingBudget < ShoppingTripMinimumGil` (1,000,000) | Travelling with pocket change wastes the trip |
 
 `StartScan` (L307) first calls **`ReconcilePositionCosts()`** (L1948), which retires tracked
@@ -882,7 +896,9 @@ preferredGap = MAX(0, preferredTarget - eligible preferred listed slots)
 preferredReplacementSlots = MAX(0, MIN(preferredGap, ComfortableStockTarget) - preferred bag lots)
 ; Replacement exception requires continuous shopping and a complete all-retainer check.
 ; Count actual bag lots, excluding personal reserves and ineligible qualities.
-PlannedSaleSlots = MIN(MAX(OrdinaryPurchaseSlots, preferredReplacementSlots), usable bag slots)
+preferredDealSlots = continuous mode with a completed all-retainer check and enabled preferred rules
+                   ? ComfortableBagTarget(checked sale capacity) : 0
+PlannedSaleSlots = MIN(MAX(OrdinaryPurchaseSlots, preferredDealSlots), usable bag slots)
 NonPreferredSaleSlots = OrdinaryPurchaseSlots
 
 slotLimit (planner)   = MIN(FreeSaleSlots, FreeInventorySlots)
