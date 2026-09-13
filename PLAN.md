@@ -1,4 +1,4 @@
-# Current: publish v1.0.0.70 shopping cadence fix
+# Completed: v1.0.0.70 shopping cadence fix
 
 User reports almost 7M gil and open slots but no shopping. Latest local session
 shows 36/60 occupied sale slots. v1.0.0.69's bag-stock hold can suppress trips
@@ -14,8 +14,14 @@ indefinitely; the older vacancy hold and purchase buffer can also block scouting
       Dashboard/docs updated. Release tests: 418 passed; solution build: zero
       warnings/errors using SDK 10.0.400, single-process MSBuild.
       Version 1.0.0.70 confirmed unused on origin; diff reviewed.
-- [ ] Increment to unused version, commit/push main and annotated release tag.
-- [ ] Wait for release workflow and verify public latest repo.json and ZIP.
+- [x] Commit 515dbb1 pushed to origin/main with annotated v1.0.0.70 tag.
+      Release workflow 34738667855 and Build 34738666445 both succeeded.
+- [x] Verified public latest repo.json and SmartUndercutBot.zip at 04:48 UTC
+      2026-09-13. Installer/ZIP manifests and plugin assembly report 1.0.0.70,
+      API 15; both DLLs present. ZIP 603,096 bytes; installer/install/update URLs
+      unchanged. SHA-256 matches GitHub's published digest:
+      3E11B89AB8B6A425411EDE3CAB54BAB9202CA312DD041C045DCEBE8128B65203.
+      Ready to update through the in-game Dalamud installer.
 
 Native game operations have not been exercised in this session.
 
