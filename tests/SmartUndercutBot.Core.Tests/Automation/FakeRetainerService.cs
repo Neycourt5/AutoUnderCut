@@ -30,6 +30,8 @@ namespace SmartUndercutBot.Core.Tests.Automation
         public virtual string ActiveRetainerName => "Test Retainer";
         public virtual uint PlayerGil => 0;
         public virtual uint ActiveRetainerGil => 0;
+        public virtual bool IsPlayerInventoryReady => true;
+        public virtual bool IsSellListInventoryReady => IsSellListOpen;
         public virtual SafetySnapshot CheckSafety(Vector3 position) => new(true, string.Empty);
         public virtual IReadOnlyList<RetainerListing> ReadCurrentListings() => [];
         public virtual bool SelectRetainer(int index) => throw new NotSupportedException();

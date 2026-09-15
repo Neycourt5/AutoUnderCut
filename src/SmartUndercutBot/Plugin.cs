@@ -4,6 +4,7 @@ using Dalamud.IoC;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
 using SmartUndercutBot.Automation;
+using SmartUndercutBot.Core.Models;
 using SmartUndercutBot.Core.Services;
 using SmartUndercutBot.Services;
 using SmartUndercutBot.Windows;
@@ -61,7 +62,9 @@ public sealed class Plugin : IDalamudPlugin
             new PortfolioValuationService(),
             configuration,
             procurementLedger,
-            automationLog);
+            automationLog,
+            portfolioCache: new PortfolioCacheService(PluginInterface.ConfigDirectory.FullName,
+                () => PlayerState.IsLoaded ? PlayerState.ContentId : 0, automationLog));
         universalis = new UniversalisService(PlayerState, DataManager, automationLog);
         marketStatistics = new SaddlebagStatisticsProvider(
             () => configuration.Current.MarketDiscoveryEnabled,
@@ -160,8 +163,12 @@ public sealed class Plugin : IDalamudPlugin
         automation.IsStartBlocked = () => procurement.IsActive || bagListing.IsBusy;
         procurement.IsStartBlocked = () => automation.IsActive || bagListing.IsBusy || bagListing.IsAutomaticRunDue;
         stockAutomation = new StockAutomationController(configuration, automation, procurement, bagListing);
+        automation.ReadBagPortfolio = () => EstimateBagPortfolio(retainerListings);
+        automation.CanRefreshPortfolioInventory = () => PlayerState.IsLoaded && !bagListing.IsBusy;
         wealthHistory = new WealthHistoryService(Framework, automation.PortfolioSnapshot, automationLog,
-            PluginInterface.ConfigDirectory.FullName);
+            PluginInterface.ConfigDirectory.FullName,
+            characterId: () => PlayerState.IsLoaded ? PlayerState.ContentId : 0,
+            canRecord: () => retainerListings.IsPlayerInventoryReady && !automation.IsActive && !bagListing.IsBusy);
         dashboard = new DashboardWindow(
             configuration, automation, procurement, bagListing, universalis, procurementLedger, marketData,
             automationLog, stockAutomation, wealthHistory);
@@ -179,6 +186,27 @@ public sealed class Plugin : IDalamudPlugin
             HelpMessage = "Open Smart Undercutter. /sub start keeps retainers stocked; /sub stop stops all automation; /sub guided opens a manual deal route.",
         });
         PluginLog.Information("Smart Undercutter initialized.");
+    }
+
+    private IReadOnlyList<PortfolioBagStockEstimate> EstimateBagPortfolio(IRetainerListingService retainers)
+    {
+        var holdings = retainers.ReadBagListingCandidates()
+            .Select(x => new PortfolioBagHolding(x.ItemId, x.ItemName, x.IsHighQuality, x.Quantity)).ToArray();
+        var prices = holdings.GroupBy(x => (x.ItemId, x.IsHighQuality)).Select(group =>
+        {
+            uint? marketPrice = null;
+            if (automation.ObservedHomePrices.TryGetValue(group.Key.ItemId, out var observed))
+                marketPrice = observed.Listings.Where(x => x.IsHighQuality == group.Key.IsHighQuality &&
+                        !retainers.OwnedRetainerIds.Contains(x.RetainerId) &&
+                        MarketPriceSafety.IsSafeAutomaticUnitPrice(group.First().ItemName, x.PricePerUnit, x.Quantity))
+                    .Select(x => (uint?)x.PricePerUnit).Min();
+            marketPrice ??= automation.LastEstimatedHomePrice(group.Key.ItemId, group.Key.IsHighQuality);
+            var cost = configuration.Current.GetEffectiveRule(group.Key.ItemId).CostBasis;
+            return new PortfolioBagPrice(group.Key.ItemId, group.Key.IsHighQuality, marketPrice, cost > 0 ? cost : null);
+        }).ToArray();
+        return BagStockValuationService.Estimate(holdings, configuration.Current.ProcurementRules,
+            (uint)Math.Max(0, configuration.Current.BagListingReservePerItem), prices,
+            configuration.Current.Fees.MarketTaxPercent);
     }
 
     private void OnCommand(string _, string arguments)

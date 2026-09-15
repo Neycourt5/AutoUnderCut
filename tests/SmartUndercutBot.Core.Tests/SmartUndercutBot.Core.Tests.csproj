@@ -13,6 +13,8 @@
   </ItemGroup>
   <ItemGroup>
     <!-- Exercise the production state machine without loading native game code. -->
+    <Compile Include="../../src/SmartUndercutBot/Services/PortfolioCacheService.cs" Link="Production/PortfolioCacheService.cs" />
+    <Compile Include="../../src/SmartUndercutBot/Services/WealthHistoryService.cs" Link="Production/WealthHistoryService.cs" />
     <Compile Include="../../src/SmartUndercutBot/Automation/AutomationController.cs" Link="Production/AutomationController.cs" />
     <Compile Include="../../src/SmartUndercutBot/Automation/IRetainerAutomation.cs" Link="Production/IRetainerAutomation.cs" />
     <Compile Include="../../src/SmartUndercutBot/Services/IRetainerListingService.cs" Link="Production/IRetainerListingService.cs" />

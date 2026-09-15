@@ -12,7 +12,7 @@ public sealed class WealthHistoryTests
         new(Start.AddMinutes(minutes), total / 2, total / 2, total);
 
     [Fact]
-    public void RapidScansUpdateTheLatestPointInsteadOfFloodingTheSeries()
+    public void RapidScansPreserveTheStartingPointAndUpdateTheLatestPoint()
     {
         var history = new WealthHistory();
         var interval = TimeSpan.FromMinutes(15);
@@ -20,12 +20,31 @@ public sealed class WealthHistoryTests
         Assert.True(history.Record(Sample(5, 2_000), interval));
         Assert.True(history.Record(Sample(10, 3_000), interval));
 
-        var only = Assert.Single(history.Samples);
-        Assert.Equal(3_000ul, only.Total);
+        Assert.Equal([1_000ul, 3_000ul], history.Samples.Select(x => x.Total));
 
-        // Past the interval, measured from the point it replaced, it becomes a new one.
+        // A new fixed interval appends, without erasing the original baseline.
         Assert.True(history.Record(Sample(30, 4_000), interval));
-        Assert.Equal(2, history.Samples.Count);
+        Assert.Equal(3, history.Samples.Count);
+    }
+
+    [Fact]
+    public void FrequentScansCannotSlideTheIntervalForwardForever()
+    {
+        var history = new WealthHistory();
+        for (var minute = 0; minute <= 60; minute += 5)
+            history.Record(Sample(minute, (ulong)(1_000 + minute)), TimeSpan.FromMinutes(15));
+
+        Assert.Equal([0, 10, 25, 40, 55, 60],
+            history.Samples.Select(x => (int)(x.At - Start).TotalMinutes));
+        Assert.Equal(60, history.ChangeOver(TimeSpan.Zero, Start.AddHours(1))!.Value.Change);
+    }
+
+    [Fact]
+    public void AnIdenticalTimestampReplacesThePointWithoutAddingAZeroLengthSegment()
+    {
+        var history = new WealthHistory([Sample(0, 1_000)]);
+        history.Record(Sample(0, 2_000), TimeSpan.Zero);
+        Assert.Equal(2_000ul, Assert.Single(history.Samples).Total);
     }
 
     [Fact]
@@ -47,6 +66,30 @@ public sealed class WealthHistoryTests
         Assert.NotNull(sample);
         Assert.Equal(500ul, sample.Gil);
         Assert.Equal(9_000ul, sample.Total);
+    }
+
+    [Fact]
+    public void BagStockIsPreservedAsASeparateComponentWithoutAddingItToTheTotalTwice()
+    {
+        var valuation = Valuation(isComplete: true, isFullBell: true) with
+        {
+            EstimatedBagNetValue = 2_000,
+            ProjectedWealthMarketAligned = 11_000,
+        };
+        var sample = WealthHistory.FromValuation(valuation, Start)!;
+        Assert.Equal(2_000ul, sample.BagNet);
+        Assert.Equal(8_500ul, sample.ListedNet);
+        Assert.Equal(11_000ul, sample.Total);
+    }
+
+    [Fact]
+    public void OlderSavedHistoryWithoutBagValuesStillLoads()
+    {
+        var sample = System.Text.Json.JsonSerializer.Deserialize<WealthSample>(
+            """{"At":"2026-09-07T12:00:00+00:00","Gil":500,"ListedNet":8500,"Total":9000}""");
+        Assert.NotNull(sample);
+        Assert.Equal(9_000ul, sample.Total);
+        Assert.Equal(0ul, sample.BagNet);
     }
 
     [Fact]
@@ -89,6 +132,16 @@ public sealed class WealthHistoryTests
     {
         var history = new WealthHistory([Sample(60, 2_000), Sample(0, 1_000)]);
         Assert.Equal([1_000ul, 2_000ul], history.Samples.Select(x => x.Total));
+    }
+
+    [Fact]
+    public void RestoringAnOversizedHistoryStillPreservesTheOriginalBaseline()
+    {
+        var history = new WealthHistory(Enumerable.Range(0, WealthHistory.MaximumSamples * 4)
+            .Select(x => Sample(x, (ulong)x)));
+        Assert.InRange(history.Samples.Count, 2, WealthHistory.MaximumSamples);
+        Assert.Equal(Start, history.Samples[0].At);
+        Assert.Equal((ulong)(WealthHistory.MaximumSamples * 4 - 1), history.Samples[^1].Total);
     }
 
     private static PortfolioValuation Valuation(bool isComplete, bool isFullBell) => new(

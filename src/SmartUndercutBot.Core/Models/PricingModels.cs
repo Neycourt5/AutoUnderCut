@@ -1,3 +1,5 @@
+using SmartUndercutBot.Core.Services;
+
 namespace SmartUndercutBot.Core.Models;
 
 public enum PricingMode
@@ -73,6 +75,12 @@ public sealed class PricingRule
     public uint UndercutAmount { get; set; } = 1;
     public uint MinimumPrice { get; set; } = 1;
     /// <summary>
+    /// Explicitly apply MinimumPrice to purchased stock. Older versions wrote
+    /// automatic purchase-margin floors into MinimumPrice, so tracked stock uses
+    /// its profitable cost floor until the user opts into an additional minimum.
+    /// </summary>
+    public bool ApplyMinimumPriceToPurchasedStock { get; set; }
+    /// <summary>
     /// Weighted average landed cost of the inventory currently held. Blended on each
     /// purchase against what is still on hand, so selling a position out and re-buying
     /// cheaper lowers the basis instead of stranding the item at an old high price.
@@ -81,7 +89,7 @@ public sealed class PricingRule
     /// <summary>Units backing <see cref="CostBasis"/>, so a new purchase can be weighted against it.</summary>
     public uint CostBasisUnits { get; set; }
     /// <summary>
-    /// Resale floor implied by what the stock actually cost. Kept apart from
+    /// Resale floor that returns more than the stock cost after sale tax. Kept apart from
     /// <see cref="MinimumPrice"/> so recomputing it from a changed basis never
     /// overwrites a floor the user set by hand.
     /// </summary>
@@ -101,7 +109,8 @@ public sealed record PricingContext(
     RetainerListing Listing,
     MarketSnapshot Market,
     PricingRule Rule,
-    IReadOnlySet<ulong>? OwnedRetainerIds = null);
+    IReadOnlySet<ulong>? OwnedRetainerIds = null,
+    FeeModel? Fees = null);
 
 public sealed record PriceDecision(
     PriceDecisionKind Kind,

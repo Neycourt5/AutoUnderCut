@@ -21,8 +21,10 @@ The 10% fast-preferred / 14% high-volume / 20% ordinary / 35% low-value net ROI
 ladder remains. It is already volume-sensitive, and the marginal gil-per-day
 allocator already accounts for units held ahead of the next purchase. Lowering
 every margin would not cure a scheduler that cannot depart. A controller regression
-now buys a ~13% net preferred deal from a 4M wallet with 60 occupied sale slots,
-and checks that the resulting resale floor preserves the same 10% requirement.
+now buys a ~13% net preferred deal from a 4M wallet with 60 occupied sale slots.
+The subsequent repricing fix separates this buying threshold from selling stock
+already owned: its automatic resale floor now returns the landed cost plus at
+least one gil per unit after sale tax.
 
 ---
 
@@ -294,9 +296,18 @@ MinimumResalePrice = ListingPriceForNet(CEIL(MAX(cost × (1 + roi/100), cost + m
 - **Added** `PricingRule.CostBasisUnits` (units backing the basis) and
   `PricingRule.AcquisitionFloor` (the floor implied by what the stock cost), kept **separate
   from** `MinimumPrice` so recomputing the automatic floor never overwrites a floor the user
-  set by hand. `PricingStrategyService.CalculateFloor` honours whichever binds harder.
+  set by hand. `PositionCostPolicy.MinimumListingPrice` recomputes the automatic
+  floor from landed cost and the current seller tax. Older versions also stored
+  automatic floors in `MinimumPrice`; tracked purchases therefore apply that
+  additional minimum only when `ApplyMinimumPriceToPurchasedStock` is explicitly
+  enabled. Rules without tracked purchased units retain their configured minimum.
 - **Stopped ratcheting `MinimumMarginPercent`.** It is now left alone; the automatic floor
   lives in `AcquisitionFloor` and is recomputed from the current basis on every purchase.
+  Tracked purchases (`CostBasisUnits > 0`) ignore legacy automatically ratcheted
+  margins and legacy minimum prices; manual cost rules without tracked units still
+  honour their minimum and margin settings.
+  A stale saved acquisition floor cannot stop a profitable cut, and the historical
+  drop guard is bypassed when a known-cost competitive target clears the cost floor.
 - **Added** `PositionCostPolicy.RecordSale` and
   `ProcurementController.ReconcilePositionCosts` (`ProcurementController.cs:1948`), called at
   the start of every scan. Units no longer held are retired from the basis, and a position
@@ -311,7 +322,8 @@ holdings are observable, and the old protective high-water mark when they are no
 (`holdingsKnown: false`). Only units the existing basis actually accounts for are allowed to
 dilute it, so stock of unknown provenance cannot be averaged in at a price it never paid.
 **Nothing here ever sells at a loss**: the floor always covers the average landed cost of what
-is actually in the bags, plus the margin it was bought against, grossed up through the sale tax.
+is actually in the bags, plus at least one gil per unit, grossed up through the sale tax.
+The ROI and minimum-profit requirements for buying new stock are unchanged.
 
 ### 4.6 Discovery
 

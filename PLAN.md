@@ -1,3 +1,24 @@
+# Current: v1.0.0.71 profitable repricing and persistent wealth
+
+- [x] Trace potion price floors and graph/portfolio resets.
+- [x] Allow tracked stock to undercut whenever proceeds exceed paid cost after fees.
+      Actual saved Strength rule (cost 3681, old minimum 5930) now permits 5306 ->
+      4748 versus 4749 competitors; explicit purchased-stock minimum is opt-in.
+- [x] Preserve per-character retainer estimates across bell passes, travel and restarts.
+      Replace observed retainer rows; retain unvisited holdings and loaded wallet.
+      Atomic JSON saves with backup recovery; loading never clears cached values.
+- [x] Fix graph sampling/rendering and include eligible unlisted bag value.
+      Preserve first sample, fixed time buckets, single-point rendering, actual-time
+      x positions. Bag reserves/quality respected, saved home prices survive restart,
+      paid-cost fallback labeled, unknown units excluded. Unsold value is not income.
+- [x] Regression coverage: 459 tests passed. Final Release build: zero warnings/errors.
+      Persistence tests require normal Windows permissions: sandbox denied File.Replace.
+      Public remote checked: 1.0.0.71 unused; packaged manifest and DLL report .71/API15.
+- [ ] Commit/push main and annotated v1.0.0.71 release tag.
+- [ ] Verify release workflow, public latest repo.json and SmartUndercutBot.zip.
+
+Native game operations have not been exercised in this session.
+
 # Completed: v1.0.0.70 shopping cadence fix
 
 User reports almost 7M gil and open slots but no shopping. Latest local session

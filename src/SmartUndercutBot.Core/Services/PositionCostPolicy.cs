@@ -27,7 +27,7 @@ public static class PositionCostPolicy
     /// mark when they are not.
     /// </summary>
     public static void RecordPurchase(PricingRule rule, ulong heldUnits, uint quantity,
-        ulong landedCost, decimal roi, uint minimumProfit, bool holdingsKnown, FeeModel? fees = null)
+        ulong landedCost, bool holdingsKnown, FeeModel? fees = null)
     {
         ArgumentNullException.ThrowIfNull(rule);
         if (quantity == 0)
@@ -42,8 +42,31 @@ public static class PositionCostPolicy
             : (uint)Math.Min(uint.MaxValue, decimal.Ceiling(
                 ((decimal)rule.CostBasis * blendUnits + landedCost) / (blendUnits + quantity)));
         rule.CostBasisUnits = (uint)Math.Min(uint.MaxValue, (ulong)blendUnits + quantity);
-        rule.AcquisitionFloor = ProcurementPriceSafety.MinimumResalePrice(
-            rule.CostBasis, roi, minimumProfit, fees);
+        // The ROI required to buy more stock is not a promise to keep existing
+        // stock listed at that margin forever. Any profitable sale may release it.
+        rule.AcquisitionFloor = ProcurementPriceSafety.MinimumProfitableResalePrice(rule.CostBasis, fees);
+    }
+
+    /// <summary>
+    /// Recompute the resale floor from the current landed basis and sale tax, so
+    /// saved acquisition floors from earlier, higher purchase margins cannot
+    /// strand a profitable listing. A tracked purchase also ignores legacy
+    /// automatically ratcheted margin percentages and MinimumPrice values; manual
+    /// cost rules retain theirs. An explicit opt-in applies an additional minimum
+    /// to purchased stock without mistaking old automatic floors for manual ones.
+    /// </summary>
+    public static uint MinimumListingPrice(PricingRule rule, FeeModel? fees = null, uint acquisitionCost = 0)
+    {
+        ArgumentNullException.ThrowIfNull(rule);
+        var cost = acquisitionCost == 0 ? rule.CostBasis : acquisitionCost;
+        var trackedPurchase = rule.CostBasisUnits > 0 && cost > 0;
+        var configured = trackedPurchase && !rule.ApplyMinimumPriceToPurchasedStock
+            ? 1u
+            : Math.Max(1u, rule.MinimumPrice);
+        if (cost == 0)
+            return Math.Max(configured, rule.AcquisitionFloor);
+        var margin = trackedPurchase ? 0m : rule.MinimumMarginPercent;
+        return Math.Max(configured, ProcurementPriceSafety.MinimumProfitableResalePrice(cost, fees, margin));
     }
 
     /// <summary>

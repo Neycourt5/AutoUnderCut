@@ -180,7 +180,8 @@ attempt; they do not start another shopping route on the visited world.
 - Uses randomized 250-450 ms action delays and stops on movement, logout, changed listings, or unknown write outcomes; known menu/read failures have bounded recovery.
 - Supports price floors, cost-basis margins, HQ/NQ filtering, match-lowest mode, optional tolerance bands, and 99/999 rounding.
 - Provides an ImGui status dashboard, per-retainer progress, queue with live/target prices, configuration, and audit log.
-- Shows a Portfolio estimate with wallet and retainer gil, gross asking value, live market-aligned value, per-retainer seller tax, estimated net proceeds, markdown risk, and projected total wealth.
+- Saves retainer holdings and gil per character across bell closes, travel, and plugin restarts, refreshing each retainer when scanned. Earnings history uses atomic saves with backup recovery; frequent scans retain the graph's starting point, and even its first observation is visible.
+- Includes eligible unlisted bag stock after reserves and sale tax in projected wealth. Home-price estimates take priority, paid cost is a labeled fallback, and unpriced units are reported separately. Unsold value is not earned gil.
 - Automatically filters bag stock to HQ Grade 4 gemdraughts and HQ Caramel Popcorn, prices them from the current-world market, and fills free retainer slots with complete 99-stacks while preserving 100 of each item for personal use by default.
 - Consolidates inventory stacks before bag filling, skips retainers already at 20/20 during fill-only runs, validates the exact visible safety-seeded row before every write, and returns to the main bell list before idling.
 - Builds diversified purchase plans from home-world Universalis sale history and competing listings, constrained by gil, bag slots, confirmed retainer sale slots, weekly sales, ROI, and per-item limits.
@@ -190,7 +191,7 @@ attempt; they do not start another shopping route on the visited world.
 - Offers a guided deal route that prioritizes Universalis opportunities by world, travels to each market board, flashes the FFXIV taskbar icon, shows expected prices and guarded ceilings, and waits for a manual Done / Next command.
 - Returns home, opens a summoning bell, distributes purchased stacks into open retainer slots, and feeds them through the normal live repricing pass.
 - The curated procurement set is HQ Grade 4 gemdraughts plus HQ Caramel Popcorn; legacy Grade 3 gemdraught and food defaults are removed during migration.
-- Persists the landed unit cost of automatic purchases, including the buyer fee, and prevents later repricing below that cost plus the configured margin.
+- Persists the landed unit cost of automatic purchases, including the buyer fee. Purchased stock can follow any competitive price that earns a profit after seller tax; older buying-margin targets no longer prevent profitable cuts. An optional explicit minimum-price override remains available.
 
 Dry-run mode remains available. Repricing writes, purchases, automatic listing, and recurring procurement each have separate controls. Automatic curated bag refills are enabled during idle bell runs; market-board purchases remain separately armed.
 

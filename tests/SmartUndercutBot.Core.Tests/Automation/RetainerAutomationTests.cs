@@ -59,12 +59,10 @@ public sealed class RetainerAutomationTests
     }
 
     [Fact]
-    public void ABagListingPassIsNotPlottedAsAFullBellWealthPoint()
+    public void BagListingPassPreservesTheFullValuationAndItsMarketEstimates()
     {
-        // A fill-only pass never reads the existing listings, so its valuation is
-        // retainer gil and nothing else. Plotting it drew the net worth graph as a
-        // cliff down to bare gil and straight back up on the next real pass.
         using var run = new Session();
+        PrepareValuedStock(run);
         run.Bot.StartNow();
         run.CompletePass();
         var repriced = run.Bot.PortfolioSnapshot();
@@ -75,8 +73,121 @@ public sealed class RetainerAutomationTests
         run.Bot.StartBagListingNow();
         run.CompletePass();
         var filled = run.Bot.PortfolioSnapshot();
-        Assert.False(filled.IsFullBellRun);
-        Assert.Null(WealthHistory.FromValuation(filled, DateTimeOffset.UtcNow));
+        Assert.True(filled.IsFullBellRun);
+        Assert.True(filled.IsComplete);
+        Assert.Equal(repriced.ProjectedWealthMarketAligned, filled.ProjectedWealthMarketAligned);
+        Assert.Equal(repriced.LiveEstimatedListings, filled.LiveEstimatedListings);
+        Assert.True(filled.EstimatedNetMarketAligned > 0);
+        Assert.NotNull(WealthHistory.FromValuation(filled, DateTimeOffset.UtcNow));
+        Assert.Empty(run.Game.Commits);
+    }
+
+    [Fact]
+    public void ClosedBellRestartAndLoadingRetainLastObservedWalletRetainersAndBags()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "SmartUndercutBot-ControllerPortfolio-" + Guid.NewGuid());
+        try
+        {
+            PortfolioValuation before;
+            using (var first = new Session(directory))
+            {
+                PrepareValuedStock(first);
+                first.Bot.ReadBagPortfolio = () =>
+                    [new(300, "Dye", false, 198, 4_700, BagValuationSource.HomeMarket, 5m)];
+                first.Bot.StartNow();
+                first.CompletePass();
+                before = first.Bot.PortfolioSnapshot();
+            }
+
+            using var restarted = new Session(directory);
+            restarted.Game.BellOpen = false;
+            restarted.Game.InventoryReady = false;
+            var restored = restarted.Bot.PortfolioSnapshot();
+            Assert.Equal(before.ProjectedWealthMarketAligned, restored.ProjectedWealthMarketAligned);
+            Assert.Equal(before.RetainerGil, restored.RetainerGil);
+            Assert.Equal(before.BagUnits, restored.BagUnits);
+            Assert.Equal(before.Listings, restored.Listings);
+            Assert.True(restored.IsComplete);
+            Assert.Equal(4_700u, restarted.Bot.LastEstimatedHomePrice(300, false));
+            Assert.Null(restarted.Bot.LastEstimatedHomePrice(300, true));
+
+            restarted.Game.CharacterId = 0;
+            restarted.Tick(600);
+            Assert.Equal(before.ProjectedWealthMarketAligned, restarted.Bot.PortfolioSnapshot().ProjectedWealthMarketAligned);
+            restarted.Game.CharacterId = 123;
+            restarted.Game.InventoryReady = true;
+            restarted.Game.PlayerWallet = 900;
+            restarted.Tick(10);
+            var afterTravel = restarted.Bot.PortfolioSnapshot();
+            Assert.Equal(900u, afterTravel.PlayerGil);
+            Assert.Equal(before.EstimatedNetMarketAligned, afterTravel.EstimatedNetMarketAligned);
+            Assert.Equal(before.EstimatedBagNetValue, afterTravel.EstimatedBagNetValue);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                foreach (var path in Directory.EnumerateFiles(directory)) File.Delete(path);
+                Directory.Delete(directory);
+            }
+        }
+    }
+
+    [Fact]
+    public void BagPurchaseCostAndUnknownPricesAreNeverReusedAsHomeMarketEstimates()
+    {
+        using var run = new Session();
+        run.Bot.ReadBagPortfolio = () =>
+        [
+            new(300, "Dye", false, 5, 4_700, BagValuationSource.PurchaseCost, 5m),
+            new(400, "Other Dye", false, 5, 2_000, BagValuationSource.Unknown, 5m),
+        ];
+        run.Bot.PortfolioSnapshot();
+
+        Assert.Null(run.Bot.LastEstimatedHomePrice(300, false));
+        Assert.Null(run.Bot.LastEstimatedHomePrice(400, false));
+    }
+
+    [Fact]
+    public void PartialRefreshKeepsUnvisitedRetainersAndClearsOnlyVerifiedEmptyRetainer()
+    {
+        using var run = new Session();
+        PrepareValuedStock(run);
+        run.Game.RetainerIds.Add(2);
+        run.Game.RetainerWallets[2] = 2_000;
+        run.Game.Listings.Add(new(2, "Second Retainer", 0, 200, "Dye", 5, 1_000, false));
+        run.Bot.StartNow();
+        run.CompletePass();
+        var complete = run.Bot.PortfolioSnapshot();
+        Assert.Equal(2, complete.Listings);
+
+        run.Game.Listings.RemoveAll(x => x.RetainerId == 1);
+        run.Game.SellInventoryReady = false;
+        run.Bot.StartNow();
+        run.Tick(10);
+        Assert.Equal(complete.EstimatedNetMarketAligned, run.Bot.PortfolioSnapshot().EstimatedNetMarketAligned);
+
+        run.Game.SellInventoryReady = true;
+        for (var i = 0; i < 50 && run.Bot.PortfolioSnapshot().Listings == 2; i++) run.Tick();
+        var partial = run.Bot.PortfolioSnapshot();
+        Assert.Equal(1, partial.Listings);
+        Assert.Equal(2, partial.RetainersScanned);
+        Assert.Equal(0, partial.Retainers.Single(x => x.RetainerId == 1).Listings);
+        Assert.Equal(1, partial.Retainers.Single(x => x.RetainerId == 2).Listings);
+        Assert.Equal(complete.Retainers.Single(x => x.RetainerId == 2).EstimatedNetMarketAligned,
+            partial.Retainers.Single(x => x.RetainerId == 2).EstimatedNetMarketAligned);
+        run.Bot.Halt();
+        Assert.Equal(partial.ProjectedWealthMarketAligned, run.Bot.PortfolioSnapshot().ProjectedWealthMarketAligned);
+    }
+
+    private static void PrepareValuedStock(Session run)
+    {
+        run.Config.Current.AllowAutomaticWrites = false;
+        run.Config.Current.AutomaticallyCollectRetainerGil = false;
+        run.Game.LiveRepricing = true;
+        run.Game.PlayerWallet = 500;
+        run.Game.RetainerWallets[1] = 1_000;
+        run.Game.Listings.Add(new(1, "Test Retainer", 3, 100, "Popoto Potage", 99, 5_300, true));
     }
 
     [Fact]
@@ -278,13 +389,14 @@ public sealed class RetainerAutomationTests
         public AutomationController Bot { get; }
         public ConfigurationService Config { get; } = new();
         private readonly Clock clock = new();
-        public Session()
+        public Session(string? cacheDirectory = null)
         {
             var config = Config;
             config.Current.EnableStockAutomation();
             config.Current.RepeatMinimumMinutes = config.Current.RepeatMaximumMinutes = 5;
             Bot = new(Game, Game, Game, new PricingStrategyService(), new PortfolioValuationService(),
-                config, new ProcurementLedger(), new AutomationLog(), clock);
+                config, new ProcurementLedger(), new AutomationLog(), clock,
+                cacheDirectory is null ? null : new PortfolioCacheService(cacheDirectory, () => Game.CharacterId, new AutomationLog()));
         }
         public void Tick(int seconds = 2) { clock.Advance(seconds); Game.Tick(); }
         public void CompletePass()
@@ -319,6 +431,13 @@ public sealed class RetainerAutomationTests
         public int BellCloses;
         public bool RetainerDataReady = true;
         public bool UnverifiedListing;
+        public ulong CharacterId = 123;
+        public uint PlayerWallet;
+        public Dictionary<ulong, uint> RetainerWallets = [];
+        public bool InventoryReady = true;
+        public bool SellInventoryReady = true;
+        public List<ulong> RetainerIds = [1];
+        private int selectedRetainer;
         public int CompletedPasses;
         public int ListingSubmissions;
         public override bool IsRetainerListOpen => BellOpen;
@@ -333,7 +452,14 @@ public sealed class RetainerAutomationTests
         public override void CloseRetainerList() { BellCloses++; BellOpen = false; }
         public override bool IsRetainerMenuOpen => menuOpen;
         public override bool IsSellListOpen => sellOpen;
-        public override IReadOnlyList<int> AvailableRetainerIndices => RetainerDataReady ? [0] : [];
+        public override IReadOnlyList<int> AvailableRetainerIndices => RetainerDataReady ? Enumerable.Range(0, RetainerIds.Count).ToArray() : [];
+        public override IReadOnlySet<ulong> OwnedRetainerIds => RetainerIds.ToHashSet();
+        public override ulong ActiveRetainerId => RetainerIds[selectedRetainer];
+        public override string ActiveRetainerName => ActiveRetainerId == 1 ? "Test Retainer" : "Second Retainer";
+        public override uint PlayerGil => PlayerWallet;
+        public override uint ActiveRetainerGil => RetainerWallets.GetValueOrDefault(ActiveRetainerId);
+        public override bool IsPlayerInventoryReady => InventoryReady;
+        public override bool IsSellListInventoryReady => sellOpen && SellInventoryReady;
         public override bool SelectRetainer(int index)
         {
             Selections++;
@@ -344,6 +470,7 @@ public sealed class RetainerAutomationTests
                 if (CloseBellWhenSelectionDrops) BellOpen = false;
                 return true;
             }
+            selectedRetainer = index;
             BellOpen = false; menuOpen = true; return true;
         }
         public override bool SelectSellItems() { menuOpen = false; sellOpen = true; return true; }
@@ -368,10 +495,10 @@ public sealed class RetainerAutomationTests
         private TaskCompletionSource<MarketSnapshot>? request;
         public List<uint> RequestedItems = [];
         public List<(uint Item, short Slot, uint Price)> Commits = [];
-        private RetainerListing Editor => Listings.AsEnumerable().Reverse().ElementAt(visibleIndex);
+        private RetainerListing Editor => ReadCurrentListings().Reverse().ElementAt(visibleIndex);
         public override bool IsPriceEditorOpen => editorOpen;
         public override bool IsContextMenuOpen => contextOpen;
-        public override IReadOnlyList<RetainerListing> ReadCurrentListings() => Listings;
+        public override IReadOnlyList<RetainerListing> ReadCurrentListings() => Listings.Where(x => x.RetainerId == ActiveRetainerId).ToArray();
         public override bool OpenListingContextMenu(int index)
         {
             ContextMenuOpens++;
@@ -390,7 +517,7 @@ public sealed class RetainerAutomationTests
         public override void CancelPriceEditor() => editorOpen = false;
         public override bool TryResolveOpenPriceEditor(uint id, IReadOnlySet<short> slots, out RetainerListing? listing)
         {
-            listing = pricesReturned ? RetainerEditorMatcher.Resolve(Listings, slots, id,
+            listing = pricesReturned ? RetainerEditorMatcher.Resolve(ReadCurrentListings(), slots, id,
                 Editor.ItemName.Replace("Blue Dye", "Blue\nDye"), Editor.Quantity, Editor.CurrentPrice, Editor.IsHighQuality) : null;
             return listing is not null;
         }
@@ -410,13 +537,13 @@ public sealed class RetainerAutomationTests
         {
             Assert.True(IsOpenPriceEditorFor(expected, true));
             Commits.Add((expected.ItemId, expected.Slot, price));
-            var index = Listings.FindIndex(x => x.Slot == expected.Slot);
+            var index = Listings.FindIndex(x => x.Slot == expected.Slot && x.RetainerId == expected.RetainerId);
             Listings[index] = expected with { CurrentPrice = price };
             editorOpen = false;
             return new(true, "Simulated server accepted price.");
         }
         public override bool TryReadListing(short slot, out RetainerListing? listing)
-        { listing = Listings.FirstOrDefault(x => x.Slot == slot); return listing is not null; }
+        { listing = ReadCurrentListings().FirstOrDefault(x => x.Slot == slot); return listing is not null; }
         public Task<MarketSnapshot> GetSnapshotAsync(uint id, CancellationToken token)
         {
             RequestedItems.Add(id);

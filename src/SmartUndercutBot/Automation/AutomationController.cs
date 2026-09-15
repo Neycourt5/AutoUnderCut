@@ -81,6 +81,10 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
     private readonly ProcurementLedger procurementLedger;
     private readonly AutomationLog log;
     private readonly TimeProvider timeProvider;
+    private readonly PortfolioCacheService? portfolioCache;
+    private uint lastPlayerGil;
+    private PortfolioBagStockEstimate[] portfolioBagStock = [];
+    private DateTimeOffset nextPortfolioInventoryRead;
     private readonly RetainerRunSchedule runSchedule = new();
     private readonly List<AutomationQueueEntry> queue = [];
     private readonly HashSet<short> processedSlots = [];
@@ -149,7 +153,8 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
         ConfigurationService configuration,
         ProcurementLedger procurementLedger,
         AutomationLog log,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        PortfolioCacheService? portfolioCache = null)
     {
         this.framework = framework;
         this.retainerListings = retainerListings;
@@ -160,11 +165,14 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
         this.procurementLedger = procurementLedger;
         this.log = log;
         this.timeProvider = timeProvider ?? TimeProvider.System;
+        this.portfolioCache = portfolioCache;
         framework.Update += OnFrameworkUpdate;
     }
 
     public event Action? RetainerInterfaceOpened;
     public Func<bool>? IsStartBlocked { get; set; }
+    public Func<IReadOnlyList<PortfolioBagStockEstimate>>? ReadBagPortfolio { get; set; }
+    public Func<bool>? CanRefreshPortfolioInventory { get; set; }
     public AutomationState State { get; private set; } = AutomationState.Idle;
     public int? LastKnownFreeSaleSlots { get; private set; }
     public bool RequiresManualRestart { get; private set; }
@@ -212,18 +220,68 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
         return true;
     }
 
-    public PortfolioValuation PortfolioSnapshot() => portfolioValuation.Calculate(
-        portfolioListings.Values.ToArray(),
-        portfolioRetainers.Values.ToArray(),
-        retainerListings.PlayerGil,
-        portfolioStartedAt,
-        portfolioCompletedAt,
-        portfolioFullBellRun,
-        portfolioComplete,
-        portfolioExpectedRetainers);
+    public PortfolioValuation PortfolioSnapshot()
+    {
+        EnsurePortfolioCharacter();
+        if (timeProvider.GetUtcNow() >= nextPortfolioInventoryRead && retainerListings.IsPlayerInventoryReady &&
+            (portfolioCache is null || portfolioCache.CanSave) && !IsActive && CanRefreshPortfolioInventory?.Invoke() != false)
+        {
+            lastPlayerGil = retainerListings.PlayerGil;
+            if (ReadBagPortfolio is not null) portfolioBagStock = ReadBagPortfolio().ToArray();
+            nextPortfolioInventoryRead = timeProvider.GetUtcNow().AddSeconds(5);
+            SavePortfolio();
+        }
+        return portfolioValuation.Calculate(
+            portfolioListings.Values.ToArray(), portfolioRetainers.Values.ToArray(), lastPlayerGil,
+            portfolioStartedAt, portfolioCompletedAt, portfolioFullBellRun, portfolioComplete,
+            portfolioExpectedRetainers, portfolioBagStock);
+    }
+
+    private void EnsurePortfolioCharacter()
+    {
+        if (portfolioCache is null || !portfolioCache.SelectCharacter(out var saved)) return;
+        portfolioListings.Clear();
+        portfolioRetainers.Clear();
+        observedHomePrices.Clear();
+        knownSafeListingPrices.Clear();
+        ListedStock = [];
+        LastKnownFreeSaleSlots = null;
+        if (saved is not null)
+        {
+            foreach (var row in saved.Listings) portfolioListings[(row.RetainerId, row.Slot)] = row;
+            foreach (var row in saved.Retainers) portfolioRetainers[row.RetainerId] = row;
+        }
+        lastPlayerGil = saved?.PlayerGil ?? 0;
+        portfolioBagStock = saved?.BagStock ?? [];
+        portfolioStartedAt = saved?.StartedAt;
+        portfolioCompletedAt = saved?.CompletedAt;
+        portfolioFullBellRun = saved?.IsFullBellRun ?? false;
+        portfolioComplete = saved?.IsComplete ?? false;
+        portfolioExpectedRetainers = saved?.ExpectedRetainers ?? 0;
+        nextPortfolioInventoryRead = DateTimeOffset.MinValue;
+    }
+
+    private void SavePortfolio()
+    {
+        portfolioCache?.Save(new(portfolioListings.Values.ToArray(), portfolioRetainers.Values.ToArray(),
+            lastPlayerGil, portfolioStartedAt, portfolioCompletedAt, portfolioFullBellRun,
+            portfolioComplete, portfolioExpectedRetainers, portfolioBagStock));
+    }
+
+    public uint? LastEstimatedHomePrice(uint itemId, bool highQuality) => portfolioListings.Values
+        .Where(x => x.ItemId == itemId && x.IsHighQuality == highQuality && x.HasLiveMarketEstimate &&
+            MarketPriceSafety.IsSafeAutomaticUnitPrice(x.ItemName, x.EstimatedUnitPrice, x.Quantity))
+        .Select(x => (uint?)x.EstimatedUnitPrice).Min()
+        // Bag-only stock can have a saved home estimate even when no retainer
+        // carries that item. Keep that known price across restart and travel.
+        ?? portfolioBagStock.Where(x => x.ItemId == itemId && x.IsHighQuality == highQuality &&
+                x.Source == BagValuationSource.HomeMarket &&
+                MarketPriceSafety.IsSafeAutomaticUnitPrice(x.ItemName, x.EstimatedUnitPrice, x.Quantity))
+            .Select(x => (uint?)x.EstimatedUnitPrice).Min();
 
     public void StartNow()
     {
+        EnsurePortfolioCharacter();
         if (IsActive || IsStartBlocked?.Invoke() == true)
             return;
         RequiresManualRestart = false;
@@ -239,6 +297,7 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
 
     public void StartBagListingNow()
     {
+        EnsurePortfolioCharacter();
         if (IsActive || IsStartBlocked?.Invoke() == true)
             return;
         RequiresManualRestart = false;
@@ -286,6 +345,7 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
 
     private void Tick()
     {
+        EnsurePortfolioCharacter();
         if (IsStartBlocked?.Invoke() == true)
             return;
         TrackInterfaceLifecycle();
@@ -347,7 +407,7 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
                 if (DelayElapsed()) OpenSellList();
                 break;
             case AutomationState.WaitingForSellList:
-                if (retainerListings.IsSellListOpen)
+                if (retainerListings.IsSellListInventoryReady)
                     Schedule(AutomationState.WaitingForStableInterface, $"Waiting for {retainerListings.ActiveRetainerName}'s listings to stabilize.");
                 else
                     CheckTimeout("Timed out waiting for the retainer sell list.");
@@ -509,7 +569,7 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
             return;
         }
 
-        ResetPortfolio(isFullBellRun: configuration.Current.ProcessAllRetainers);
+        BeginPortfolioRefresh();
 
         Schedule(AutomationState.WaitingBeforeRetainerSelection,
             configuration.Current.ProcessAllRetainers
@@ -523,7 +583,7 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
         ResetSession();
         bellSession = false;
         retainerCount = 1;
-        ResetPortfolio(isFullBellRun: false);
+        BeginPortfolioRefresh();
         handledSellList = true;
         RetainerInterfaceOpened?.Invoke();
         Schedule(AutomationState.WaitingForStableInterface, $"Starting with {retainerListings.ActiveRetainerName}.");
@@ -564,19 +624,13 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
         sessionPosition = retainerListings.GetPlayerPosition() ?? Vector3.Zero;
     }
 
-    private void ResetPortfolio(bool isFullBellRun)
+    private void BeginPortfolioRefresh()
     {
-        portfolioListings.Clear();
-        portfolioRetainers.Clear();
-        portfolioStartedAt = timeProvider.GetUtcNow();
-        portfolioCompletedAt = null;
-        // A fill-only pass lists from the bags and deliberately never reads the
-        // existing listings, so its valuation sees retainer gil and nothing else.
-        // Recording that as a complete full-bell point drew the net worth graph as
-        // a cliff down to bare gil and back up on the next real pass.
-        portfolioFullBellRun = isFullBellRun && !fillOnlyRun;
-        portfolioComplete = false;
-        portfolioExpectedRetainers = retainerCount;
+        // A new pass refreshes each observed retainer in place. Previous coverage
+        // remains useful while this pass is incomplete, interrupted, or fill-only.
+        portfolioStartedAt ??= timeProvider.GetUtcNow();
+        portfolioExpectedRetainers = Math.Max(portfolioExpectedRetainers, retainerCount);
+        SavePortfolio();
     }
 
     private void LogSessionStart() => log.Add(AutomationLogLevel.Information,
@@ -640,9 +694,15 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
 
     private void ReadListings()
     {
+        if (!retainerListings.IsSellListInventoryReady)
+        {
+            WaitFor(AutomationState.WaitingForSellList, "Waiting for retainer inventory to load.");
+            return;
+        }
         if (fillOnlyRun)
         {
             var currentListings = retainerListings.ReadCurrentListings();
+            CapturePortfolioListings(currentListings);
             RememberSafePrices(currentListings);
             var countKey = retainerListings.ActiveRetainerId != 0
                 ? retainerListings.ActiveRetainerId
@@ -722,10 +782,18 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
         var retainerName = retainerListings.ActiveRetainerName;
         const decimal fallbackSellerFee = 5m;
 
+        if (retainerId == 0 || !retainerListings.IsSellListInventoryReady) return;
+        var previous = portfolioListings.Where(x => x.Key.RetainerId == retainerId)
+            .ToDictionary(x => x.Key, x => x.Value);
+        foreach (var key in previous.Keys) portfolioListings.Remove(key);
+
         portfolioRetainers[retainerId] = new PortfolioRetainerBalance(
-            retainerId, retainerName, retainerListings.ActiveRetainerGil, fallbackSellerFee);
+            retainerId, retainerName, retainerListings.ActiveRetainerGil,
+            portfolioRetainers.GetValueOrDefault(retainerId)?.SellerFeePercent ?? fallbackSellerFee);
         foreach (var listing in listings)
         {
+            previous.TryGetValue((listing.RetainerId, listing.Slot), out var old);
+            var sameItem = old is not null && old.ItemId == listing.ItemId && old.IsHighQuality == listing.IsHighQuality;
             portfolioListings[(listing.RetainerId, listing.Slot)] = new PortfolioListingEstimate(
                 listing.RetainerId,
                 listing.RetainerName,
@@ -734,10 +802,14 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
                 listing.ItemName,
                 listing.Quantity,
                 listing.CurrentPrice,
-                listing.CurrentPrice,
-                false,
-                fallbackSellerFee);
+                sameItem ? Math.Min(listing.CurrentPrice, old!.EstimatedUnitPrice) : listing.CurrentPrice,
+                sameItem && old!.HasLiveMarketEstimate,
+                sameItem ? old!.SellerFeePercent : fallbackSellerFee,
+                listing.IsHighQuality);
         }
+        lastPlayerGil = retainerListings.PlayerGil;
+        nextPortfolioInventoryRead = DateTimeOffset.MinValue;
+        SavePortfolio();
     }
 
     private void VerifyAutoListing()
@@ -929,6 +1001,7 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
 
         foreach (var key in portfolioListings.Keys.Where(x => x.RetainerId == retainerId).ToArray())
             portfolioListings[key] = portfolioListings[key] with { SellerFeePercent = feePercent };
+        SavePortfolio();
     }
 
     private void RequestCurrentMarket()
@@ -1137,7 +1210,8 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
             entry.Listing,
             currentMarket!,
             rule,
-            retainerListings.OwnedRetainerIds));
+            retainerListings.OwnedRetainerIds,
+            Fees: configuration.Current.Fees));
 
         if (IsUnresolvedCuratedPrice(entry.Listing) &&
             (!currentDecision.ShouldUpdate || currentDecision.TargetPrice is not { } proposed ||
@@ -1241,6 +1315,7 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
             EstimatedUnitPrice = estimatedPrice,
             HasLiveMarketEstimate = decision.LowestMarketPrice.HasValue,
         };
+        SavePortfolio();
     }
 
     private void CommitOrDisarm()
@@ -1336,6 +1411,7 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
             }
             log.Add(AutomationLogLevel.Information,
                 $"VERIFIED {entry.Listing.ItemName} at {target:N0} gil on {entry.Listing.RetainerName}.");
+            SavePortfolio();
         }
 
         MoveToNextListing();
@@ -1401,6 +1477,7 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
         {
             portfolioComplete = true;
             portfolioCompletedAt = timeProvider.GetUtcNow();
+            SavePortfolio();
             Complete($"Processed {queue.Count} listing(s); submitted {updatesSubmitted} update(s).");
             return;
         }
@@ -1490,6 +1567,8 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
             var retainerId = retainerListings.ActiveRetainerId;
             if (portfolioRetainers.TryGetValue(retainerId, out var balance))
                 portfolioRetainers[retainerId] = balance with { Gil = current };
+            lastPlayerGil = retainerListings.PlayerGil;
+            SavePortfolio();
             log.Add(AutomationLogLevel.Information,
                 $"COLLECTED {collected:N0} gil from {retainerListings.ActiveRetainerName}; {current:N0} gil remains on the retainer.");
             Schedule(AutomationState.WaitingBeforeClosingRetainer,
@@ -1531,6 +1610,8 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
         {
             portfolioComplete = true;
             portfolioCompletedAt = timeProvider.GetUtcNow();
+            portfolioFullBellRun |= configuration.Current.ProcessAllRetainers && !fillOnlyRun;
+            SavePortfolio();
             var finalListingCount = fillOnlyRun ? fillListingCounts.Values.Sum() : listingsSeenAcrossRetainers;
             LastKnownFreeSaleSlots = Math.Max(0, retainerCount * 20 - finalListingCount);
             if (configuration.Current.ProcessAllRetainers)
@@ -1825,6 +1906,7 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
 
     public void Dispose()
     {
+        SavePortfolio();
         framework.Update -= OnFrameworkUpdate;
         sessionCancellation?.Cancel();
         sessionCancellation?.Dispose();

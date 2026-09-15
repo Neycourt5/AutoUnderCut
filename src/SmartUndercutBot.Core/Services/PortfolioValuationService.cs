@@ -12,7 +12,8 @@ public interface IPortfolioValuationService
         DateTimeOffset? completedAt,
         bool isFullBellRun,
         bool isComplete,
-        int expectedRetainers);
+        int expectedRetainers,
+        IReadOnlyCollection<PortfolioBagStockEstimate>? bagStock = null);
 }
 
 public sealed class PortfolioValuationService : IPortfolioValuationService
@@ -25,7 +26,8 @@ public sealed class PortfolioValuationService : IPortfolioValuationService
         DateTimeOffset? completedAt,
         bool isFullBellRun,
         bool isComplete,
-        int expectedRetainers)
+        int expectedRetainers,
+        IReadOnlyCollection<PortfolioBagStockEstimate>? bagStock = null)
     {
         ArgumentNullException.ThrowIfNull(listings);
         ArgumentNullException.ThrowIfNull(retainers);
@@ -67,6 +69,13 @@ public sealed class PortfolioValuationService : IPortfolioValuationService
         var netMarket = summaries.Aggregate<RetainerPortfolioSummary, ulong>(0, (sum, x) => sum + x.EstimatedNetMarketAligned);
         var retainerGil = summaries.Aggregate<RetainerPortfolioSummary, ulong>(0, (sum, x) => sum + x.RetainerGil);
         var currentGil = (ulong)playerGil + retainerGil;
+        var bags = (bagStock ?? []).Where(x => x.Quantity > 0).ToArray();
+        var pricedBags = bags.Where(x => x.Source != BagValuationSource.Unknown && x.EstimatedUnitPrice > 0).ToArray();
+        var unknownBags = bags.Where(x => x.Source == BagValuationSource.Unknown || x.EstimatedUnitPrice == 0).ToArray();
+        var bagGross = pricedBags.Aggregate<PortfolioBagStockEstimate, ulong>(0,
+            (sum, x) => sum + (ulong)x.EstimatedUnitPrice * x.Quantity);
+        var bagNet = pricedBags.Aggregate<PortfolioBagStockEstimate, ulong>(0,
+            (sum, x) => sum + NetAfterSellerFee((ulong)x.EstimatedUnitPrice * x.Quantity, x.SellerFeePercent));
 
         return new PortfolioValuation(
             startedAt,
@@ -85,10 +94,18 @@ public sealed class PortfolioValuationService : IPortfolioValuationService
             playerGil,
             retainerGil,
             currentGil,
-            currentGil + netAsking,
-            currentGil + netMarket,
+            currentGil + netAsking + bagNet,
+            currentGil + netMarket + bagNet,
             listings.Count(x => x.HasLiveMarketEstimate),
-            summaries);
+            summaries,
+            bags.Select(x => (x.ItemId, x.IsHighQuality)).Distinct().Count(),
+            bags.Aggregate<PortfolioBagStockEstimate, ulong>(0, (sum, x) => sum + x.Quantity),
+            bagGross,
+            bagNet,
+            unknownBags.Select(x => (x.ItemId, x.IsHighQuality)).Distinct().Count(),
+            unknownBags.Aggregate<PortfolioBagStockEstimate, ulong>(0, (sum, x) => sum + x.Quantity),
+            pricedBags.Where(x => x.Source == BagValuationSource.PurchaseCost)
+                .Select(x => (x.ItemId, x.IsHighQuality)).Distinct().Count());
     }
 
     public static ulong NetAfterSellerFee(ulong gross, decimal sellerFeePercent)

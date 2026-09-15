@@ -10,6 +10,36 @@ public sealed record PortfolioListingEstimate(
     uint AskingUnitPrice,
     uint EstimatedUnitPrice,
     bool HasLiveMarketEstimate,
+    decimal SellerFeePercent,
+    bool IsHighQuality = false);
+
+/// <summary>Marketable stock physically present in the player's bags.</summary>
+public sealed record PortfolioBagHolding(
+    uint ItemId,
+    string ItemName,
+    bool IsHighQuality,
+    uint Quantity);
+
+public sealed record PortfolioBagPrice(
+    uint ItemId,
+    bool IsHighQuality,
+    uint? HomeMarketUnitPrice,
+    uint? TrackedUnitCost);
+
+public enum BagValuationSource
+{
+    Unknown,
+    HomeMarket,
+    PurchaseCost,
+}
+
+public sealed record PortfolioBagStockEstimate(
+    uint ItemId,
+    string ItemName,
+    bool IsHighQuality,
+    uint Quantity,
+    uint EstimatedUnitPrice,
+    BagValuationSource Source,
     decimal SellerFeePercent);
 
 public sealed record PortfolioRetainerBalance(
@@ -50,4 +80,11 @@ public sealed record PortfolioValuation(
     ulong ProjectedWealthAtAsking,
     ulong ProjectedWealthMarketAligned,
     int LiveEstimatedListings,
-    IReadOnlyList<RetainerPortfolioSummary> Retainers);
+    IReadOnlyList<RetainerPortfolioSummary> Retainers,
+    int BagItemTypes = 0,
+    ulong BagUnits = 0,
+    ulong EstimatedBagGrossValue = 0,
+    ulong EstimatedBagNetValue = 0,
+    int UnknownBagItemTypes = 0,
+    ulong UnknownBagUnits = 0,
+    int CostBasisBagItemTypes = 0);

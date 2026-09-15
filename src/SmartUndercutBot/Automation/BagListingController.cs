@@ -340,7 +340,8 @@ public sealed class BagListingController : IDisposable
                     AbsorbableUnits: market is null ? 0m : Math.Min(stock.TargetStackSize / 2m,
                         SalesVelocityPolicy.DailyUnits(market, stock.IsHighQuality) * configuration.Current.ProcurementAnchorAbsorptionDays)),
                 rule,
-                retainerListings.OwnedRetainerIds));
+                retainerListings.OwnedRetainerIds,
+                Fees: configuration.Current.Fees));
             uint? target = decision.ShouldUpdate && decision.TargetPrice is { } marketTarget &&
                            MarketPriceSafety.IsSafeAutomaticUnitPrice(stock.ItemName, marketTarget, (uint)stock.TargetStackSize)
                 ? marketTarget
@@ -445,21 +446,12 @@ public sealed class BagListingController : IDisposable
                     Math.Min(total, reserve),
                     listable,
                     stackCount,
-                    CalculateFloor(pricingRule),
+                    PositionCostPolicy.MinimumListingPrice(pricingRule, configuration.Current.Fees),
                     plannedPrices.GetValueOrDefault((group.Key.ItemId, group.Key.IsHighQuality)) is var price && price > 0 ? price : null,
                     group.Key.IsHighQuality, stackSize, eligible, group.Count());
             })
             .OrderBy(x => x.ItemName, StringComparer.OrdinalIgnoreCase)
             .ToArray();
-    }
-
-    private static uint CalculateFloor(PricingRule rule)
-    {
-        if (rule.CostBasis == 0)
-            return Math.Max(1, rule.MinimumPrice);
-        var marginFloor = decimal.Ceiling(rule.CostBasis * (1m + rule.MinimumMarginPercent / 100m));
-        return Math.Max(rule.MinimumPrice,
-            (uint)Math.Min(PricingStrategyService.MaximumListingPrice, marginFloor));
     }
 
     private void PollManualVerification()

@@ -2,7 +2,7 @@ using SmartUndercutBot.Core.Models;
 
 namespace SmartUndercutBot.Core.Services;
 
-public sealed record WealthSample(DateTimeOffset At, ulong Gil, ulong ListedNet, ulong Total);
+public sealed record WealthSample(DateTimeOffset At, ulong Gil, ulong ListedNet, ulong Total, ulong BagNet = 0);
 
 /// <summary>
 /// A thinned time series of account wealth, recorded from completed retainer
@@ -26,9 +26,9 @@ public sealed class WealthHistory
     public IReadOnlyList<WealthSample> Samples => samples;
 
     /// <summary>
-    /// Adds a sample. Within <paramref name="minimumInterval"/> of the newest one it
-    /// replaces that sample instead of appending, so a burst of scans updates the
-    /// latest point rather than flooding the series.
+    /// Keeps the first point and the latest point in each interval. Intervals are
+    /// anchored to the start of the series, so frequent scans cannot keep moving
+    /// the interval forward and erase all visible history.
     /// </summary>
     public bool Record(WealthSample sample, TimeSpan minimumInterval)
     {
@@ -39,7 +39,10 @@ public sealed class WealthHistory
             // An out-of-order sample would draw the line backwards; ignore it.
             if (sample.At < newest.At)
                 return false;
-            if (sample.At - newest.At < minimumInterval)
+            if (sample.At == newest.At ||
+                (samples.Count > 1 && minimumInterval > TimeSpan.Zero &&
+                 (sample.At - samples[0].At).Ticks / minimumInterval.Ticks ==
+                 (newest.At - samples[0].At).Ticks / minimumInterval.Ticks))
             {
                 samples[^1] = sample;
                 return true;
@@ -75,23 +78,22 @@ public sealed class WealthHistory
         if (!valuation.IsComplete || !valuation.IsFullBellRun)
             return null;
         return new(at, valuation.CurrentGil, valuation.EstimatedNetMarketAligned,
-            valuation.ProjectedWealthMarketAligned);
+            valuation.ProjectedWealthMarketAligned, valuation.EstimatedBagNetValue);
     }
 
     // Halve the resolution of the oldest half rather than dropping the start of the
     // series, so a long history keeps its shape instead of losing where it began.
     private void Thin()
     {
-        if (samples.Count <= MaximumSamples)
-            return;
-        var keep = new List<WealthSample>(samples.Count);
-        var half = samples.Count / 2;
-        for (var i = 0; i < samples.Count; i++)
-            if (i >= half || i % 2 == 0)
-                keep.Add(samples[i]);
-        samples.Clear();
-        samples.AddRange(keep);
-        if (samples.Count > MaximumSamples)
-            samples.RemoveRange(0, samples.Count - MaximumSamples);
+        while (samples.Count > MaximumSamples)
+        {
+            var keep = new List<WealthSample>(samples.Count);
+            var half = samples.Count / 2;
+            for (var i = 0; i < samples.Count; i++)
+                if (i >= half || i % 2 == 0)
+                    keep.Add(samples[i]);
+            samples.Clear();
+            samples.AddRange(keep);
+        }
     }
 }

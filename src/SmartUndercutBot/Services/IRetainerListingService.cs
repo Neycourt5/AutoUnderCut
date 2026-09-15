@@ -42,6 +42,8 @@ public interface IRetainerListingService
     string ActiveRetainerName { get; }
     uint PlayerGil { get; }
     uint ActiveRetainerGil { get; }
+    bool IsPlayerInventoryReady => true;
+    bool IsSellListInventoryReady => IsSellListOpen;
     SafetySnapshot CheckSafety(Vector3 sessionPosition);
     IReadOnlyList<RetainerListing> ReadCurrentListings();
     bool TryReadListing(short slot, out RetainerListing? listing);

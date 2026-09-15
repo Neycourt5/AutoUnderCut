@@ -517,7 +517,6 @@ public sealed class DashboardWindow : Window
     private void DrawWealthGraph()
     {
         var now = DateTimeOffset.UtcNow;
-        var samples = wealthHistory.History.Within(WealthRanges[wealthRangeIndex].Window, now);
         ImGui.Separator();
         ImGui.TextUnformatted("Total wealth over time");
         ImGui.SetNextItemWidth(140 * ImGuiHelpers.GlobalScale);
@@ -529,31 +528,69 @@ public sealed class DashboardWindow : Window
         if (ImGui.Button("Clear history"))
             wealthHistory.Clear();
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("Discards every recorded point and starts the series again from the next completed all-retainer check.");
+            ImGui.SetTooltip("Discards this character's recorded points and starts again from the next available complete estimate.");
 
-        if (samples.Count < 2)
+        var samples = wealthHistory.History.Within(WealthRanges[wealthRangeIndex].Window, now);
+        if (samples.Count == 0)
         {
             ImGui.TextDisabled(wealthHistory.History.Samples.Count == 0
-                ? "No points yet. One is recorded each time a complete all-retainer check finishes."
-                : "Only one point in this range so far; a line needs at least two.");
+                ? "No points yet. Complete an all-retainer check to start saving your wealth history."
+                : "No saved points in this range. Select All to see your earlier estimates.");
             return;
         }
 
-        // Gil totals run into the billions, so plot in millions to keep the axis readable.
-        var values = samples.Select(x => (float)(x.Total / 1_000_000.0)).ToArray();
-        var lowest = values.Min();
-        var highest = values.Max();
-        var padding = Math.Max((highest - lowest) * 0.1f, 0.01f);
+        var lowest = samples.Min(x => x.Total);
+        var highest = samples.Max(x => x.Total);
         var change = wealthHistory.History.ChangeOver(WealthRanges[wealthRangeIndex].Window, now);
 
-        ImGui.PlotLines("##WealthOverTime", values, 0,
-            $"{FormatGil(samples[^1].Total)} now",
-            lowest - padding, highest + padding,
-            new Vector2(-1, 90 * ImGuiHelpers.GlobalScale));
+        // Draw against real timestamps: equally spaced indices distort long gaps
+        // between sessions. A first saved estimate is also visible as a dot.
+        var scale = ImGuiHelpers.GlobalScale;
+        var origin = ImGui.GetCursorScreenPos();
+        var size = new Vector2(Math.Max(160 * scale, ImGui.GetContentRegionAvail().X), 130 * scale);
+        ImGui.InvisibleButton("##WealthOverTime", size);
+        var hovered = ImGui.IsItemHovered();
+        var draw = ImGui.GetWindowDrawList();
+        draw.AddRectFilled(origin, origin + size, ImGui.GetColorU32(ImGuiCol.FrameBg));
+        var inset = new Vector2(8 * scale, 8 * scale);
+        var plotStart = origin + inset;
+        var plotSize = size - inset * 2;
+        var valueSpan = (double)(highest - lowest);
+        var padding = Math.Max(valueSpan * 0.1, 10_000);
+        var timeSpan = (samples[^1].At - samples[0].At).TotalSeconds;
+        var color = ImGui.GetColorU32(new Vector4(0.4f, 0.85f, 1f, 1f));
+        var mouseX = ImGui.GetMousePos().X;
+        var closest = 0;
+        var closestDistance = float.MaxValue;
+        Vector2? previous = null;
+        for (var i = 0; i < samples.Count; i++)
+        {
+            var sample = samples[i];
+            var x = timeSpan > 0 ? (sample.At - samples[0].At).TotalSeconds / timeSpan : 0.5;
+            var y = ((double)(sample.Total - lowest) + padding) / (valueSpan + 2 * padding);
+            var point = plotStart + new Vector2((float)x * plotSize.X, (1 - (float)y) * plotSize.Y);
+            if (previous is { } previousPoint)
+                draw.AddLine(previousPoint, point, color, 2 * scale);
+            draw.AddCircleFilled(point, (i == samples.Count - 1 ? 3.5f : 2f) * scale, color);
+            previous = point;
+            var distance = Math.Abs(point.X - mouseX);
+            if (distance < closestDistance)
+            {
+                closestDistance = distance;
+                closest = i;
+            }
+        }
+        if (hovered)
+        {
+            var sample = samples[closest];
+            ImGui.SetTooltip($"{sample.At.LocalDateTime:g}\nTotal: {FormatGil(sample.Total)}\n" +
+                             $"Gil: {FormatGil(sample.Gil)}\nListed net: {FormatGil(sample.ListedNet)}\n" +
+                             $"Bag stock net: {FormatGil(sample.BagNet)}");
+        }
 
+        ImGui.TextUnformatted($"Latest saved estimate: {FormatGil(samples[^1].Total)} ({samples[^1].At.LocalDateTime:g})");
         ImGui.TextDisabled($"{samples.Count} point(s) from {samples[0].At.LocalDateTime:g} " +
-                           $"| low {FormatGil((ulong)(lowest * 1_000_000))} " +
-                           $"| high {FormatGil((ulong)(highest * 1_000_000))}");
+                           $"| low {FormatGil(lowest)} | high {FormatGil(highest)}");
         if (change is { } delta)
         {
             var perDay = delta.Span.TotalDays >= 0.05
@@ -564,8 +601,11 @@ public sealed class DashboardWindow : Window
                 $"{(delta.Change >= 0 ? "Up" : "Down")} {FormatGil((ulong)Math.Abs(delta.Change))} " +
                 $"over {FormatSpan(delta.Span)}{perDay}");
         }
-        ImGui.TextDisabled("Each point is one completed all-retainer check, using the conservative " +
-                           "market-aligned wealth estimate. Partial scans are not plotted.");
+        if (samples.Count == 1)
+            ImGui.TextDisabled("First saved estimate. The line grows as further checks or stock and gil changes are recorded.");
+        ImGui.TextWrapped("Wealth includes your wallet, saved retainer gil, net listed value, and valued bag stock. " +
+                          "The graph keeps your starting point and the latest estimate in each 15-minute interval. " +
+                          "Changes in estimated wealth include price changes and are not realized sale earnings.");
     }
 
     private static string FormatSpan(TimeSpan span) => span.TotalDays >= 1
@@ -575,17 +615,17 @@ public sealed class DashboardWindow : Window
     private void DrawPortfolio()
     {
         var portfolio = automation.PortfolioSnapshot();
+        DrawWealthGraph();
         if (!portfolio.StartedAt.HasValue)
         {
-            ImGui.TextDisabled("Run a retainer scan to build a listing and gil estimate.");
-            return;
+            ImGui.TextDisabled("Run a retainer scan to add retainer listings and gil to this estimate.");
         }
 
         var statusText = portfolio.IsComplete
             ? portfolio.IsFullBellRun
-                ? $"Complete account estimate: {portfolio.RetainersScanned} / {portfolio.ExpectedRetainers} retainers"
-                : "Complete estimate for the currently open retainer only"
-            : $"Scanning: {portfolio.RetainersScanned} / {portfolio.ExpectedRetainers} retainers read";
+                ? $"Saved account estimate: {portfolio.RetainersScanned} / {portfolio.ExpectedRetainers} retainers"
+                : "Saved estimate for scanned retainers"
+            : $"Partial estimate: {portfolio.RetainersScanned} / {portfolio.ExpectedRetainers} retainers observed";
         ImGui.TextColored(
             portfolio.IsComplete && portfolio.IsFullBellRun
                 ? new Vector4(0.35f, 0.9f, 0.45f, 1f)
@@ -593,8 +633,6 @@ public sealed class DashboardWindow : Window
             statusText);
         if (portfolio.CompletedAt is { } completed)
             ImGui.TextDisabled($"Last completed {completed.LocalDateTime:g}");
-
-        DrawWealthGraph();
 
         ImGui.Separator();
         ImGui.TextUnformatted($"Current gil found: {FormatGil(portfolio.CurrentGil)}");
@@ -607,6 +645,13 @@ public sealed class DashboardWindow : Window
         ImGui.TextUnformatted($"Net proceeds at asking prices: {FormatGil(portfolio.EstimatedNetAtAsking)}");
         ImGui.TextUnformatted($"Net market-aligned proceeds: {FormatGil(portfolio.EstimatedNetMarketAligned)}");
         ImGui.Spacing();
+        ImGui.TextUnformatted($"Unlisted bag stock, net estimate: {FormatGil(portfolio.EstimatedBagNetValue)}");
+        ImGui.TextDisabled($"{portfolio.BagUnits:N0} sellable units across {portfolio.BagItemTypes:N0} item/quality groups, after reserves");
+        if (portfolio.CostBasisBagItemTypes > 0)
+            ImGui.TextDisabled($"{portfolio.CostBasisBagItemTypes} bag item/quality groups use paid cost less sale tax until a home price is observed.");
+        if (portfolio.UnknownBagUnits > 0)
+            ImGui.TextWrapped($"{portfolio.UnknownBagUnits:N0} bag units have no known price and are excluded from the gil estimate.");
+        ImGui.Spacing();
         ImGui.TextColored(new Vector4(0.35f, 0.85f, 1f, 1f),
             $"Projected total wealth at asking: {FormatGil(portfolio.ProjectedWealthAtAsking)}");
         ImGui.TextColored(new Vector4(0.55f, 0.9f, 0.65f, 1f),
@@ -614,6 +659,8 @@ public sealed class DashboardWindow : Window
 
         ImGui.Spacing();
         ImGui.TextWrapped(
+            "Retainer values stay saved while the bell is closed or you travel; each observed retainer refreshes its saved holdings. " +
+            "Projected wealth includes eligible bag stock after reserves and sale tax. Unsold stock is estimated value, not earned gil. " +
             $"The market-aligned estimate uses live competitor/strategy prices for {portfolio.LiveEstimatedListings} of {portfolio.Listings} listings and falls back to the current asking price where no live result was available. " +
             "Price-war outliers use the protected historical floor instead of assuming you must match a suspiciously cheap listing. Net values subtract each retainer's seller tax read from the Adjust Price window (usually 5%, 3%, or 0%; 5% fallback). These are estimates, not guaranteed sale proceeds.");
 
@@ -728,6 +775,12 @@ public sealed class DashboardWindow : Window
             changed = true;
         }
         var costBasis = rule.CostBasis;
+        var applyPurchasedMinimum = rule.ApplyMinimumPriceToPurchasedStock;
+        if (ImGui.Checkbox("Apply minimum price to purchased stock", ref applyPurchasedMinimum))
+        {
+            rule.ApplyMinimumPriceToPurchasedStock = applyPurchasedMinimum;
+            changed = true;
+        }
         if (InputUInt("Cost basis", ref costBasis, 0, 999_999_999))
         {
             rule.CostBasis = costBasis;
@@ -735,12 +788,13 @@ public sealed class DashboardWindow : Window
         }
 
         var margin = (float)rule.MinimumMarginPercent;
-        if (ImGui.DragFloat("Minimum margin %", ref margin, 0.1f, 0, 10000, "%.1f%%"))
+        if (ImGui.DragFloat("Manual-cost minimum margin %", ref margin, 0.1f, 0, 10000, "%.1f%%"))
         {
             rule.MinimumMarginPercent = (decimal)Math.Max(0, margin);
             changed = true;
         }
         var absoluteTolerance = rule.AbsoluteTolerance;
+        ImGui.TextWrapped("Purchased stock follows profitable prices after tax. Enable the minimum-price override above to hold it at a higher price.");
         if (InputUInt("Absolute tolerance", ref absoluteTolerance, 0, 1_000_000))
         {
             rule.AbsoluteTolerance = absoluteTolerance;

@@ -125,7 +125,7 @@ already held — plus budget, slots and concentration limits. See §8.
 
 Everything is listed on the home world and repriced every retainer pass. Pricing is
 **depth-adjusted lowest competitor − 1 gil**, floored at
-`max(MinimumPrice, AcquisitionFloor, costBasis × (1 + margin%))`. See §6.
+the current landed purchase cost plus at least one gil of profit after seller tax for tracked purchases. Legacy automatic minimums and buying ROI targets do not pin resale prices; an explicit minimum override can be enabled. Unknown-cost stock keeps its historical-drop safeguard. See §6.
 
 ### How it chooses between competing opportunities
 
@@ -744,20 +744,25 @@ competitors = market.Listings WHERE
 
 ```
 1. Validate listing/rule bounds                        -> InvalidData
-2. floor = CalculateFloor(listing, rule)
-       configured = MAX(rule.MinimumPrice, rule.AcquisitionFloor)
+2. floor = PositionCostPolicy.MinimumListingPrice(rule, fees, listing.AcquisitionCost)
        costBasis  = listing.AcquisitionCost != 0 ? it : rule.CostBasis
-       IF costBasis == 0 -> floor = MAX(1, configured)
-       ELSE floor = MAX(configured, CEIL(costBasis × (1 + MinimumMarginPercent/100)))
+       tracked    = CostBasisUnits > 0 AND costBasis > 0
+       configured = tracked AND !ApplyMinimumPriceToPurchasedStock ? 1 : MAX(1, MinimumPrice)
+       IF costBasis == 0 -> floor = MAX(configured, AcquisitionFloor)
+       ELSE margin = tracked ? 0 : MinimumMarginPercent
+            requiredNet = CEIL(MAX(costBasis + 1, costBasis × (1 + margin/100)))
+            floor = MAX(configured, fees.ListingPriceForNet(requiredNet))
+       IF profitable floor is unreachable within the game's price limit -> InvalidData
 3. Build competitor set (above)
 4. competitors empty                                   -> NoMarketData (no change)
 5. lowest = DepthAdjustedLowest(competitors, AbsorbableUnits)
-6. Price-war test: lowest < historicalMedian × (1 − PriceWarDropPercent/100)
+6. rawTarget = Mode == MatchLowest ? lowest : (lowest > UndercutAmount ? lowest − UndercutAmount : 1)
+7. IF costBasis > 0 AND rawTarget >= floor: bypass the historical-drop guard
+   ELSE price-war test: lowest < historicalMedian × (1 − PriceWarDropPercent/100)
        IF war AND action == LeaveUnchanged             -> PriceWar (no change)
        IF war AND action == MatchProtectedFloor        -> Update to MAX(floor, protected)
-7. currentPrice <= lowest                              -> NoChange
-8. WithinTolerance(current, lowest)                    -> WithinTolerance
-9. rawTarget = Mode == MatchLowest ? lowest : (lowest > UndercutAmount ? lowest − UndercutAmount : 1)
+8. currentPrice <= lowest                              -> NoChange
+9. WithinTolerance(current, lowest)                    -> WithinTolerance
 10. rawTarget < floor                                  -> BelowFloor (no change)
 11. rounded = RoundDown(rawTarget, Rounding)           ; None | EndIn99 | EndIn999
 12. target = MAX(floor, rounded)
@@ -779,13 +784,18 @@ CostBasis   = (holdingsKnown && CostBasis > 0)
               ? CEIL((CostBasis × blendUnits + landedCost) / (blendUnits + quantity))
               : MAX(CostBasis, unit)                                     ; protective fallback
 CostBasisUnits   = blendUnits + quantity
-AcquisitionFloor = ProcurementPriceSafety.MinimumResalePrice(CostBasis, requiredRoi, minProfit, fees)
-                 = CEIL( CEIL(MAX(cost × (1+roi/100), cost + minProfit)) / (1 − marketTax/100) )
+AcquisitionFloor = ProcurementPriceSafety.MinimumProfitableResalePrice(CostBasis, fees)
+                 = CEIL((CostBasis + 1) / (1 − marketTax/100))
 ```
 
-`MinimumMarginPercent` is **no longer written** by purchases, and `MinimumPrice` is left to the
-user; the automatic floor lives in `AcquisitionFloor` and is recomputed from the current basis
-every time. [IMPL]
+Purchases no longer write `MinimumMarginPercent` or `MinimumPrice`. Older versions stored
+automatic purchase margins in both fields, so tracked purchases ignore those legacy values
+by default. `ApplyMinimumPriceToPurchasedStock` explicitly enables an additional minimum
+price; rules without tracked purchased units retain their minimum and margin settings.
+The automatic floor in `AcquisitionFloor` returns the landed cost plus at least one gil per
+unit after seller tax. Repricing recomputes that floor from the current cost basis and fee
+model, so stale saved floors cannot block profitable cuts. Buying new stock still requires
+the configured purchase ROI and minimum profit. [IMPL]
 
 `ProcurementController.ReconcilePositionCosts` (L1948), called at the start of every scan,
 retires units that are no longer held (`PositionCostPolicy.RecordSale`) and clears the basis
@@ -1223,19 +1233,26 @@ FOR order IN plan:
     IF all pass: SUBMIT PURCHASE; confirm via inventory delta (+ yes/no prompt)
     ON confirm: CostBasis        = weighted average landed cost over units held
                 CostBasisUnits  += quantity
-                AcquisitionFloor = CEIL(required net / (1 − marketTax/100))
+                AcquisitionFloor = MinimumProfitableResalePrice(CostBasis, fees)
+                                 # landed cost + at least 1 gil net per unit
 
 # ---------- RESELL (continuous, every retainer pass) ----------
 FOR each retainer listing:
     read live Compare Prices; record the seller fee the game reports
     competitors = listings excluding our own retainers, matching quality
     IF none: KEEP
-    lowest = DepthAdjustedLowest(competitors, MIN(stack/2, salesPerDay × AbsorptionDays))
-    IF lowest < historicalMedian × 0.40: PRICE WAR -> keep (or protected floor)
+    lowest = DepthAdjustedLowest(competitors, market.AbsorbableUnits)
+    target = MatchLowest ? lowest : MAX(1, lowest − UndercutAmount)
+    floor  = PositionCostPolicy.MinimumListingPrice(rule, fees, listing.AcquisitionCost)
+             # tracked purchases: cost + 1 gil net; optional explicit minimum
+             # manual/unknown-cost rules retain their minimum and margin safeguards
+    IF floor cannot be reached within the game's price limit: KEEP (invalid data)
+    knownCost = listing.AcquisitionCost > 0 OR rule.CostBasis > 0
+    IF !(knownCost AND target >= floor)
+       AND lowest < historicalMedian × (1 − PriceWarDropPercent/100):
+        PRICE WAR -> keep (or protected floor)
     IF current <= lowest OR within tolerance: KEEP
-    target = lowest − UndercutAmount                 # default 1 gil
-    floor  = MAX(MinimumPrice, AcquisitionFloor, CEIL(CostBasis × (1 + MinimumMarginPercent/100)))
-    IF target < floor: KEEP                          # never sell below landed cost + margin
+    IF target < floor: KEEP                          # known cost must return a net profit
     COMMIT MAX(floor, roundDown(target))
 ```
 
@@ -1257,8 +1274,8 @@ FOR each retainer listing:
 | Sales velocity | `Core/Services/SalesVelocityPolicy.cs` | `DailyUnits` |
 | Order metrics | `Core/Models/ProcurementModels.cs` | `ProcurementOrder` (L232+), `PortfolioGates`, `PortfolioDecision` (L54), `MarketConfidence` (L99) |
 | **Depth-aware anchor** | `Core/Services/HomePriceReference.cs` | `DepthAdjustedLowest` (L62), `WithoutOutliers` (L30) |
-| Resale pricing / undercut | `Core/Services/PricingStrategyService.cs` | `Evaluate`, `CalculateFloor`, `DepthAdjustedLowest`, `IsPriceWar` |
-| Resale floor from cost | `Core/Services/ProcurementPriceSafety.cs` | `MinimumResalePrice` (L12) |
+| Resale pricing / undercut | `Core/Services/PricingStrategyService.cs` | `Evaluate`, `DepthAdjustedLowest`, `IsPriceWar` |
+| Resale floor from cost | `Core/Services/PositionCostPolicy.cs`, `Core/Services/ProcurementPriceSafety.cs` | `MinimumListingPrice`, `MinimumProfitableResalePrice` |
 | Price sanity / placeholders | `Core/Services/MarketPriceSafety.cs` | `IsSafeAutomaticUnitPrice`, `IsSafetySeedRepresentation` |
 | Stock / quality / budget helpers | `Core/Services/ResaleStockPolicy.cs` | `BuyableQuality`, `SpendableGil`, `BufferSpendableGil` |
 | Route + per-world item choice | `Core/Services/ShoppingScoutPolicy.cs` | `BuildRoute`, `SelectWorldItems`, `BuysBeforeComparison` |

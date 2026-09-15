@@ -21,12 +21,15 @@ public sealed class PricingStrategyService : IPricingStrategyService
         if (listing.ItemId == 0 || market.ItemId != listing.ItemId ||
             listing.CurrentPrice is 0 or > MaximumListingPrice ||
             rule.PriceWarDropPercent is < 0 or >= 100 || rule.MinimumMarginPercent < 0 ||
-            rule.PercentageTolerance < 0)
+            rule.PercentageTolerance < 0 || context.Fees is { IsValid: false })
         {
             return Decision(PriceDecisionKind.InvalidData, listing, null, 0, "Listing or rule data is outside valid bounds.");
         }
 
-        var floor = CalculateFloor(listing, rule);
+        var floor = PositionCostPolicy.MinimumListingPrice(rule, context.Fees, listing.AcquisitionCost);
+        if (floor > MaximumListingPrice)
+            return Decision(PriceDecisionKind.InvalidData, listing, null, floor,
+                "The effective minimum cannot be reached within the game's listing-price limit.");
         var ownedRetainers = context.OwnedRetainerIds;
         var competitors = market.Listings
             .Where(x => x.Quantity > 0)
@@ -49,7 +52,14 @@ public sealed class PricingStrategyService : IPricingStrategyService
         // walks the whole position down for nothing. Real competing volume still
         // sets the price. With no absorption figure this is the cheapest listing.
         var lowest = DepthAdjustedLowest(competitors, market.AbsorbableUnits);
-        if (IsPriceWar(lowest, market.HistoricalMedianPrice, rule.PriceWarDropPercent))
+        var rawTarget = rule.Mode == PricingMode.MatchLowest
+            ? lowest
+            : lowest > rule.UndercutAmount ? lowest - rule.UndercutAmount : 1u;
+        var hasKnownCost = listing.AcquisitionCost > 0 || rule.CostBasis > 0;
+        // History can flag a large move, but it must not block selling known-cost
+        // stock for a profit. Unknown-cost stock retains the historical safeguard.
+        if (!(hasKnownCost && rawTarget >= floor) &&
+            IsPriceWar(lowest, market.HistoricalMedianPrice, rule.PriceWarDropPercent))
         {
             if (rule.PriceWarAction == PriceWarAction.LeaveUnchanged)
                 return Decision(PriceDecisionKind.PriceWar, listing, lowest, floor, "Lowest price breached the configured historical drop threshold.");
@@ -69,10 +79,6 @@ public sealed class PricingStrategyService : IPricingStrategyService
         if (WithinTolerance(listing.CurrentPrice, lowest, rule))
             return Decision(PriceDecisionKind.WithinTolerance, listing, lowest, floor, "Current price is inside the configured tolerance band.");
 
-        var rawTarget = rule.Mode == PricingMode.MatchLowest
-            ? lowest
-            : lowest > rule.UndercutAmount ? lowest - rule.UndercutAmount : 1u;
-
         if (rawTarget < floor)
             return Decision(PriceDecisionKind.BelowFloor, listing, lowest, floor, "Competitive target would fall below the effective minimum price.");
 
@@ -90,19 +96,6 @@ public sealed class PricingStrategyService : IPricingStrategyService
 
     private static PriceDecision Decision(PriceDecisionKind kind, RetainerListing listing, uint? lowest, uint floor, string reason) =>
         new(kind, listing.CurrentPrice, null, lowest, floor, reason);
-
-    private static uint CalculateFloor(RetainerListing listing, PricingRule rule)
-    {
-        // The user's own minimum and the floor implied by what the stock cost are
-        // separate promises; honour whichever binds harder.
-        var configured = Math.Max(rule.MinimumPrice, rule.AcquisitionFloor);
-        var costBasis = listing.AcquisitionCost == 0 ? rule.CostBasis : listing.AcquisitionCost;
-        if (costBasis == 0)
-            return Math.Max(1, configured);
-
-        var marginFloor = decimal.Ceiling(costBasis * (1m + (rule.MinimumMarginPercent / 100m)));
-        return Math.Max(configured, (uint)Math.Min(marginFloor, MaximumListingPrice));
-    }
 
     /// <summary>
     /// The cheapest price with more competing inventory in front of it than the

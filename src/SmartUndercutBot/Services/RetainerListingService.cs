@@ -131,6 +131,33 @@ public sealed unsafe class RetainerListingService : IRetainerListingService
         }
     }
 
+    public bool IsPlayerInventoryReady
+    {
+        get
+        {
+            if (!clientState.IsLoggedIn || objectTable.LocalPlayer is null) return false;
+            var manager = InventoryManager.Instance();
+            if (manager == null) return false;
+            foreach (var type in PlayerInventoryTypes)
+            {
+                var container = manager->GetInventoryContainer(type);
+                if (container == null || !container->IsLoaded) return false;
+            }
+            return true;
+        }
+    }
+
+    public bool IsSellListInventoryReady
+    {
+        get
+        {
+            var manager = InventoryManager.Instance();
+            if (!IsSellListOpen || manager == null) return false;
+            var container = manager->GetInventoryContainer(InventoryType.RetainerMarket);
+            return container != null && container->IsLoaded;
+        }
+    }
+
     public uint PlayerGil
     {
         get

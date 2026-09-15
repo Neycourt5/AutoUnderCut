@@ -453,13 +453,13 @@ public sealed class ProfitOptimizationTests
     {
         var rule = new PricingRule();
         // One expensive stack: 2,100 gil a unit landed.
-        PositionCostPolicy.RecordPurchase(rule, 0, 99, 207_900, 10m, 100, holdingsKnown: true);
+        PositionCostPolicy.RecordPurchase(rule, 0, 99, 207_900, holdingsKnown: true);
         Assert.Equal(2_100u, rule.CostBasis);
         Assert.Equal(99u, rule.CostBasisUnits);
         var expensiveFloor = rule.AcquisitionFloor;
 
         // A cheaper stack pulls the basis down instead of being stranded above it.
-        PositionCostPolicy.RecordPurchase(rule, 99, 99, 108_900, 10m, 100, holdingsKnown: true);
+        PositionCostPolicy.RecordPurchase(rule, 99, 99, 108_900, holdingsKnown: true);
         Assert.Equal(1_600u, rule.CostBasis);
         Assert.Equal(198u, rule.CostBasisUnits);
         Assert.True(rule.AcquisitionFloor < expensiveFloor);
@@ -472,7 +472,7 @@ public sealed class ProfitOptimizationTests
 
         // With holdings unverifiable the protective high-water mark is kept.
         var guarded = new PricingRule { CostBasis = 2_100, CostBasisUnits = 99 };
-        PositionCostPolicy.RecordPurchase(guarded, 99, 99, 108_900, 10m, 100, holdingsKnown: false);
+        PositionCostPolicy.RecordPurchase(guarded, 99, 99, 108_900, holdingsKnown: false);
         Assert.Equal(2_100u, guarded.CostBasis);
     }
 

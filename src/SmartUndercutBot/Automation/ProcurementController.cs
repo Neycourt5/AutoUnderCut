@@ -1567,15 +1567,15 @@ public sealed partial class ProcurementController : IDisposable
         // Preserve manual floors. The automatic floor is recomputed independently.
         // Unknown old quantities cannot safely justify lowering a legacy basis.
         PositionCostPolicy.RecordPurchase(pricingRule, positionUnitsBeforePurchase,
-            actual.Quantity, purchaseCost, RequiredPurchaseRoi(actual),
-            configuration.Current.ProcurementMinimumProfitPerUnit,
+            actual.Quantity, purchaseCost,
             repricing.LastKnownFreeSaleSlots.HasValue, configuration.Current.Fees);
         actual = actual with
         {
             LandedCost = purchaseCost,
             ExpectedProfit = (uint)Math.Clamp((decimal)configuration.Current.Fees.NetProceeds(actual.TargetSalePrice, actual.Quantity)
                 - purchaseCost, 0m, uint.MaxValue),
-            TargetSalePrice = Math.Max(actual.TargetSalePrice, Math.Max(pricingRule.MinimumPrice, pricingRule.AcquisitionFloor)),
+            TargetSalePrice = Math.Max(actual.TargetSalePrice,
+                PositionCostPolicy.MinimumListingPrice(pricingRule, configuration.Current.Fees)),
         };
         ledger.RecordPurchase(actual, stackSize);
         // Owned stock just changed, so the next cap check must not use the cache.

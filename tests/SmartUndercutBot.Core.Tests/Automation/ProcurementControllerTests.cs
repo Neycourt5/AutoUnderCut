@@ -107,8 +107,9 @@ public sealed class ProcurementControllerTests
         Assert.Equal(1_247_400u, run.Controller.Status.GilSpent);
         Assert.Equal(2_752_600u, run.Game.Gil);
         Assert.Equal("Siren", run.Game.World);
-        // The newly bought fast mover must also be sellable below the old 20% floor.
-        Assert.InRange(run.Config.Current.PerItemRules[1].AcquisitionFloor, 14_000u, 14_999u);
+        // Buying requires a healthy ROI; selling existing stock may follow any
+        // price that returns more than its landed cost after the seller tax.
+        Assert.Equal(13_265u, run.Config.Current.PerItemRules[1].AcquisitionFloor);
     }
 
     [Fact]
@@ -1184,11 +1185,11 @@ public sealed class ProcurementControllerTests
             Assert.Equal(166_320u, run.Controller.Status.GilSpent);
             Assert.Single(run.Ledger.Snapshot());
             // The position, not a high-water mark: 166,320 gil of landed cost over
-            // 99 units, and a floor that returns it plus the 10% bar after sale tax.
+            // 99 units, and a floor that returns it plus one gil after sale tax.
             var pricing = run.Config.Current.PerItemRules[1];
             Assert.Equal(1_680u, pricing.CostBasis);
             Assert.Equal(99u, pricing.CostBasisUnits);
-            Assert.Equal(1_946u, pricing.AcquisitionFloor);
+            Assert.Equal(1_770u, pricing.AcquisitionFloor);
             // Nothing ratchets the configured margin, so a later cheaper buy is free
             // to lower the floor instead of being stranded above it.
             Assert.Equal(0m, pricing.MinimumMarginPercent);
