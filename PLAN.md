@@ -1,4 +1,4 @@
-# Current: v1.0.0.71 profitable repricing and persistent wealth
+# Completed: v1.0.0.71 profitable repricing and persistent wealth
 
 - [x] Trace potion price floors and graph/portfolio resets.
 - [x] Allow tracked stock to undercut whenever proceeds exceed paid cost after fees.
@@ -14,8 +14,15 @@
 - [x] Regression coverage: 459 tests passed. Final Release build: zero warnings/errors.
       Persistence tests require normal Windows permissions: sandbox denied File.Replace.
       Public remote checked: 1.0.0.71 unused; packaged manifest and DLL report .71/API15.
-- [ ] Commit/push main and annotated v1.0.0.71 release tag.
-- [ ] Verify release workflow, public latest repo.json and SmartUndercutBot.zip.
+- [x] Commit 2331027 pushed to origin/main with annotated v1.0.0.71.
+      Release workflow 34936371741 and Build 34936371797 both succeeded.
+- [x] Verified public latest repo.json and SmartUndercutBot.zip on 2026-09-15.
+      Installer and ZIP manifests, plus the plugin DLL, report 1.0.0.71/API15.
+      Both required DLLs are at ZIP root. ZIP: 635,336 bytes; SHA-256 matches
+      GitHub's published digest:
+      118D4D796CB51C853C8E7EBFDACED874EB01BF037BCBC5CDFDBBF77A58593C01.
+      Installer/install/update URLs unchanged; ready through Dalamud installer.
+      Run one full retainer scan after updating to populate saved holdings.
 
 Native game operations have not been exercised in this session.
 
