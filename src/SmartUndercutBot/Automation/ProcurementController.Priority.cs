@@ -104,11 +104,38 @@ public sealed partial class ProcurementController
         var scores = hints.GroupBy(x => x.Hint.WorldName, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(g => g.Key, g => g.Sum(x => x.Score), StringComparer.OrdinalIgnoreCase);
         var expectedWorlds = NorthAmericaWorlds.Where(w => !w.Equals(homeWorld, StringComparison.OrdinalIgnoreCase)).ToArray();
+        // Markets that were still selling cheaply when the last trip ran out of gil
+        // or space. Their listings did not disappear because the wallet emptied, so
+        // the circuit opens there rather than rediscovering them twenty stops later.
+        var remembered = BargainMemoryPolicy.Fresh(config.RememberedBargains, timeProvider.GetUtcNow(),
+            TimeSpan.FromHours(Math.Clamp(config.ScoutKnowledgeMaxAgeHours, 1, 168)));
+        var revisit = BargainMemoryPolicy.RevisitOrder(remembered)
+            .Where(w => !w.Equals(homeWorld, StringComparison.OrdinalIgnoreCase) &&
+                        ProcurementTravelPolicy.CanShopOnWorld(w))
+            .ToArray();
         // Keep the route stable across retainer checkpoints; repricing the hints
-        // on each trip must not reorder worlds behind the saved cursor forever.
+        // on each trip must not reorder worlds behind the saved cursor forever. A
+        // new remembered market is the one thing that does justify reordering.
+        var leadsRoute = revisit.Length == 0 ||
+            config.PriorityScoutRoute.Take(revisit.Length).SequenceEqual(revisit, StringComparer.OrdinalIgnoreCase);
         if (config.PriorityScoutRoute.Count != expectedWorlds.Length ||
-            !config.PriorityScoutRoute.ToHashSet(StringComparer.OrdinalIgnoreCase).SetEquals(expectedWorlds))
-            config.PriorityScoutRoute = ShoppingScoutPolicy.BuildRoute(NorthAmericaWorlds, homeWorld, scores).ToList();
+            !config.PriorityScoutRoute.ToHashSet(StringComparer.OrdinalIgnoreCase).SetEquals(expectedWorlds) ||
+            !leadsRoute)
+        {
+            config.PriorityScoutRoute = ShoppingScoutPolicy
+                .BuildRoute(NorthAmericaWorlds, homeWorld, scores, revisit).ToList();
+            if (!leadsRoute)
+            {
+                // Start at the top of the new route instead of resuming behind the
+                // markets we deliberately moved to the front.
+                config.PriorityNextWorld = string.Empty;
+                config.PriorityNextItem = 0;
+                log.Add(AutomationLogLevel.Information,
+                    "SHOPPING FIRST STOPS from the last trip: " + string.Join(", ", remembered
+                        .OrderBy(x => Array.IndexOf(revisit, x.WorldName))
+                        .Select(x => $"{x.ItemName} on {x.WorldName} at {x.UnitPrice:N0} gil ({x.StopReason})")));
+            }
+        }
         var resume = config.PriorityScoutRoute.FindIndex(w => w.Equals(config.PriorityNextWorld, StringComparison.OrdinalIgnoreCase));
         stockHuntWorlds = new[] { homeWorld }.Concat(config.PriorityScoutRoute.Skip(Math.Max(0, resume))).ToList();
         scoutItems.Clear();
@@ -127,8 +154,12 @@ public sealed partial class ProcurementController
             var hinted = hints.Where(x => x.Hint.WorldName.Equals(world, StringComparison.OrdinalIgnoreCase) && x.Score > 0)
                 .OrderByDescending(x => HomeSalesPerDay(x.Hint.ItemId, x.Hint.IsHighQuality))
                 .ThenByDescending(x => x.Score).Select(x => x.Hint.ItemId).Distinct().Take(Math.Max(1, limit / 4));
-            var resumed = world.Equals(config.PriorityNextWorld, StringComparison.OrdinalIgnoreCase) && config.PriorityNextItem != 0
-                ? new[] { config.PriorityNextItem } : [];
+            // A remembered market is priced first on its own world: it is the whole
+            // reason the circuit came back here.
+            var resumed = BargainMemoryPolicy.RevisitItems(remembered, world)
+                .Concat(world.Equals(config.PriorityNextWorld, StringComparison.OrdinalIgnoreCase) && config.PriorityNextItem != 0
+                    ? [config.PriorityNextItem] : [])
+                .ToArray();
             scoutItems[world] = ShoppingScoutPolicy
                 .SelectWorldItems(preferredItems, secondaryItems, resumed, hinted, i, limit).ToHashSet();
         }

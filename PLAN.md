@@ -1,3 +1,23 @@
+# Completed: v1.0.0.73 remember productive markets and revisit them first
+
+- [x] Record every world/item a trip actually bought from, with the price paid, the
+      units taken, and which limit stopped buying (`BargainMemory`).
+- [x] Distinguish "swept clean" from "we ran out". A bargain sweep also ends when the
+      wallet empties, so `RefreshBargainOrder` now checks whether listings remain at
+      our price: clean markets are forgotten, budget/space-bound ones are remembered
+      with `OutOfGil`/`OutOfSpace`.
+- [x] `ShoppingScoutPolicy.BuildRoute` takes revisit worlds that lead the circuit;
+      the remainder keeps data-centre batching. `PrepareScoutRoute` rebuilds the
+      cached route and resets the resume cursor when a new market leads it.
+- [x] The remembered item is priced first on its own world (`RevisitItems`).
+- [x] Persisted in `Configuration.RememberedBargains`, capped at 8, expired against
+      `ScoutKnowledgeMaxAgeHours` (24 h default) by the controller's injected clock.
+      `Normalize()` only drops malformed rows - ageing there used the wall clock and
+      discarded valid entries under a shifted clock.
+- [x] Tests: 486 passed (new `BargainMemoryPolicyTests`, `BargainRevisitTests`).
+- [ ] Native validation still needed: the revisit ordering and memory are exercised
+      only against the fake market. No in-game session has been run.
+
 # Completed: v1.0.0.72 same-item batch purchasing
 
 - [x] Reuse a valid same-item listing session after a confirmed purchase instead of

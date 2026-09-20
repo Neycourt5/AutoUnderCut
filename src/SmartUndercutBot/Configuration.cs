@@ -136,6 +136,13 @@ public sealed class Configuration : IPluginConfiguration
     public string PriorityNextWorld { get; set; } = string.Empty;
     public uint PriorityNextItem { get; set; }
     public List<string> PriorityScoutRoute { get; set; } = [];
+    /// <summary>
+    /// Markets that were still selling cheaply when buying stopped - usually because
+    /// the wallet emptied. The next circuit opens on these worlds instead of
+    /// rediscovering them twenty stops later. Expired against
+    /// <see cref="ScoutKnowledgeMaxAgeHours"/> and cleared once a world is swept out.
+    /// </summary>
+    public List<BargainMemory> RememberedBargains { get; set; } = [];
     // Eight of these are the reserved snipe block - six consumables and the two
     // rare dyes - so the rest is what is left for the busiest lines and the
     // rotation. Eight per stop left none at all.
@@ -646,6 +653,15 @@ public sealed class Configuration : IPluginConfiguration
         ProcurementFillRoiPercent = Math.Clamp(ProcurementFillRoiPercent, 0m, 1_000m);
         ProcurementFastMoverRoiPercent = Math.Clamp(ProcurementFastMoverRoiPercent, 0m, 1_000m);
         PriorityScoutRoute ??= [];
+        RememberedBargains ??= [];
+        // Drop malformed rows only. Expiry belongs to the controller, which owns the
+        // injected clock; ageing entries against the wall clock here would discard
+        // them under any simulated or shifted time.
+        RememberedBargains = RememberedBargains
+            .Where(x => x is not null && !string.IsNullOrWhiteSpace(x.WorldName) &&
+                        x.ItemId != 0 && x.UnitsBought > 0)
+            .Take(BargainMemoryPolicy.MaximumRemembered)
+            .ToList();
         PriorityItemsPerWorld = Math.Clamp(PriorityItemsPerWorld, 1, 40);
         ProcurementBufferValueTarget = Math.Min(ProcurementBufferValueTarget, 999_999_999u);
         PriorityWorldsPerTrip = Math.Clamp(PriorityWorldsPerTrip, 1, 40);

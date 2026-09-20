@@ -16,11 +16,12 @@ public static class ShoppingScoutPolicy
     /// ends early on bag space has still spent its stops where the value was.
     /// </summary>
     public static IReadOnlyList<string> BuildRoute(IReadOnlyList<string> worlds, string home,
-        IReadOnlyDictionary<string, decimal> scores)
+        IReadOnlyDictionary<string, decimal> scores,
+        IReadOnlyList<string>? revisitFirst = null)
     {
         ArgumentNullException.ThrowIfNull(worlds);
         ArgumentNullException.ThrowIfNull(scores);
-        return worlds.Chunk(8)
+        var route = worlds.Chunk(8)
             .Select(dc => (
                 Home: dc.Any(w => w.Equals(home, StringComparison.OrdinalIgnoreCase)),
                 Worlds: dc.Where(w => !w.Equals(home, StringComparison.OrdinalIgnoreCase))
@@ -28,6 +29,22 @@ public static class ShoppingScoutPolicy
             .OrderByDescending(dc => dc.Home)
             .ThenByDescending(dc => dc.Worlds.Sum(w => scores.GetValueOrDefault(w)))
             .SelectMany(dc => dc.Worlds).ToArray();
+        if (revisitFirst is not { Count: > 0 })
+            return route;
+
+        // A market that was still selling cheaply when the wallet emptied is worth
+        // more than the transfer it costs to open the circuit there. Those worlds
+        // move to the front in their own order; everything else keeps the data
+        // centre batching behind them.
+        var lead = revisitFirst
+            .Where(w => !w.Equals(home, StringComparison.OrdinalIgnoreCase))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Where(w => route.Contains(w, StringComparer.OrdinalIgnoreCase))
+            .ToArray();
+        if (lead.Length == 0)
+            return route;
+        var leading = lead.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return lead.Concat(route.Where(w => !leading.Contains(w))).ToArray();
     }
 
     /// <summary>

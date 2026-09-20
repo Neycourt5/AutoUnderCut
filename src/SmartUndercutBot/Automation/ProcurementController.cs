@@ -132,6 +132,15 @@ public sealed partial class ProcurementController : IDisposable
     // Same-item batching. A confirmed purchase hands straight back to the existing
     // per-purchase validation using the listings already in hand, instead of
     // retyping the item name and waiting for a whole new search.
+    // Markets bought from on this trip, and why buying stopped. Anything still here
+    // when the trip ends was cut short rather than swept clean, so the next circuit
+    // opens there instead of rediscovering it twenty stops later.
+    private readonly Dictionary<(string World, uint Item, bool Hq), BargainMemory> tripBargains = [];
+    // Markets with nothing left to buy at our price, as opposed to ones we simply
+    // could not afford. Only these are forgotten: a sweep also "completes" when the
+    // wallet empties, and that is precisely the market worth coming back to.
+    private readonly HashSet<(string World, uint Item, bool Hq)> sweptCleanMarkets = [];
+    private BargainStopReason tripStopReason = BargainStopReason.TripEnded;
     private bool reusingListingSession;
     // Whether the order being validated right now came from loaded results rather
     // than a fresh search, so a failed selection can buy one refresh before skipping.
@@ -1652,6 +1661,7 @@ public sealed partial class ProcurementController : IDisposable
             homePrices[actual.ItemId] = home.Where(x => x.ListingId != actual.ListingId).ToArray();
         scoutListings.RemoveAll(x => x.WorldName == actual.WorldName && x.ListingId == actual.ListingId);
         purchasedSlotsByItem[actual.ItemId] = purchasedSlotsByItem.GetValueOrDefault(actual.ItemId) + 1;
+        RememberProductiveMarket(actual);
 
         var now = timeProvider.GetUtcNow();
         var sinceLast = lastConfirmedPurchaseAt is { } previous ? now - previous : (TimeSpan?)null;
@@ -1667,6 +1677,76 @@ public sealed partial class ProcurementController : IDisposable
         if (!reuse && sessionPurchases > 1)
             EndListingSession(ListingSessionEndReason(actual, sweep));
         AdvanceOrder(repeatBargain: sweep, reuseSession: reuse);
+    }
+
+    /// <summary>
+    /// Note that this world sold us stock at this price. Units accumulate across the
+    /// visit so the value of the market, not just the last stack, decides how hard
+    /// the next circuit should try to get back here.
+    /// </summary>
+    private void RememberProductiveMarket(ProcurementOrder actual)
+    {
+        var key = (WorldName, actual.ItemId, actual.IsHighQuality);
+        if (tripBargains.TryGetValue(key, out var existing))
+        {
+            existing.UnitsBought += actual.Quantity;
+            existing.UnitPrice = Math.Max(existing.UnitPrice, actual.PricePerUnit);
+            existing.ObservedAt = timeProvider.GetUtcNow();
+            return;
+        }
+        tripBargains[key] = new()
+        {
+            WorldName = WorldName,
+            ItemId = actual.ItemId,
+            ItemName = actual.ItemName,
+            IsHighQuality = actual.IsHighQuality,
+            UnitPrice = actual.PricePerUnit,
+            UnitsBought = actual.Quantity,
+            ObservedAt = timeProvider.GetUtcNow(),
+        };
+    }
+
+    /// <summary>Record which limit stopped buying from a specific market.</summary>
+    private void MarkBargainStop(uint itemId, bool highQuality, BargainStopReason reason)
+    {
+        if (tripBargains.TryGetValue((WorldName, itemId, highQuality), out var entry))
+            entry.StopReason = reason;
+    }
+
+    /// <summary>
+    /// Fold this trip's productive markets into the saved memory. A market that was
+    /// swept clean is dropped: its listings are gone, and sending the next trip back
+    /// would waste the first stop.
+    /// </summary>
+    private void SaveRememberedBargains()
+    {
+        var config = configuration.Current;
+        if (tripBargains.Count == 0 && config.RememberedBargains.Count == 0)
+            return;
+        foreach (var entry in tripBargains.Values)
+            // A market that already knows why it stopped keeps that reason; the
+            // trip-wide one is only a fallback for the rest.
+            if (entry.StopReason == BargainStopReason.TripEnded)
+                entry.StopReason = tripStopReason;
+        var merged = BargainMemoryPolicy.Merge(config.RememberedBargains, tripBargains.Values,
+            sweptCleanMarkets.Select(x => (x.World, x.Item, x.Hq)), timeProvider.GetUtcNow(),
+            TimeSpan.FromHours(Math.Clamp(config.ScoutKnowledgeMaxAgeHours, 1, 168)));
+        var changed = merged.Count != config.RememberedBargains.Count ||
+                      merged.Zip(config.RememberedBargains).Any(p =>
+                          p.First.WorldName != p.Second.WorldName || p.First.ItemId != p.Second.ItemId ||
+                          p.First.UnitsBought != p.Second.UnitsBought);
+        config.RememberedBargains = merged;
+        tripBargains.Clear();
+        sweptCleanMarkets.Clear();
+        tripStopReason = BargainStopReason.TripEnded;
+        if (!changed)
+            return;
+        configuration.Save();
+        if (merged.Count > 0)
+            log.Add(AutomationLogLevel.Information,
+                "REMEMBERED for the next trip: " + string.Join("; ", merged.Select(x =>
+                    $"{x.ItemName} on {x.WorldName} at {x.UnitPrice:N0} gil ({x.UnitsBought:N0} bought, " +
+                    $"stopped on {x.StopReason})")));
     }
 
     /// <summary>Why a batch stopped reusing its listings, for the log.</summary>
@@ -1818,6 +1898,9 @@ public sealed partial class ProcurementController : IDisposable
 
     private void ReturnHome()
     {
+        // The single funnel for every way a circuit ends, so the productive markets
+        // this trip found are recorded exactly once whatever stopped it.
+        SaveRememberedBargains();
         market.CloseMarketBoard();
         if (IsOnWorld(homeWorld))
         {
@@ -2428,6 +2511,13 @@ public sealed partial class ProcurementController : IDisposable
     {
         log.Add(AutomationLogLevel.Warning, reason);
         routeOutcome = reason;
+        // Why buying stopped decides how hard the next trip tries to come back. An
+        // empty wallet or a full bag leaves the cheap listings sitting there.
+        if (reason.Contains("spendable gil", StringComparison.OrdinalIgnoreCase))
+            tripStopReason = BargainStopReason.OutOfGil;
+        else if (reason.Contains("capacity", StringComparison.OrdinalIgnoreCase) ||
+                 reason.Contains("inventory reserve", StringComparison.OrdinalIgnoreCase))
+            tripStopReason = BargainStopReason.OutOfSpace;
         stockHuntScanning = false;
         lifestream.Abort();
         vnavmesh.Stop();

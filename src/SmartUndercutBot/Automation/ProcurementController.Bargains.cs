@@ -67,6 +67,24 @@ public sealed partial class ProcurementController
         }
 
         finishedBargainSweeps.Add((WorldName, template.ItemId, template.IsHighQuality));
+        // A sweep ends for two very different reasons. If nothing at our price is
+        // left on the board the market really is clean and the next trip should not
+        // come back. If listings remain and only the wallet or the bags stopped us,
+        // this is exactly the market to open the next circuit on.
+        var remaining = market.ReadLiveListings(template.ItemId).Where(x =>
+            x.IsHighQuality == template.IsHighQuality &&
+            !confirmedListingIds.Contains((WorldName, x.ListingId)) &&
+            !excludedListingIds.Contains(x.ListingId) &&
+            x.PricePerUnit <= maximumPrice).ToArray();
+        if (remaining.Length == 0)
+            sweptCleanMarkets.Add((WorldName, template.ItemId, template.IsHighQuality));
+        else
+            // Stock is still on the board at our price and we stopped anyway. Record
+            // which limit bound, so the next trip knows how hard to try to get back.
+            MarkBargainStop(template.ItemId, template.IsHighQuality,
+                remaining.Min(GetPurchaseCost) > SpendableGil()
+                    ? BargainStopReason.OutOfGil
+                    : BargainStopReason.OutOfSpace);
         var units = CollectOwnedStock().Where(x => x.ItemId == template.ItemId &&
             x.IsHighQuality == template.IsHighQuality).Sum(x => (long)x.Quantity);
         log.Add(AutomationLogLevel.Information,
