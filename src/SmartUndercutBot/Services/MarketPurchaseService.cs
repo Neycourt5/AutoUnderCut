@@ -407,9 +407,17 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService, IDisp
         return result;
     }
 
+    public bool IsListingSessionReusable(uint itemId, TimeSpan maximumAge) =>
+        InfoProxyItemSearch.Instance() is var proxy && proxy != null &&
+        proxy->SearchItemId == itemId && response.IsReusable(itemId, maximumAge) &&
+        IsAddonVisible("ItemSearchResult");
+
+    public DateTimeOffset? ListingsObservedAt(uint itemId) => response.CompletedAt(itemId);
+
     public bool TrySelectLiveListing(
         ProcurementOrder expected,
         IReadOnlySet<ulong> excludedRetainerIds,
+        IReadOnlySet<ulong> excludedListingIds,
         out LivePurchaseListing? listing)
     {
         listing = null;
@@ -418,6 +426,9 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService, IDisp
             !response.IsReady(expected.ItemId, (int)proxy->ListingCount))
             return false;
 
+        // Always re-read the proxy here. A row index from an earlier pass may now
+        // point at a different listing, so candidates are resolved by identity and
+        // their current index is revalidated again at submission.
         var candidates = new List<LivePurchaseListing>();
         var source = proxy->Listings;
         var count = (int)Math.Min(proxy->ListingCount, (uint)source.Length);
@@ -426,7 +437,8 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService, IDisp
             var row = source[index];
             if (row.ItemId != expected.ItemId || row.UnitPrice == 0 || row.UnitPrice > expected.MaximumAcceptableUnitPrice ||
                 row.Quantity == 0 || row.Quantity > expected.Quantity || row.IsHqItem != expected.IsHighQuality ||
-                excludedRetainerIds.Contains(row.RetainerId) || row.IsMannequin || !response.Contains(row.ListingId))
+                excludedRetainerIds.Contains(row.RetainerId) || excludedListingIds.Contains(row.ListingId) ||
+                row.IsMannequin || !response.Contains(row.ListingId))
                 continue;
             candidates.Add(new(index, row.ItemId, row.ListingId, row.RetainerId,
                 row.UnitPrice, row.Quantity, row.IsHqItem, row.TotalTax));

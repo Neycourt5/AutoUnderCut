@@ -1,3 +1,30 @@
+# Completed: v1.0.0.72 same-item batch purchasing
+
+- [x] Reuse a valid same-item listing session after a confirmed purchase instead of
+      resetting the search. `AdvanceOrder(reuseSession:)` skips `ResetListingRequest`
+      and the 1,200 ms inter-search delay; `BeginCurrentOrder` keeps the loaded
+      results because `MarketSearchSession.Request` is idempotent for the same item.
+      Covers both consecutive same-item plan orders and bargain sweeps.
+- [x] Exclude consumed listing ids BEFORE candidate selection. `TrySelectLiveListing`
+      takes an excluded-listing-id set so a purchased row that stays visible cannot
+      keep winning selection or the cheapest-listing fallback.
+- [x] `MarketResponseTracker` latches completeness per request generation, records the
+      real network observation time, and exposes `IsComplete`/`CompletedAt`/`IsReusable`.
+      A purchased row disappearing can no longer make a finished response look partial;
+      partial responses are still never treated as complete.
+- [x] Every existing guard re-runs per stack via `PollListings` (gil, budget, tax, ROI,
+      minimum profit, authorized ceiling, quality, stack size, coverage, capacity,
+      reserves, preferred allowance, home-price freshness, purchase arming).
+- [x] Bounded reuse: 90 s since observation and 25 stacks per response, then a full
+      validated refresh. One refresh is allowed when reused rows no longer qualify.
+- [x] Scouting remains comparison-only; batching is disabled while `stockHuntScanning`.
+- [x] Tests: 474 passed (new `BatchPurchaseTests`, extended `MarketResponseTrackerTests`).
+- [x] Released as v1.0.0.72.
+- [ ] Native validation still needed: whether this client keeps `ItemSearchResult`
+      visible and `SearchItemId` set after a purchase. If it does not, reuse simply
+      declines and the old full-search path runs, so behaviour degrades to v1.0.0.71
+      speed rather than breaking. No in-game session has been exercised.
+
 # Completed: v1.0.0.71 profitable repricing and persistent wealth
 
 - [x] Trace potion price floors and graph/portfolio resets.

@@ -37,6 +37,7 @@ public sealed partial class ProcurementController
         var live = market.ReadLiveListings(template.ItemId).Where(x =>
             x.IsHighQuality == template.IsHighQuality &&
             !confirmedListingIds.Contains((WorldName, x.ListingId)) &&
+            !excludedListingIds.Contains(x.ListingId) &&
             GetPurchaseCost(x) <= SpendableGil() &&
             config.Fees.NetProceeds(template.TargetSalePrice, x.Quantity) >=
                 GetPurchaseCost(x) * (1m + RequiredPurchaseRoi(template) / 100m) &&

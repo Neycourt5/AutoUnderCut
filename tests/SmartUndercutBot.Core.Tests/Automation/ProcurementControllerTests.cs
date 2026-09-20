@@ -1788,6 +1788,7 @@ public sealed class ProcurementControllerTests
             {
                 ItemId = 1, ItemName = "Popcorn", AllowHighQuality = true, RequireHighQuality = true, HuntOnTour = true,
             });
+            Game.Clock = clock;
             if (statistics is not null)
                 Discovery = new(statistics, Game.LookupItem, Config, Log, clock);
             Controller = new(Game, Game, Game, Game, Game, new ProcurementPlannerService(),
@@ -1941,9 +1942,29 @@ public sealed class ProcurementControllerTests
             else if (!BrokenBoardWorlds.Contains(World)) BoardOpen = true;
             return true;
         }
-        public bool RequestListings(uint itemId) { Searches.Add((World, itemId)); return true; }
+        // Mirrors MarketSearchSession: requesting the item already loaded keeps the
+        // existing results instead of retyping the name, so Searches counts real
+        // full searches rather than every call.
+        public TimeProvider Clock { get; set; } = TimeProvider.System;
+        public bool SessionReuseEnabled { get; set; } = true;
+        public bool KeepPurchasedRowsVisible { get; set; }
+        private uint sessionItem;
+        private DateTimeOffset sessionObservedAt;
+        public bool RequestListings(uint itemId)
+        {
+            if (sessionItem == itemId) return true;
+            sessionItem = itemId;
+            sessionObservedAt = Clock.GetUtcNow();
+            Searches.Add((World, itemId));
+            return true;
+        }
         public bool AreListingsReady(uint itemId) => ListingsReady;
-        public void ResetListingRequest() { }
+        public void ResetListingRequest() { sessionItem = 0; }
+        public bool IsListingSessionReusable(uint itemId, TimeSpan maximumAge) =>
+            SessionReuseEnabled && sessionItem == itemId && ListingsReady && BoardOpen &&
+            Clock.GetUtcNow() - sessionObservedAt <= maximumAge;
+        public DateTimeOffset? ListingsObservedAt(uint itemId) =>
+            sessionItem == itemId ? sessionObservedAt : null;
         public IReadOnlyList<LivePurchaseListing> ReadLiveListings(uint itemId) => LiveProvider?.Invoke(World, itemId) ?? (World switch
         {
             "Siren" when MissingHomeListings => [],
@@ -1953,26 +1974,35 @@ public sealed class ProcurementControllerTests
             _ => [],
         });
         public bool TrySelectLiveListing(ProcurementOrder expected, IReadOnlySet<ulong> excludedRetainerIds,
-            out LivePurchaseListing? listing)
+            IReadOnlySet<ulong> excludedListingIds, out LivePurchaseListing? listing)
         {
             if (UseLiveListings)
             {
-                listing = ReadLiveListings(expected.ItemId).FirstOrDefault(x =>
-                    x.ItemId == expected.ItemId && x.ListingId == expected.ListingId &&
+                // Excluded rows are removed before selection, exactly as the real
+                // adapter does, so a consumed listing cannot keep winning.
+                var eligible = ReadLiveListings(expected.ItemId).Where(x =>
+                    x.ItemId == expected.ItemId &&
                     x.PricePerUnit <= expected.MaximumAcceptableUnitPrice && x.Quantity <= expected.Quantity &&
-                    x.IsHighQuality == expected.IsHighQuality && !excludedRetainerIds.Contains(x.RetainerId));
+                    x.IsHighQuality == expected.IsHighQuality && !excludedRetainerIds.Contains(x.RetainerId) &&
+                    !excludedListingIds.Contains(x.ListingId)).ToArray();
+                listing = eligible.FirstOrDefault(x => x.ListingId == expected.ListingId)
+                          ?? eligible.OrderBy(x => x.PricePerUnit).ThenBy(x => x.Quantity).FirstOrDefault();
                 return listing is not null;
             }
-            listing = new(0, 1, expected.ListingId, expected.RetainerId, 1_000, 99, true, BuyerTax);
-            return true;
+            listing = excludedListingIds.Contains(expected.ListingId)
+                ? null
+                : new(0, 1, expected.ListingId, expected.RetainerId, 1_000, 99, true, BuyerTax);
+            return listing is not null;
         }
         public bool NeedsPurchaseDialog { get; set; }
         public int DialogsConfirmed { get; private set; }
         private LivePurchaseListing? awaitingConfirmation;
+        public List<ulong> BoughtListingIds { get; } = [];
         public bool SubmitPurchase(LivePurchaseListing listing)
         {
             Purchases++;
             Bought.Add((World, listing.ItemId, listing.Quantity));
+            BoughtListingIds.Add(listing.ListingId);
             if (ThrowAfterPurchaseSubmission) throw new InvalidOperationException("Submission response lost.");
             // The real board takes nothing until the yes/no prompt is answered.
             if (NeedsPurchaseDialog) { awaitingConfirmation = listing; return true; }

@@ -125,6 +125,23 @@ public sealed partial class ProcurementController : IDisposable
     private readonly Dictionary<uint, int> purchasedSlotsByItem = [];
     private readonly HashSet<(string World, uint Item, bool Hq)> finishedBargainSweeps = [];
     private readonly HashSet<(string World, ulong Listing)> confirmedListingIds = [];
+    // Listing IDs already bought, or proven unusable, on the world being shopped.
+    // Passed to selection so a consumed row that the client still shows cannot keep
+    // winning and starving the next eligible stack.
+    private readonly HashSet<ulong> excludedListingIds = [];
+    // Same-item batching. A confirmed purchase hands straight back to the existing
+    // per-purchase validation using the listings already in hand, instead of
+    // retyping the item name and waiting for a whole new search.
+    private bool reusingListingSession;
+    // Whether the order being validated right now came from loaded results rather
+    // than a fresh search, so a failed selection can buy one refresh before skipping.
+    private bool currentOrderReusedSession;
+    private int sessionPurchases;
+    private DateTimeOffset? lastConfirmedPurchaseAt;
+    // The response may be reused only this long after it was observed on the
+    // network, and only this many times, before a full validated refresh.
+    private static readonly TimeSpan ListingSessionMaximumAge = TimeSpan.FromSeconds(90);
+    private const int MaximumSessionPurchases = 25;
     private IReadOnlyList<PortfolioDecision> portfolioDecisions = [];
     private readonly MarketDiscoveryService? discovery;
     private PortfolioAllocationSummary? portfolioSummary;
@@ -854,6 +871,8 @@ public sealed partial class ProcurementController : IDisposable
         }
         finishedBargainSweeps.Clear();
         confirmedListingIds.Clear();
+        excludedListingIds.Clear();
+        EndListingSession();
         routeOutcome = string.Empty;
         TravelToCurrentWorld();
     }
@@ -1318,15 +1337,33 @@ public sealed partial class ProcurementController : IDisposable
             FinishShopping("Shopping stopped: all available retainer slots are reserved for purchased stock.");
             return;
         }
+        // A validated same-item continuation keeps the loaded results. Anything else
+        // starts a genuinely new search, so the exclusion set is rebuilt from what is
+        // known to be consumed on this world.
+        var reuse = reusingListingSession &&
+                    market.IsListingSessionReusable(currentOrder.ItemId, ListingSessionMaximumAge);
+        reusingListingSession = false;
+        currentOrderReusedSession = reuse;
+        if (!reuse)
+        {
+            excludedListingIds.Clear();
+            foreach (var (world, listingId) in confirmedListingIds)
+                if (string.Equals(world, WorldName, StringComparison.OrdinalIgnoreCase))
+                    excludedListingIds.Add(listingId);
+        }
         listingRequestAttempts = 1;
-        nextActionAt = timeProvider.GetUtcNow().AddMilliseconds(1_200);
+        nextActionAt = timeProvider.GetUtcNow().AddMilliseconds(reuse ? 250 : 1_200);
+        // RequestListings is idempotent for the item already loaded: it keeps the
+        // existing session rather than retyping the name and reopening the results.
         if (!market.RequestListings(currentOrder.ItemId))
         {
             nextActionAt = timeProvider.GetUtcNow().AddMilliseconds(1_200);
             Wait(ProcurementState.WaitingForListings, $"Waiting to request {currentOrder.ItemName}.", 6);
             return;
         }
-        Wait(ProcurementState.WaitingForListings, $"Revalidating live prices for {currentOrder.ItemName}.", 6);
+        Wait(ProcurementState.WaitingForListings, reuse
+            ? $"Reusing the loaded {currentOrder.ItemName} listings for the next stack."
+            : $"Revalidating live prices for {currentOrder.ItemName}.", 6);
     }
 
     private void PollListings()
@@ -1427,12 +1464,31 @@ public sealed partial class ProcurementController : IDisposable
             scoutListings.RemoveAll(x => x.WorldName == WorldName && x.ItemId == currentOrder.ItemId);
             scoutListings.AddRange(market.ReadLiveListings(currentOrder.ItemId).Select(x => new ProcurementMarketListing(
                 x.ItemId, x.ListingId, x.RetainerId, WorldName, 0, x.PricePerUnit, x.Quantity, x.IsHighQuality)));
-            scoutObservedAt[(WorldName, currentOrder.ItemId)] = timeProvider.GetUtcNow();
+            // Stamp when the response was actually observed on the network. Reading
+            // the same cached rows again during a batch must not make them look
+            // freshly scouted and suppress a real revisit later.
+            scoutObservedAt[(WorldName, currentOrder.ItemId)] =
+                market.ListingsObservedAt(currentOrder.ItemId) ?? timeProvider.GetUtcNow();
         }
         if (CanSweepBargains(currentOrder) && !RefreshBargainOrder(rule))
             return;
-        if (!market.TrySelectLiveListing(currentOrder, retainerListings.OwnedRetainerIds, out var live) || live is null)
+        if (!market.TrySelectLiveListing(currentOrder, retainerListings.OwnedRetainerIds, excludedListingIds,
+                out var live) || live is null)
         {
+            // Reused listings may simply be out of date - a stack can sell to someone
+            // else between stacks. Pay for one validated refresh before concluding
+            // that nothing qualifies, but only one: this must not become a loop.
+            if (currentOrderReusedSession)
+            {
+                currentOrderReusedSession = false;
+                market.ResetListingRequest();
+                nextActionAt = timeProvider.GetUtcNow().AddMilliseconds(1_200);
+                deadline = nextActionAt.AddSeconds(6);
+                detail = $"Refreshing {currentOrder.ItemName} listings once: the loaded results no longer hold a qualifying stack.";
+                log.Add(AutomationLogLevel.Information, $"MARKET BATCH REFRESH on {WorldName}: {detail}");
+                EndListingSession();
+                return;
+            }
             // This is the most common skip, so say what the board actually held
             // rather than only that nothing qualified.
             var seen = market.ReadLiveListings(currentOrder.ItemId)
@@ -1589,14 +1645,41 @@ public sealed partial class ProcurementController : IDisposable
         // watchdog measures stalled progress; home-quote freshness still applies.
         if (priorityShopping) comparisonBuyingStarted = timeProvider.GetUtcNow();
         confirmedListingIds.Add((WorldName, actual.ListingId));
+        // Exclude the consumed row before anything selects again, so a client that
+        // keeps showing it cannot resell it to us.
+        excludedListingIds.Add(actual.ListingId);
         if (priorityShopping && stockHuntScanning && stockHuntWorldIndex == 0 && homePrices.TryGetValue(actual.ItemId, out var home))
             homePrices[actual.ItemId] = home.Where(x => x.ListingId != actual.ListingId).ToArray();
         scoutListings.RemoveAll(x => x.WorldName == actual.WorldName && x.ListingId == actual.ListingId);
         purchasedSlotsByItem[actual.ItemId] = purchasedSlotsByItem.GetValueOrDefault(actual.ItemId) + 1;
+
+        var now = timeProvider.GetUtcNow();
+        var sinceLast = lastConfirmedPurchaseAt is { } previous ? now - previous : (TimeSpan?)null;
+        lastConfirmedPurchaseAt = now;
+        var reuse = CanReuseListingSession(actual, sweep);
+        sessionPurchases++;
         log.Add(AutomationLogLevel.Information,
             $"PURCHASED {actual.ItemName} x{actual.Quantity} on {actual.WorldName} at {actual.PricePerUnit:N0} gil each; " +
-            $"buyer tax {currentLiveListing.TotalTax:N0} gil, tracked landed cost {landedCostPerUnit:N0} gil each.");
-        AdvanceOrder(repeatBargain: sweep);
+            $"buyer tax {currentLiveListing.TotalTax:N0} gil, tracked landed cost {landedCostPerUnit:N0} gil each. " +
+            $"Stack {sessionPurchases} of this search" +
+            (sinceLast is { } gap ? $", {gap.TotalSeconds:N1}s after the previous one" : string.Empty) +
+            (reuse ? "; continuing from the loaded listings." : "; a fresh market request follows."));
+        if (!reuse && sessionPurchases > 1)
+            EndListingSession(ListingSessionEndReason(actual, sweep));
+        AdvanceOrder(repeatBargain: sweep, reuseSession: reuse);
+    }
+
+    /// <summary>Why a batch stopped reusing its listings, for the log.</summary>
+    private string ListingSessionEndReason(ProcurementOrder purchased, bool sweep)
+    {
+        if (!configuration.Current.AllowAutomaticPurchases) return "Automatic purchases were disarmed.";
+        if (!market.IsMarketBoardOpen) return "The market board closed.";
+        if (!IsOnWorld(WorldName) || lifestream.IsBusy) return "The world changed.";
+        if (sessionPurchases >= MaximumSessionPurchases)
+            return $"Reached the {MaximumSessionPurchases}-stack refresh bound for one response.";
+        if (!market.IsListingSessionReusable(purchased.ItemId, ListingSessionMaximumAge))
+            return "The loaded listings expired or were superseded.";
+        return sweep ? "The sweep finished." : "The next order is a different item.";
     }
 
     private void SkipCurrentOrder(string message)
@@ -1649,7 +1732,7 @@ public sealed partial class ProcurementController : IDisposable
         return true;
     }
 
-    private void AdvanceOrder(bool repeatBargain = false)
+    private void AdvanceOrder(bool repeatBargain = false, bool reuseSession = false)
     {
         if (priorityShopping && stockHuntScanning)
         {
@@ -1658,19 +1741,76 @@ public sealed partial class ProcurementController : IDisposable
             AdvanceStockHuntRule();
             return;
         }
-        // The server can leave the just-purchased row in the current proxy until
-        // a fresh request. This is essential when consecutive plan entries are
-        // the same item: never submit against a stale listing snapshot.
-        market.ResetListingRequest();
+        if (!reuseSession)
+        {
+            // The server can leave the just-purchased row in the current proxy until
+            // a fresh request. Outside a validated same-item continuation, never
+            // submit against a stale listing snapshot.
+            market.ResetListingRequest();
+            EndListingSession();
+        }
         if (!repeatBargain) orderIndex++;
         currentOrder = null;
         currentLiveListing = null;
-        nextActionAt = timeProvider.GetUtcNow().AddMilliseconds(1_200);
-        detail = repeatBargain
-            ? "Refreshing this bargain market before buying more qualifying listings."
-            : "Waiting before the next live market request.";
+        reusingListingSession = reuseSession;
+        // A validated same-item continuation has its results in hand already; only
+        // a fresh search has to pay the inter-search delay.
+        nextActionAt = timeProvider.GetUtcNow().AddMilliseconds(reuseSession ? 250 : 1_200);
+        detail = reuseSession
+            ? "Buying the next qualifying stack from the listings already loaded."
+            : repeatBargain
+                ? "Refreshing this bargain market before buying more qualifying listings."
+                : "Waiting before the next live market request.";
         // Reuse the listings state as a throttled handoff; it will call BeginCurrentOrder.
         State = ProcurementState.WaitingForListings;
+    }
+
+    /// <summary>
+    /// Whether the next purchase may run against the listings already loaded.
+    ///
+    /// This is an execution-speed decision only. Every buying rule is still applied
+    /// per stack by <see cref="PollListings"/>; all this decides is whether the item
+    /// name has to be retyped and the whole search repeated in between.
+    /// </summary>
+    private bool CanReuseListingSession(ProcurementOrder purchased, bool sweep)
+    {
+        if (stockHuntScanning || !configuration.Current.AllowAutomaticPurchases)
+            return false;
+        if (!market.IsMarketBoardOpen || !IsOnWorld(WorldName) || lifestream.IsBusy)
+            return false;
+        // Bounded: a long batch takes a fresh, fully validated response periodically
+        // rather than trusting one response indefinitely.
+        if (sessionPurchases >= MaximumSessionPurchases)
+            return false;
+        if (!market.IsListingSessionReusable(purchased.ItemId, ListingSessionMaximumAge))
+            return false;
+        // A sweep keeps buying the same item; otherwise the next planned order has to
+        // be the same item and quality, or its listings are not the ones in hand.
+        return sweep || NextOrderMatches(purchased);
+    }
+
+    private bool NextOrderMatches(ProcurementOrder purchased)
+    {
+        if (worldIndex >= worldGroups.Count)
+            return false;
+        var orders = worldGroups[worldIndex].ToArray();
+        var next = orderIndex + 1;
+        while (next < orders.Length &&
+               finishedBargainSweeps.Contains((WorldName, orders[next].ItemId, orders[next].IsHighQuality)))
+            next++;
+        return next < orders.Length && orders[next].ItemId == purchased.ItemId &&
+               orders[next].IsHighQuality == purchased.IsHighQuality;
+    }
+
+    /// <summary>Closes out batch bookkeeping when the loaded listings stop being reused.</summary>
+    private void EndListingSession(string? reason = null)
+    {
+        if (sessionPurchases > 1 && reason is { Length: > 0 })
+            log.Add(AutomationLogLevel.Information,
+                $"MARKET BATCH END on {WorldName}: {sessionPurchases} stack(s) bought from one search. {reason}");
+        sessionPurchases = 0;
+        reusingListingSession = false;
+        lastConfirmedPurchaseAt = null;
     }
 
     private static ulong GetPurchaseCost(LivePurchaseListing listing) =>

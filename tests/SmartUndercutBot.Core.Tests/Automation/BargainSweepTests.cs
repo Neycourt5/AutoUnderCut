@@ -23,8 +23,11 @@ public sealed class BargainSweepTests
         Assert.Contains(run.Log.Messages, x => x.Contains("BARGAIN SWEEP COMPLETE"));
         Assert.Equal("Siren", run.Game.World);
         // Confirmed rows intentionally remain visible in this fake. They must not
-        // be bought twice even when a refresh still exposes them.
-        Assert.True(run.Game.Searches.Count(x => x.World == "Cactuar") > listings);
+        // be bought twice even when the loaded results still expose them, and the
+        // sweep must reuse those results rather than researching between stacks.
+        var searches = run.Game.Searches.Count(x => x.World == "Cactuar");
+        Assert.True(searches < listings / 2,
+            $"expected batching to cut searches well below {listings}; saw {searches}");
     }
 
     [Fact]
