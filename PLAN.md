@@ -1,4 +1,15 @@
-# Current: v1.0.0.75 review follow-ups
+# Next: confirm the market-read rewrite from the first post-update session log
+
+Read the newest `%APPDATA%\XIVLauncher\pluginConfigs\SmartUndercutBot\logs` session
+before changing planner or repricer economics. Healthy: few `0 listings` checks,
+rows above 49 where markets are deep, home "lowest" matching repricer "live
+lowest". Act on: `2 request id(s)` with `board ~50` (counts per stream), or
+`MARKET READ abandoned ... declared N ... board 0` (a non-listing notice source).
+Then consider (user decisions): raising prices toward the cheapest competitor, and
+a time-based exit for stock stuck under its cost floor (Popcorn 2,929 units at a
+2,142 basis, floor 2,256, market ~2,190 on 2026-09-20).
+
+# Completed: v1.0.0.75 review follow-ups
 
 v1.0.0.74 is published. Two read-only reviews covered the retainer/listing side
 (RetainerListingService, BagListingController, Plugin, ledger) and the data
@@ -33,7 +44,16 @@ pending (needs >10 s server lag and a manual restart), `/isort` via ProcessComma
 
 - [x] Tests: 516 passed (mutation-checked: each new retainer test fails with its
       fix reverted). Clean Release rebuild: 0 warnings, 0 errors.
-- [ ] Version 1.0.0.75, commit, push, annotated tag, verify release + repo.json.
+- [x] Commit e119aa1 pushed to origin/main with annotated v1.0.0.75.
+      Release workflow 40365616725 and Build 40365611052 both succeeded.
+- [x] Verified public latest repo.json and SmartUndercutBot.zip on 2026-10-26.
+      Installer and ZIP manifests plus the plugin DLL report 1.0.0.75/API 15; both
+      DLLs at ZIP root; install/update URLs unchanged. ZIP 659,808 bytes; SHA-256
+      matches GitHub's digest:
+      B600C867F84E11C4EE448719AA4FD414985745F7A42C779FF0CC4505B028E83E.
+      Ready through the Dalamud installer.
+
+Native game operations have not been exercised in this session.
 
 # Completed: v1.0.0.74 trustworthy live market reads after the 7.56 hotfix
 
