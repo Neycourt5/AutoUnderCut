@@ -829,7 +829,7 @@ bags. [OBS]
 | **Universalis full** | `GET /api/v2/{scope}/{ids}?listings=100&entries=100&statsWithin=604800000` | Home listings + 7-day sales + velocity → anchor, demand gate, coverage, tiering | 20 ids/batch; 3 attempts on 408/429/5xx; **partial results kept**; throws only if every batch failed |
 | **Universalis aggregated** | `GET /api/v2/aggregated/{scope}/{ids}` | `MarketPriceHint` → **route and per-world item choice only** | Tolerated; shopping unaffected |
 | **In-game Compare Prices** | `MarketDataService` + `IMarketBoard` packets | Repricing | Timeout → retry |
-| **In-game Item Search** | `MarketPurchaseService` + `InfoProxyItemSearch` | **The only source that can authorize a purchase** | `MarketResponseTracker.IsReady` requires the declared row count fully received, no error, 750 ms settle |
+| **In-game Item Search** | `MarketPurchaseService` + `InfoProxyItemSearch` | **The only source that can authorize a purchase** | Rows are read from the game's own board. `MarketResponseTracker.IsReady` needs a server answer for this request and no error, then: the largest declared count on the board plus 0.4 s settle, a full board, or a quiet period (0.4 s after a short page, 1.5 s after a full one, 3 s short of the declared count = partial). Empty only after 2.5 s; never while rows are owed. One `MARKET READ` log line per read |
 | **Retainer sell window** | `RetainerListingService.TryReadSellerFeePercent` | **`ObservedMarketTaxPercent`** — every margin, ceiling and floor | Falls back to 5% |
 | **Saddlebag Exchange** | `POST .../ffxivrawstats` | Discovery only, **off by default** | Returns `[]` |
 | **Repricing observations** | `AutomationController.ObservedHomePrices` | Seeds home anchors | Falls back to a live home sweep |

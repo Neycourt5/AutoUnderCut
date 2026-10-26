@@ -1,4 +1,15 @@
-# Current: v1.0.0.74 trustworthy live market reads after the 7.56 hotfix
+# Current: v1.0.0.75 review follow-ups
+
+v1.0.0.74 is published. Two read-only reviews are covering the retainer/listing
+side (RetainerListingService, BagListingController, Plugin, ledger) and the data
+services, policies and configuration migrations. Findings are verified by reading
+the code path before anything changes. Planner and repricer economics stay as they
+are until a post-update session log shows what the board now delivers.
+
+- [ ] Verify each review finding against the code; fix the confirmed ones with tests.
+- [ ] Release build warning-free; full suite green; publish 1.0.0.75 if anything ships.
+
+# Completed: v1.0.0.74 trustworthy live market reads after the 7.56 hotfix
 
 User asked for a full review, bug fixes and better logic, then a GitHub upload.
 Evidence comes from the saved session logs; no native game session was run here.
@@ -43,7 +54,14 @@ Evidence comes from the saved session logs; no native game session was run here.
 - [x] Tests: 504 passed (tracker rewritten for the new rules; controller cases for
       the deadline grace, empty home/away boards and snapshot seeding). Clean
       Release rebuild: 0 warnings, 0 errors.
-- [ ] Version 1.0.0.74, commit, push, annotated tag, verify release + repo.json.
+- [x] Commit 581cf12 pushed to origin/main with annotated v1.0.0.74.
+      Release workflow 40360000584 and Build 40360000566 both succeeded.
+- [x] Verified public latest repo.json and SmartUndercutBot.zip on 2026-10-26.
+      Installer and ZIP manifests plus the plugin DLL report 1.0.0.74/API 15; both
+      DLLs at ZIP root; install/update URLs unchanged. ZIP 658,479 bytes; SHA-256
+      matches GitHub's digest:
+      FDC244030A4B3AA49692BBB1277CC30C1EEF6C824011B894F968ECA253281B9F.
+      Ready through the Dalamud installer.
 
 ## Validation boundary
 
