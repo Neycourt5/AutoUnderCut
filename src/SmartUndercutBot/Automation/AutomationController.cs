@@ -90,9 +90,13 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
     private readonly HashSet<short> processedSlots = [];
     private readonly HashSet<short> freshlyRepricedAutoListingSlots = [];
     // A recovery restarts the whole pass from the bell, so a row that fails the same
-    // way every time is reopened forever. Track the failures and give up on the row.
-    private readonly Dictionary<(ulong Retainer, short Slot), int> listingFailureCounts = [];
-    private readonly HashSet<(ulong Retainer, short Slot)> skippedProblemListings = [];
+    // way every time is reopened forever. Track the failures and set the row aside -
+    // but only while its slot still holds the same item, and only for a while. Keyed
+    // by slot alone and never expired, two passing failures parked the slot, and
+    // whatever was listed in it next, until the user pressed Start again.
+    private static readonly TimeSpan ProblemListingSkipDuration = TimeSpan.FromHours(1);
+    private readonly Dictionary<(ulong Retainer, short Slot, uint Item), int> listingFailureCounts = [];
+    private readonly Dictionary<(ulong Retainer, short Slot), (uint Item, DateTimeOffset Until)> skippedProblemListings = [];
     private int consecutiveRecoveries;
     private int selectionAttempts;
     private DateTimeOffset retrySelectionAt;
@@ -714,7 +718,7 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
             var unresolvedSeed = currentListings.FirstOrDefault(x =>
                 IsUnresolvedCuratedPrice(x) &&
                 !freshlyRepricedAutoListingSlots.Contains(x.Slot) &&
-                !skippedProblemListings.Contains((x.RetainerId, x.Slot)) &&
+                !IsSkippedProblemListing(x) &&
                 CuratedAutoListItems.Contains(x.ItemName));
             if (unresolvedSeed is not null)
             {
@@ -759,7 +763,7 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
         processedSlots.Clear();
         queue.AddRange(listings.Select((listing, index) => (listing, index))
             .Where(x => !freshlyRepricedAutoListingSlots.Contains(x.listing.Slot))
-            .Where(x => !skippedProblemListings.Contains((x.listing.RetainerId, x.listing.Slot)))
+            .Where(x => !IsSkippedProblemListing(x.listing))
             .Select(x => new AutomationQueueEntry(x.index, x.listing, "Queued")));
         listingsSeenAcrossRetainers += listings.Count;
         currentIndex = 0;
@@ -1215,7 +1219,7 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
 
         if (IsUnresolvedCuratedPrice(entry.Listing) &&
             (!currentDecision.ShouldUpdate || currentDecision.TargetPrice is not { } proposed ||
-             !MarketPriceSafety.IsSafeCuratedUnitPrice(proposed, entry.Listing.Quantity)))
+             !MarketPriceSafety.IsSafeAutomaticUnitPrice(entry.Listing.ItemName, proposed, entry.Listing.Quantity)))
         {
             var repairTarget = ResolveSafetyRepairTarget(entry.Listing, currentDecision, currentMarket!);
             if (repairTarget.HasValue)
@@ -1687,29 +1691,33 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
         knownSafeListingPrices[(retainerId, slot)] = (itemId, price);
     }
 
+    // The 1,000,000 gil ceiling describes the curated consumables, which trade for
+    // thousands. Applied to every listing, it sent a rare dye priced above it down
+    // the placeholder-repair path, where it could be rewritten to an unrelated
+    // remembered price or a history median, or never be undercut at all.
     private static bool IsUnresolvedCuratedPrice(RetainerListing listing) =>
         MarketPriceSafety.IsSafetySeedRepresentation(listing.CurrentPrice, listing.Quantity) ||
-        listing.CurrentPrice > MarketPriceSafety.MaximumCuratedUnitPrice;
+        (ResaleStockPolicy.IsCuratedConsumable(listing.ItemName) &&
+         listing.CurrentPrice > MarketPriceSafety.MaximumCuratedUnitPrice);
 
     private uint? ResolveSafetyRepairTarget(
         RetainerListing listing,
         PriceDecision decision,
         MarketSnapshot market)
     {
+        bool Safe(uint price) => MarketPriceSafety.IsSafeAutomaticUnitPrice(listing.ItemName, price, listing.Quantity);
         uint? candidate = null;
         if (TryGetKnownSafePrice(listing.ItemId, out var known))
             candidate = known;
-        else if (market.HistoricalMedianPrice is { } median &&
-                 MarketPriceSafety.IsSafeCuratedUnitPrice(median, listing.Quantity))
+        else if (market.HistoricalMedianPrice is { } median && Safe(median))
             candidate = median;
-        else if (decision.EffectiveFloor > 1 &&
-                 MarketPriceSafety.IsSafeCuratedUnitPrice(decision.EffectiveFloor, listing.Quantity))
+        else if (decision.EffectiveFloor > 1 && Safe(decision.EffectiveFloor))
             candidate = decision.EffectiveFloor;
 
         if (!candidate.HasValue)
             return null;
         var target = Math.Max(candidate.Value, decision.EffectiveFloor);
-        return MarketPriceSafety.IsSafeCuratedUnitPrice(target, listing.Quantity) ? target : null;
+        return Safe(target) ? target : null;
     }
 
     private void WaitFor(AutomationState state, string message, int seconds = 10)
@@ -1779,9 +1787,10 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
         log.Add(AutomationLogLevel.Warning, detail);
     }
 
-    // Only a deliberate Start forgets a bad row. Interface recovery replays the
-    // pass through the same session reset, so clearing this there would wipe the
-    // very record that stops the failing listing being reopened again.
+    // A deliberate Start forgets bad rows at once; otherwise a skip lapses on its
+    // own. Interface recovery replays the pass through the same session reset, so
+    // clearing this there would wipe the very record that stops the failing listing
+    // being reopened again.
     private void ForgetProblemListings()
     {
         listingFailureCounts.Clear();
@@ -1791,38 +1800,58 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
     }
 
     // Recovery returns to the bell and replays the pass, so without this a listing
-    // that always fails the same step is reopened and re-read indefinitely. Drop the
-    // row after a second failure and let the rest of the run continue.
+    // that always fails the same step is reopened and re-read indefinitely. Set the
+    // row aside after a second failure and let the rest of the run continue.
     private void NoteRecoveryFailure(string reason)
     {
         consecutiveRecoveries = Math.Min(30, consecutiveRecoveries + 1);
         if (queue.Count == 0 || currentIndex >= queue.Count)
             return;
         var listing = queue[currentIndex].Listing;
-        var key = (listing.RetainerId, listing.Slot);
-        var failures = listingFailureCounts.GetValueOrDefault(key) + 1;
-        listingFailureCounts[key] = failures;
-        if (failures < 2 || !skippedProblemListings.Add(key))
+        var failures = CountListingFailure(listing);
+        if (failures < 2 || !SkipProblemListing(listing))
             return;
         log.Add(AutomationLogLevel.Error,
             $"SKIPPING {listing.ItemName} on {listing.RetainerName}: {reason} It failed {failures} times; " +
-            "the rest of the run continues without it.");
+            $"it is left alone for {ProblemListingSkipDuration.TotalMinutes:N0} minutes while the run continues without it.");
     }
 
     // A rejected write leaves the price unchanged, so the next pass evaluates the
     // same listing and is rejected identically - reopening the price page forever
-    // without ever updating it. Drop the row after a second rejection and say so.
+    // without ever updating it. Set the row aside after a second rejection and say so.
     private void NoteListingWriteFailure(RetainerListing listing, string reason)
     {
-        var key = (listing.RetainerId, listing.Slot);
-        var failures = listingFailureCounts.GetValueOrDefault(key) + 1;
-        listingFailureCounts[key] = failures;
-        if (failures < 2 || !skippedProblemListings.Add(key))
+        var failures = CountListingFailure(listing);
+        if (failures < 2 || !SkipProblemListing(listing))
             return;
         lastWriteFailure = $"{listing.ItemName} on {listing.RetainerName}: {reason}";
         log.Add(AutomationLogLevel.Error,
-            $"SKIPPING {listing.ItemName} on {listing.RetainerName} for the rest of this run: the Adjust Price " +
-            $"write was rejected {failures} times. {reason}");
+            $"SKIPPING {listing.ItemName} on {listing.RetainerName} for {ProblemListingSkipDuration.TotalMinutes:N0} " +
+            $"minutes: the Adjust Price write was rejected {failures} times. {reason}");
+    }
+
+    private int CountListingFailure(RetainerListing listing)
+    {
+        var key = (listing.RetainerId, listing.Slot, listing.ItemId);
+        var failures = listingFailureCounts.GetValueOrDefault(key) + 1;
+        listingFailureCounts[key] = failures;
+        return failures;
+    }
+
+    private bool IsSkippedProblemListing(RetainerListing listing) =>
+        skippedProblemListings.TryGetValue((listing.RetainerId, listing.Slot), out var skip) &&
+        skip.Item == listing.ItemId && timeProvider.GetUtcNow() < skip.Until;
+
+    // Sets a failing row aside; false when it already is. Its failure count starts
+    // over, so once the skip lapses a single passing failure does not park it again.
+    private bool SkipProblemListing(RetainerListing listing)
+    {
+        if (IsSkippedProblemListing(listing))
+            return false;
+        skippedProblemListings[(listing.RetainerId, listing.Slot)] =
+            (listing.ItemId, timeProvider.GetUtcNow() + ProblemListingSkipDuration);
+        listingFailureCounts.Remove((listing.RetainerId, listing.Slot, listing.ItemId));
+        return true;
     }
 
     private void PollInterfaceRecovery()

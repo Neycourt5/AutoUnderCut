@@ -190,7 +190,8 @@ public sealed class BargainSweepTests
             RepeatMinimumMinutes = 5, RepeatMaximumMinutes = 10 };
         config.Normalize();
         Assert.Equal(expectedDays, config.ProcurementPreferredCoverageDays);
-        Assert.Equal(44, config.Version);
+        // Later migrations may follow; this one only has to have run.
+        Assert.True(config.Version >= 44);
         Assert.Equal(5, config.RepeatMinimumMinutes);
         Assert.Equal(5, config.RepeatMaximumMinutes);
     }

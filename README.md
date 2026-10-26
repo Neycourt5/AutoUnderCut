@@ -108,7 +108,7 @@ deliberately separate type from market listings, so they cannot be mistaken for
 something the planner may buy. Detailed listings and sale history are still
 requested for the home world, which is the resale anchor.
 
-The default buying list contains HQ Grade 4 gemdraughts and HQ Caramel Popcorn.
+The default buying list contains HQ Grade 4 gemdraughts, HQ Caramel Popcorn and HQ Popoto Potage. Configurations created before Popoto Potage became a default get its rule added once on the first start after updating.
 **Only buy high-quality stock** is on by default: wherever an item exists at both
 qualities, only the high-quality form is bought. Categories that have no
 high-quality form at all, such as dyes, stay tradeable. This applies to buying only
@@ -140,8 +140,8 @@ future sale lot a physical bag stack.
 
 Configure additional buying rules in **Shopping**. Dyes, materia and ethers are
 seeded as **sell-only**: everything held is listed from the bags with nothing kept
-back, and they are never bought as stock. The high-volume `General-Purpose` and
-`Wide-Spectrum` dye lines are the exception - those are traded like any other stock. Sell-only items are also left out of the
+back, and they are never bought as stock. The high-volume `General-purpose` and
+`Wide Spectrum` dye lines (either spelling, with or without a hyphen) are the exception - those are traded like any other stock. Sell-only items are also left out of the
 Universalis deal scan - asking about hundreds of items the plugin would never buy
 is what made that scan time out with a 504.
 
@@ -190,7 +190,7 @@ attempt; they do not start another shopping route on the visited world.
 - Uses Lifestream for world and cross-data-center travel and vnavmesh for local approaches, then revalidates every candidate against the live in-game listing before submitting a purchase.
 - Offers a guided deal route that prioritizes Universalis opportunities by world, travels to each market board, flashes the FFXIV taskbar icon, shows expected prices and guarded ceilings, and waits for a manual Done / Next command.
 - Returns home, opens a summoning bell, distributes purchased stacks into open retainer slots, and feeds them through the normal live repricing pass.
-- The curated procurement set is HQ Grade 4 gemdraughts plus HQ Caramel Popcorn; legacy Grade 3 gemdraught and food defaults are removed during migration.
+- The curated procurement set is HQ Grade 4 gemdraughts plus HQ Caramel Popcorn and HQ Popoto Potage, each priced on every world of a circuit; legacy Grade 3 gemdraught and food defaults are removed during migration.
 - Persists the landed unit cost of automatic purchases, including the buyer fee. Purchased stock can follow any competitive price that earns a profit after seller tax; older buying-margin targets no longer prevent profitable cuts. An optional explicit minimum-price override remains available.
 
 Dry-run mode remains available. Repricing writes, purchases, automatic listing, and recurring procurement each have separate controls. Automatic curated bag refills are enabled during idle bell runs; market-board purchases remain separately armed.

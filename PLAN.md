@@ -1,13 +1,39 @@
 # Current: v1.0.0.75 review follow-ups
 
-v1.0.0.74 is published. Two read-only reviews are covering the retainer/listing
-side (RetainerListingService, BagListingController, Plugin, ledger) and the data
-services, policies and configuration migrations. Findings are verified by reading
-the code path before anything changes. Planner and repricer economics stay as they
-are until a post-update session log shows what the board now delivers.
+v1.0.0.74 is published. Two read-only reviews covered the retainer/listing side
+(RetainerListingService, BagListingController, Plugin, ledger) and the data
+services, policies and configuration migrations. Each finding was checked against
+the code (and the live config) before anything changed. Planner and repricer
+economics stay as they are until a post-update session log shows what the board
+now delivers.
 
-- [ ] Verify each review finding against the code; fix the confirmed ones with tests.
-- [ ] Release build warning-free; full suite green; publish 1.0.0.75 if anything ships.
+Fixed (confirmed):
+- [x] Popoto Potage, a requested core food, had no rule in existing configs: v12
+      deleted it as an old default and favorites only seed into an empty list.
+      `FavoriteRulesBackfilled` (reset by migration 45) adds missing favorites once
+      at plugin start. Favorites now also seed `AlwaysScout` (the v40 step that set
+      it ran before any favorite existed on a new install).
+- [x] "Wide Spectrum #1/#2 Dye" were seeded sell-only because the seeder matched
+      only "Wide-Spectrum". Shared `ResaleStockPolicy.IsMassMarketDye` accepts both
+      spellings; migration 45 drops the sell-only rules and re-seeds tradeable dyes.
+- [x] Placeholder repair ran for any listing above 1,000,000 gil/unit, so a rare dye
+      already cheapest could be rewritten to an unrelated price or its history
+      median. Now curated consumables or genuine seed prices only, with item-aware
+      safety checks.
+- [x] A row skipped after two failures stayed skipped, by slot, until a manual
+      Start - including the next listing put in that slot. Skips now require the
+      same item and lapse after an hour; failure counts are per item.
+
+Checked and left alone (low value or latent here): HQ ethers never sold (no ethers
+held), discovery retiring rules with stock and counting re-fetches as confirmations
+(discovery is off in the live config), free-slot count skipping rows without a
+readable price (no sign in logs), unverified auto-listing leaving the ledger
+pending (needs >10 s server lag and a manual restart), `/isort` via ProcessCommand
+(no-op), history median mixing HQ and NQ sales (only loosens the price-war guard).
+
+- [x] Tests: 516 passed (mutation-checked: each new retainer test fails with its
+      fix reverted). Clean Release rebuild: 0 warnings, 0 errors.
+- [ ] Version 1.0.0.75, commit, push, annotated tag, verify release + repo.json.
 
 # Completed: v1.0.0.74 trustworthy live market reads after the 7.56 hotfix
 

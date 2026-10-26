@@ -90,6 +90,9 @@ public sealed class UniversalisService : IUniversalisService, IDisposable
                 // The pinned core of the portfolio. These stay preferred even when
                 // external market discovery is unavailable.
                 PreferredStock = true,
+                // Priced on every world. The migration that set this on existing
+                // rules ran before any favourite was seeded, so seed it directly.
+                AlwaysScout = true,
             })
             .OrderBy(x => x.ItemName)
             .ToArray();
@@ -155,11 +158,7 @@ public sealed class UniversalisService : IUniversalisService, IDisposable
         .Select(x => (Row: x, Name: x.Name.ToString()))
         .Where(x => !string.IsNullOrWhiteSpace(x.Name));
 
-    private static readonly string[] BuyableDyePrefixes = ["General-Purpose ", "Wide-Spectrum "];
-
-    private static bool IsBuyableDye(string name) =>
-        name.EndsWith(" Dye", StringComparison.OrdinalIgnoreCase) &&
-        BuyableDyePrefixes.Any(prefix => name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
+    private static bool IsBuyableDye(string name) => ResaleStockPolicy.IsMassMarketDye(name);
 
     private static bool IsDye(string name) =>
         name.EndsWith(" Dye", StringComparison.OrdinalIgnoreCase) && !IsBuyableDye(name);

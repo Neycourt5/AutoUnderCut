@@ -38,6 +38,52 @@ public sealed class ReinvestmentAndStockPolicyTests
         Assert.Empty(ResaleStockPolicy.SelectTourRules([pelt], _ => true, 8));
     }
 
+    [Theory]
+    [InlineData("General-purpose Pure White Dye", true)]
+    [InlineData("General purpose Pure White Dye", true)]
+    [InlineData("Wide Spectrum #1 Dye", true)]
+    [InlineData("Wide-Spectrum #2 Dye", true)]
+    [InlineData("Standard Spectrum Dye", false)]
+    [InlineData("Dalamud Red Dye", false)]
+    [InlineData("Wide Spectrum Lens", false)]
+    public void TheMassMarketDyeLinesAreRecognisedInEitherSpelling(string name, bool tradeable) =>
+        Assert.Equal(tradeable, ResaleStockPolicy.IsMassMarketDye(name));
+
+    [Fact]
+    public void WideSpectrumSellOffRulesAreReseededAsTradeableAndMissingFavoritesBackfilled()
+    {
+        // The game writes "Wide Spectrum #1 Dye"; a seeder that only knew the
+        // hyphenated spelling filed both lines as sell-off stock, never bought.
+        var config = new SmartUndercutBot.Configuration
+        {
+            Version = 44,
+            BuyableDyeRulesSeeded = true,
+            FavoriteRulesBackfilled = true,
+            ProcurementRules =
+            [
+                new() { ItemId = 52255, ItemName = "Wide Spectrum #1 Dye", LiquidateOnly = true },
+                new() { ItemId = 52256, ItemName = "Wide Spectrum #2 Dye", LiquidateOnly = true },
+                new() { ItemId = 52254, ItemName = "Standard Spectrum Dye", LiquidateOnly = true },
+                new() { ItemId = 13114, ItemName = "General-purpose Pure White Dye", AlwaysScout = true },
+            ],
+        };
+        config.Normalize();
+        Assert.DoesNotContain(config.ProcurementRules, x => x.ItemName.StartsWith("Wide Spectrum"));
+        // Only the mass-market lines move; the rest of the sell-off list stays.
+        Assert.Contains(config.ProcurementRules, x => x.ItemName == "Standard Spectrum Dye" && x.LiquidateOnly);
+        Assert.Contains(config.ProcurementRules, x => x.ItemName == "General-purpose Pure White Dye" &&
+            !x.LiquidateOnly && x.AlwaysScout);
+        // Plugin start re-seeds the tradeable dyes and adds missing favorites once.
+        Assert.False(config.BuyableDyeRulesSeeded);
+        Assert.False(config.FavoriteRulesBackfilled);
+        Assert.Equal(45, config.Version);
+
+        config.FavoriteRulesBackfilled = config.BuyableDyeRulesSeeded = true;
+        config.Normalize();
+        Assert.True(config.FavoriteRulesBackfilled);
+        Assert.True(config.BuyableDyeRulesSeeded);
+    }
+
     [Fact]
     public void AnExistingConfigGetsItsFlipsBackOntoTheTourAheadOfMateria()
     {

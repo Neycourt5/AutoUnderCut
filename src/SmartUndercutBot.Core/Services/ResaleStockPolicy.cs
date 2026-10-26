@@ -16,6 +16,18 @@ public static class ResaleStockPolicy
         "Grade 4 Gemdraught of Intelligence" or "Grade 4 Gemdraught of Mind" or
         "Caramel Popcorn" or "Popoto Potage";
 
+    /// <summary>
+    /// The high-volume dye lines worth trading rather than selling off. The game
+    /// writes "General-purpose ... Dye" and "Wide Spectrum #1 Dye"; a seeder that
+    /// only knew "Wide-Spectrum" filed both Wide Spectrum dyes as sell-off stock.
+    /// </summary>
+    public static bool IsMassMarketDye(string name) =>
+        name.EndsWith(" Dye", StringComparison.OrdinalIgnoreCase) &&
+        (name.StartsWith("General-purpose ", StringComparison.OrdinalIgnoreCase) ||
+         name.StartsWith("General purpose ", StringComparison.OrdinalIgnoreCase) ||
+         name.StartsWith("Wide-Spectrum ", StringComparison.OrdinalIgnoreCase) ||
+         name.StartsWith("Wide Spectrum ", StringComparison.OrdinalIgnoreCase));
+
     // Materials bought with tomestones. They are acquired for gil, never traded for,
     // so they are listed from the bags with nothing held back and never purchased.
     public static readonly string[] TomeMaterialNames =

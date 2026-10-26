@@ -252,6 +252,72 @@ public sealed class RetainerAutomationTests
     }
 
     [Fact]
+    public void ARowSetAsideAfterRepeatedFailuresIsTriedAgainOnceTheSkipLapses()
+    {
+        using var run = new Session();
+        run.Game.AdjustPriceWorks = false;
+        run.Game.Listings.Add(new(1, "Test Retainer", 3, 100, "Popoto Potage", 99, 5_000, true));
+        run.Bot.StartNow();
+        for (var i = 0; i < 4_000 && run.Bot.State != AutomationState.WaitingForScheduledRun; i++)
+            run.Tick(2);
+        Assert.Equal(AutomationState.WaitingForScheduledRun, run.Bot.State);
+        var opensWhenSetAside = run.Game.ContextMenuOpens;
+
+        // Scheduled passes inside the hour leave it alone...
+        for (var i = 0; i < 20 * 30; i++) run.Tick(2);
+        Assert.Equal(opensWhenSetAside, run.Game.ContextMenuOpens);
+        // ...but it is not parked until someone presses Start again.
+        for (var i = 0; i < 45 * 30; i++) run.Tick(2);
+        Assert.True(run.Game.ContextMenuOpens > opensWhenSetAside);
+        Assert.False(run.Bot.RequiresManualRestart);
+    }
+
+    [Fact]
+    public void ANewListingInASlotThatWasSetAsideIsRepricedNormally()
+    {
+        using var run = new Session();
+        run.Game.AdjustPriceWorks = false;
+        run.Game.Listings.Add(new(1, "Test Retainer", 3, 100, "Popoto Potage", 99, 5_000, true));
+        run.Bot.StartNow();
+        for (var i = 0; i < 4_000 && run.Bot.State != AutomationState.WaitingForScheduledRun; i++)
+            run.Tick(2);
+        // The stack sold and the next listing landed in the same slot.
+        run.Game.Listings[0] = new(1, "Test Retainer", 3, 200, "Caramel Popcorn", 99, 3_000, true);
+        var opens = run.Game.ContextMenuOpens;
+        for (var i = 0; i < 6 * 30; i++) run.Tick(2);
+        Assert.True(run.Game.ContextMenuOpens > opens);
+    }
+
+    [Fact]
+    public void ARareDyeAboveTheConsumableCeilingIsUndercutLikeAnyOtherListing()
+    {
+        using var run = new Session();
+        run.Game.LiveRepricing = true;
+        run.Game.Listings.Add(new(1, "Test Retainer", 4, 13114, "General-purpose Pure White Dye", 1, 1_500_000, false));
+        run.Bot.StartNow();
+        run.CompletePass();
+        // The 1,000,000 gil ceiling is for the curated consumables. Applied here it
+        // routed the dye into placeholder repair, which refused to undercut it.
+        Assert.Equal(new[] { (13114u, (short)4, 1_499_998u) }, run.Game.Commits);
+    }
+
+    [Fact]
+    public void ARareDyeThatIsAlreadyCheapestIsNotRewrittenToItsHistoryMedian()
+    {
+        using var run = new Session();
+        run.Game.LiveRepricing = true;
+        run.Game.CompetitorOffset = 100_000;
+        run.Game.HistoricalMedian = 900_000;
+        run.Game.Listings.Add(new(1, "Test Retainer", 4, 13114, "General-purpose Pure White Dye", 1, 1_500_000, false));
+        run.Bot.StartNow();
+        run.CompletePass();
+        // Already the cheapest listing, so nothing changes. Through placeholder
+        // repair it was "fixed" to the 900,000 median: 600,000 gil given away.
+        Assert.Empty(run.Game.Commits);
+        Assert.Equal(1_500_000u, run.Game.Listings.Single().CurrentPrice);
+    }
+
+    [Fact]
     public void AHealthyListingIsStillOpenedNormally()
     {
         using var run = new Session();
@@ -524,13 +590,18 @@ public sealed class RetainerAutomationTests
         public override bool IsOpenPriceEditorFor(RetainerListing listing, bool requirePriceMatch) =>
             editorOpen && listing.ItemId == Editor.ItemId && listing.Slot == Editor.Slot &&
             (!requirePriceMatch || listing.CurrentPrice == Editor.CurrentPrice);
+        // Where the competitor sits relative to the open listing, and the sale
+        // history median the reply carries (the listing's own price by default).
+        public long CompetitorOffset = -1;
+        public uint? HistoricalMedian;
         public override bool RequestComparePrices()
         {
             pricesReturned = true;
             if (requestedItem != 0 && requestedItem != Editor.ItemId)
                 request!.SetException(new TimeoutException("Wrong provisional inventory item filtered out the actual reply."));
             else request!.SetResult(new(Editor.ItemId, DateTimeOffset.UtcNow,
-                [new(Editor.CurrentPrice - 1, 2, false, "Competitor", 99)], Editor.CurrentPrice));
+                [new((uint)(Editor.CurrentPrice + CompetitorOffset), 2, false, "Competitor", 99)],
+                HistoricalMedian ?? Editor.CurrentPrice));
             return true;
         }
         public override PriceUpdateResult CommitPrice(RetainerListing expected, uint price)

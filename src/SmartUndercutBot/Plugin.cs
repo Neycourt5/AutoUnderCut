@@ -77,6 +77,19 @@ public sealed class Plugin : IDalamudPlugin
             configuration.Current.ProcurementRules.AddRange(universalis.CreateFavoriteRules());
             configuration.Save();
         }
+        if (!configuration.Current.FavoriteRulesBackfilled)
+        {
+            foreach (var rule in universalis.CreateFavoriteRules())
+            {
+                if (configuration.Current.ProcurementRules.Any(x => x.ItemId == rule.ItemId))
+                    continue;
+                configuration.Current.ProcurementRules.Add(rule);
+                automationLog.Add(AutomationLogLevel.Information,
+                    $"Added the missing favorite {rule.ItemName} as preferred stock, priced on every world.");
+            }
+            configuration.Current.FavoriteRulesBackfilled = true;
+            configuration.Save();
+        }
         if (!configuration.Current.DyeRulesSeeded || !configuration.Current.MateriaRulesSeeded)
         {
             var liquidate = universalis.CreateLiquidationRules();

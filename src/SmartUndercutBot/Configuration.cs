@@ -7,7 +7,7 @@ namespace SmartUndercutBot;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 44;
+    public int Version { get; set; } = 45;
     public bool AutomationEnabled { get; set; }
     public bool ProcessAllRetainers { get; set; } = true;
     public bool RepeatBellRuns { get; set; }
@@ -126,6 +126,10 @@ public sealed class Configuration : IPluginConfiguration
     public bool MateriaRulesSeeded { get; set; }
     public bool BuyableDyeRulesSeeded { get; set; }
     public bool TomeMaterialRulesSeeded { get; set; }
+    // Favorites are otherwise only seeded into an empty rule list, so a default
+    // added later never reaches an existing configuration. Backfilled once, so a
+    // favorite the user removes on purpose afterwards stays removed.
+    public bool FavoriteRulesBackfilled { get; set; }
     public int ProcurementTargetSaleSlots { get; set; } = 60;
     public int ProcurementInventoryReserve { get; set; } = 10;
     public decimal ProcurementMinimumRoiPercent { get; set; } = 20m;
@@ -234,12 +238,7 @@ public sealed class Configuration : IPluginConfiguration
         name.Contains("Jet Black Dye", StringComparison.OrdinalIgnoreCase) ||
         name.Contains("Pure White Dye", StringComparison.OrdinalIgnoreCase);
 
-    private static bool IsMassMarketDyeName(string name) =>
-        name.EndsWith(" Dye", StringComparison.OrdinalIgnoreCase) &&
-        (name.StartsWith("General-purpose ", StringComparison.OrdinalIgnoreCase) ||
-         name.StartsWith("General purpose ", StringComparison.OrdinalIgnoreCase) ||
-         name.StartsWith("Wide-Spectrum ", StringComparison.OrdinalIgnoreCase) ||
-         name.StartsWith("Wide Spectrum ", StringComparison.OrdinalIgnoreCase));
+    private static bool IsMassMarketDyeName(string name) => ResaleStockPolicy.IsMassMarketDye(name);
 
     public void Normalize()
     {
@@ -628,7 +627,19 @@ public sealed class Configuration : IPluginConfiguration
             RepeatMinimumMinutes = RepeatMaximumMinutes = 5;
             Version = 44;
         }
-        Version = Math.Max(Version, 44);
+        if (Version < 45)
+        {
+            // The seeder only knew "Wide-Spectrum", but the game writes "Wide
+            // Spectrum #1 Dye", so both lines were filed as sell-off stock and never
+            // bought. Drop those seeded sell-off rules and re-seed the tradeable dyes.
+            ProcurementRules?.RemoveAll(x => x.LiquidateOnly && IsMassMarketDyeName(x.ItemName ?? string.Empty));
+            BuyableDyeRulesSeeded = false;
+            // Popoto Potage was dropped as an old default in v12 and made a favorite
+            // again later; no existing configuration ever got its rule back.
+            FavoriteRulesBackfilled = false;
+            Version = 45;
+        }
+        Version = Math.Max(Version, 45);
         ProcurementPreferredCoverageDays = Math.Clamp(ProcurementPreferredCoverageDays, 0.25m, 7m);
         ProcurementSecondaryCoverageDays = Math.Clamp(ProcurementSecondaryCoverageDays, 0.25m, 7m);
         ProcurementOpportunisticCoverageDays = Math.Clamp(ProcurementOpportunisticCoverageDays, 0.1m, 2m);
