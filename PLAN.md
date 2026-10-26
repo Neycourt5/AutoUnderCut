@@ -1,3 +1,56 @@
+# Current: v1.0.0.74 trustworthy live market reads after the 7.56 hotfix
+
+User asked for a full review, bug fixes and better logic, then a GitHub upload.
+Evidence comes from the saved session logs; no native game session was run here.
+
+## What the logs show
+
+- Since the 2026-09-17 game hotfix (Dalamud 15.0.3.5), 67-69% of shopping reads
+  return "0 listings" (1.7% before), and no read exceeds 49 rows (50-100 were
+  routine before). Zero reads land ~1.4 s after the row click, i.e. a declared
+  count of 0 plus the tracker's 750 ms quiet rule; they occur at the same rate even
+  60 s+ after the previous request, so this is not server throttling.
+- Home-world reads now miss the cheapest rows: Popcorn "lowest 2,590" while the
+  repricer saw a 2,188 competitor six minutes later (pre-patch the two agreed to
+  the gil). The inflated anchor is how a trip bought 495 Popcorn at a 2,140 landed
+  cost into a ~2,190 market.
+- The tracker latches the first request id, drops pages from any other id, takes
+  the last declared count (a 0 can overwrite N) and filters proxy rows by the ids
+  it happened to keep. All of that is fragile against the changed packet flow.
+- Every item is searched twice: the 6 s deadline starts before typing, the name
+  search alone takes 4-5 s, so attempt 1 always expires just after the row click
+  (626 retries in 959 reads on Sep 15, 295 in 621 on Sep 20).
+- The repricer snapshot deduplicates value-equal records, so identical stacks from
+  one retainer collapse into one row ("aggregated 2-3 listings"), understating the
+  supply the depth-adjusted resale anchor walks past.
+
+## Work checklist
+
+- [x] Tracker: proxy rows are the source of truth; max of declared counts; rows
+      from any request id in the generation; empty only after 2.5 s quiet; short
+      page (0.4 s) / full page (1.5 s) / shortfall (3 s, flagged partial) windows;
+      owed rows never read as empty; diagnostic `Describe()`. Even a met declared
+      count settles 0.4 s, in case counts are per stream and a dearer stream lands
+      first (advisor review).
+- [x] Purchase service: drop the `Contains` filter from reads, attribute counts by
+      SearchItemId before and after the native handler, one `MARKET READ` log line
+      per loaded or abandoned read.
+- [x] Controller: 15 s per attempt plus 10 s from the row click; empty boards leave
+      home prices unknown (re-read by the pre-purchase refresh) and do not stamp
+      24 h scout knowledge.
+- [x] Repricer snapshot keeps every listing (`MarketListing.ListingId`); home price
+      seeding requires competitor depth beyond half a day of demand.
+- [x] Tests: 504 passed (tracker rewritten for the new rules; controller cases for
+      the deadline grace, empty home/away boards and snapshot seeding). Clean
+      Release rebuild: 0 warnings, 0 errors.
+- [ ] Version 1.0.0.74, commit, push, annotated tag, verify release + repo.json.
+
+## Validation boundary
+
+The mechanism is inferred from session-log statistics and decompiled Dalamud /
+ClientStructs handlers, not observed in game. The new per-read diagnostic line is
+there so the first post-update session log confirms or refutes it.
+
 # Completed: v1.0.0.73 remember productive markets and revisit them first
 
 - [x] Record every world/item a trip actually bought from, with the price paid, the

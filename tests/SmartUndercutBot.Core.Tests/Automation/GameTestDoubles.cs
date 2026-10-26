@@ -66,6 +66,9 @@ namespace SmartUndercutBot.Automation
     {
         public int? LastKnownFreeSaleSlots { get; set; } = 5;
         public IReadOnlyList<StockExposure> ListedStock { get; set; } = [];
+        // Home prices the retainer pass read while repricing, offered to shopping.
+        public Dictionary<uint, (DateTimeOffset At, IReadOnlyList<MarketListing> Listings)> HomePrices { get; } = [];
+        public IReadOnlyDictionary<uint, (DateTimeOffset At, IReadOnlyList<MarketListing> Listings)> ObservedHomePrices => HomePrices;
         public bool IsActive { get; set; }
         public bool RequiresManualRestart { get; set; }
         public int Starts { get; private set; }

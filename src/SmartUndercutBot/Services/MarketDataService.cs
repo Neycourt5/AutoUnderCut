@@ -105,7 +105,8 @@ public sealed class MarketDataService : IMarketDataService, IDisposable
                 x.ItemQuantity,
                 x.IsHq,
                 x.RetainerName,
-                x.RetainerId))
+                x.RetainerId,
+                x.ListingId))
             .ToArray();
 
         // Dalamud emits one event for each raw market packet (up to ten listings),

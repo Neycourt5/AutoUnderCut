@@ -32,6 +32,10 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService, IDisp
     private uint purchaseError;
     public uint PurchaseError => purchaseError;
     private string lastSearchStatus = string.Empty;
+    private string requestedItemName = string.Empty;
+    // The response generation whose outcome was already written to the session
+    // log, so each read produces exactly one MARKET READ line.
+    private int loggedGeneration;
     public string? SearchStatus => $"{search.Status} ({response.Summary})";
 
     public MarketPurchaseService(
@@ -57,14 +61,39 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService, IDisp
 
     private void OnRequestResult(InfoProxyItemSearch* proxy, byte count, int error)
     {
-        var id = proxy == null ? 0 : proxy->SearchItemId;
+        // Read the search item on both sides of the native handler: a client that
+        // only sets it inside the handler would otherwise credit the count to the
+        // previous item and the request would never be seen to finish.
+        var before = proxy == null ? 0 : proxy->SearchItemId;
         requestResultHook.Original(proxy, count, error);
-        response.ReceiveCount(id, count, error);
+        var after = proxy == null ? 0 : proxy->SearchItemId;
+        response.ReceiveCount(before, after, count, error);
     }
 
     private void OnOfferings(IMarketBoardCurrentOfferings offerings) => response.ReceiveRows(
         offerings.RequestId, offerings.ItemListings.FirstOrDefault()?.ItemId ?? 0,
-        offerings.ItemListings.Select(x => x.ListingId));
+        offerings.ItemListings.Select(x => x.ListingId), offerings.ItemListings.Count);
+
+    /// <summary>
+    /// Rows for <paramref name="itemId"/> that the client's board holds right now.
+    /// The game's own proxy is what the market window draws from, so it - not the
+    /// subset of packets this plugin happened to keep - is what gets read.
+    /// </summary>
+    private static int BoardRows(InfoProxyItemSearch* proxy, uint itemId)
+    {
+        if (proxy == null || itemId == 0 || proxy->SearchItemId != itemId)
+            return 0;
+        var source = proxy->Listings;
+        var count = (int)Math.Min(proxy->ListingCount, (uint)source.Length);
+        var rows = 0;
+        for (var index = 0; index < count; index++)
+            if (source[index].ItemId == itemId)
+                rows++;
+        return rows;
+    }
+
+    private bool IsBoardReady(InfoProxyItemSearch* proxy, uint itemId) =>
+        proxy != null && proxy->SearchItemId == itemId && response.IsReady(itemId, BoardRows(proxy, itemId));
 
     private void OnPurchaseResponse(InfoProxyItemSearch* proxy, uint itemId, uint error)
     {
@@ -126,7 +155,8 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService, IDisp
     {
         if (itemId == 0 || !dataManager.GetExcelSheet<Item>().TryGetRow(itemId, out var item))
             return false;
-        var started = search.Request(itemId, item.Name.ToString());
+        requestedItemName = item.Name.ToString();
+        var started = search.Request(itemId, requestedItemName);
         ReportSearchStatus();
         return started;
     }
@@ -135,13 +165,29 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService, IDisp
     {
         var ready = search.Poll(itemId);
         ReportSearchStatus();
+        if (ready) LogRead("loaded");
         return ready;
     }
 
     public void ResetListingRequest()
     {
+        // A request abandoned before its board finished is exactly the case worth
+        // seeing in the log: it says what the server did and did not send.
+        if (response.CurrentItem != 0) LogRead("abandoned");
         search.Reset();
         lastSearchStatus = string.Empty;
+    }
+
+    public TimeSpan? ListingRequestAge(uint itemId) => response.RequestAge(itemId);
+
+    private void LogRead(string outcome)
+    {
+        var generation = response.Generation;
+        if (loggedGeneration == generation) return;
+        loggedGeneration = generation;
+        log.Add(AutomationLogLevel.Information,
+            $"MARKET READ {outcome} for {requestedItemName}: {response.Describe()}, " +
+            $"waiting flag {(InfoProxyItemSearch.Instance() is var proxy && proxy != null && proxy->WaitingForListings)}.");
     }
 
     private void ReportSearchStatus()
@@ -365,7 +411,7 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService, IDisp
             var proxy = InfoProxyItemSearch.Instance();
             return new(owner.IsAddonVisible("ItemSearchResult"), proxy == null ? 0 : proxy->SearchItemId,
                 proxy == null || proxy->WaitingForListings,
-                proxy != null && owner.response.IsReady(proxy->SearchItemId, (int)proxy->ListingCount));
+                proxy != null && owner.IsBoardReady(proxy, proxy->SearchItemId));
         }
 
         public void CloseResult() => owner.CloseAddon("ItemSearchResult");
@@ -388,9 +434,10 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService, IDisp
         var proxy = InfoProxyItemSearch.Instance();
         // WaitingForListings stays set on this client after a complete response, so
         // gating on it returned an empty board with every row already in memory.
-        // The tracker is the real signal: declared rows all received, no error.
-        if (proxy == null || proxy->SearchItemId != itemId ||
-            !response.IsReady(itemId, (int)proxy->ListingCount))
+        // The tracker decides when the board has finished; the board itself is read.
+        // Filtering rows by the packets the tracker kept is what hid the cheapest
+        // listings once the game began delivering a board in more than one stream.
+        if (!IsBoardReady(proxy, itemId))
             return [];
 
         var result = new List<LivePurchaseListing>();
@@ -399,13 +446,14 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService, IDisp
         for (var index = 0; index < count; index++)
         {
             var row = source[index];
-            if (row.ItemId == itemId && row.UnitPrice > 0 && row.Quantity > 0 && !row.IsMannequin &&
-                response.Contains(row.ListingId))
+            if (row.ItemId == itemId && row.UnitPrice > 0 && row.Quantity > 0 && !row.IsMannequin)
                 result.Add(new(index, row.ItemId, row.ListingId, row.RetainerId,
                     row.UnitPrice, row.Quantity, row.IsHqItem, row.TotalTax));
         }
         return result;
     }
+
+    public bool IsListingBoardPartial(uint itemId) => response.IsPartial(itemId);
 
     public bool IsListingSessionReusable(uint itemId, TimeSpan maximumAge) =>
         InfoProxyItemSearch.Instance() is var proxy && proxy != null &&
@@ -422,8 +470,7 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService, IDisp
     {
         listing = null;
         var proxy = InfoProxyItemSearch.Instance();
-        if (proxy == null || proxy->SearchItemId != expected.ItemId ||
-            !response.IsReady(expected.ItemId, (int)proxy->ListingCount))
+        if (!IsBoardReady(proxy, expected.ItemId))
             return false;
 
         // Always re-read the proxy here. A row index from an earlier pass may now
@@ -438,7 +485,7 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService, IDisp
             if (row.ItemId != expected.ItemId || row.UnitPrice == 0 || row.UnitPrice > expected.MaximumAcceptableUnitPrice ||
                 row.Quantity == 0 || row.Quantity > expected.Quantity || row.IsHqItem != expected.IsHighQuality ||
                 excludedRetainerIds.Contains(row.RetainerId) || excludedListingIds.Contains(row.ListingId) ||
-                row.IsMannequin || !response.Contains(row.ListingId))
+                row.IsMannequin)
                 continue;
             candidates.Add(new(index, row.ItemId, row.ListingId, row.RetainerId,
                 row.UnitPrice, row.Quantity, row.IsHqItem, row.TotalTax));
@@ -452,8 +499,9 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService, IDisp
     public bool SubmitPurchase(LivePurchaseListing listing)
     {
         var proxy = InfoProxyItemSearch.Instance();
-        if (proxy == null || proxy->SearchItemId != listing.ItemId ||
-            !response.Contains(listing.ListingId) || !response.IsReady(listing.ItemId, (int)proxy->ListingCount) ||
+        // Every field of the row is re-validated against the live board below, so
+        // a row the tracker never saw arrive cannot be bought in a changed state.
+        if (!IsBoardReady(proxy, listing.ItemId) ||
             !IsAddonVisible("ItemSearchResult") || listing.Index < 0 ||
             listing.Index >= proxy->ListingCount || listing.Index >= proxy->Listings.Length)
             return false;

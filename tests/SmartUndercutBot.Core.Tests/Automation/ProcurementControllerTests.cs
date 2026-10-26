@@ -1697,7 +1697,11 @@ public sealed class ProcurementControllerTests
         run.Game.ListingsReady = false;
         run.Controller.RunNow();
         for (var i = 0; i < 20 && run.Controller.State != ProcurementState.WaitingForStockHuntListings; i++) run.Tick(1);
+        // One attempt covers typing, the game's own name search and the server's
+        // answer; 6 s used to expire right after the row opened.
         run.Tick(6);
+        Assert.DoesNotContain(run.Log.Messages, m => m.Contains("Retrying the live search"));
+        run.Tick(9);
         Assert.Contains(run.Log.Messages, m => m.Contains("Retrying the live search") && m.Contains("attempt 2/3"));
         Assert.Empty(run.Game.Bought);
         run.Game.ListingsReady = true;
@@ -1730,6 +1734,87 @@ public sealed class ProcurementControllerTests
         Assert.Equal(105_105u, run.Controller.Status.GilSpent);
         Assert.Equal(110, run.Game.Inventory);
         Assert.Equal(1_000_000u - 105_105u, run.Game.Gil);
+    }
+
+    [Fact]
+    public void AnEmptyHomeBoardLeavesTheResalePriceUnknownAndIsReadAgainBeforeBuying()
+    {
+        using var run = new Route(priority: true);
+        run.Config.Current.ProcurementRules.Add(new()
+        {
+            ItemId = 2, ItemName = "Stew", AllowHighQuality = true, RequireHighQuality = true, HuntOnTour = true,
+        });
+        var sales = Enumerable.Range(1, 3)
+            .Select(i => new ProcurementSale(2_000, 233, true, DateTimeOffset.UtcNow.AddDays(-i))).ToArray();
+        run.Game.DemandMarkets = [new(1, "Popcorn", [], sales), new(2, "Stew", [], sales)];
+        run.Game.AutomaticWorldArrival = run.Game.AutomaticPurchaseConfirmation = true;
+        run.Game.LiveProvider = (world, item) => world == "Siren"
+            ? item == 1 ? [new(0, item, 11, 21, 2000, 99, true, 0)] : []
+            : [new(0, item, 10 + item, 20 + item, 1000, 99, true, 4950)];
+        run.Repricing.IsActive = false;
+        run.Controller.RunNow();
+        for (var i = 0; i < 500 && run.Controller.IsActive; i++) run.Tick(2);
+        Assert.Equal(ProcurementState.Completed, run.Controller.State);
+        // An empty board used to become a fresh, empty home quote that blocked the
+        // item for the whole circuit and was never read again before comparing.
+        Assert.Contains(run.Log.Messages, m => m.Contains("PRICE CHECK") && m.Contains("Siren: Stew") &&
+            m.Contains("home price stays unknown"));
+        Assert.DoesNotContain(run.Controller.HomeReferencePrices, p => p.ItemId == 2);
+        Assert.Equal(2, run.Game.Searches.Count(s => s.World == "Siren" && s.Item == 2));
+    }
+
+    [Fact]
+    public void AnEmptyAwayBoardIsReadAgainOnTheNextCircuit()
+    {
+        using var run = new Route(priority: true);
+        run.Config.Current.PriorityWorldsPerTrip = 4;
+        run.Game.AutomaticWorldArrival = true;
+        run.Game.LiveProvider = (world, item) => world == "Siren" ? [new(0, item, 11, 21, 2000, 99, true, 0)] : [];
+        run.Repricing.IsActive = false;
+        run.Controller.RunNow();
+        for (var i = 0; i < 500 && run.Controller.IsActive; i++) run.Tick(2);
+        Assert.Equal(ProcurementState.Completed, run.Controller.State);
+        Assert.Contains(run.Log.Messages, m => m.Contains("checked again next circuit"));
+        // Stamped as known, an empty read kept the world off the next day of circuits.
+        Assert.Equal(0, run.Controller.ScoutKnowledgeCoverage.Known);
+    }
+
+    [Theory]
+    [InlineData(99u, 21ul, true)]   // A competitor's stack deeper than half a day of sales.
+    [InlineData(40u, 21ul, false)]  // Too shallow to place the resale anchor.
+    [InlineData(99u, 77ul, false)]  // Only our own listing: no competitor at all.
+    public void ARepricingSnapshotStandsInForAHomeReadOnlyWhenItCanAnchorResale(
+        uint quantity, ulong retainer, bool reused)
+    {
+        using var run = new Route(priority: true);
+        ((HashSet<ulong>)run.Game.OwnedRetainerIds).Add(77);
+        run.Game.AutomaticWorldArrival = true;
+        run.Game.LiveProvider = (_, item) => [new(0, item, 11, 21, 2000, 99, true, 0)];
+        run.Repricing.HomePrices[1] = (DateTimeOffset.UtcNow,
+            [new MarketListing(2_000, quantity, true, "Retainer", retainer, 5)]);
+        run.Repricing.IsActive = false;
+        run.Controller.RunNow();
+        for (var i = 0; i < 500 && run.Controller.IsActive; i++) run.Tick(2);
+        Assert.Equal(ProcurementState.Completed, run.Controller.State);
+        Assert.Equal(reused, run.Log.Messages.Any(m => m.Contains("Reused 1 home price")));
+        Assert.Equal(reused, !run.Game.Searches.Contains(("Siren", 1u)));
+    }
+
+    [Fact]
+    public void AListingRequestTheServerIsStillAnsweringIsNotAbandoned()
+    {
+        using var run = new Route(priority: true);
+        run.Game.ListingsReady = false;
+        run.Controller.RunNow();
+        for (var i = 0; i < 20 && run.Controller.State != ProcurementState.WaitingForStockHuntListings; i++) run.Tick(1);
+        // The row was opened two seconds ago, after a slow name search used most of
+        // the attempt: the server is answering, so the attempt is not abandoned.
+        run.Game.RequestAge = TimeSpan.FromSeconds(2);
+        run.Tick(16);
+        Assert.DoesNotContain(run.Log.Messages, m => m.Contains("Retrying the live search"));
+        run.Game.RequestAge = TimeSpan.FromSeconds(11);
+        run.Tick(1);
+        Assert.Contains(run.Log.Messages, m => m.Contains("Retrying the live search") && m.Contains("attempt 2/3"));
     }
 
     [Fact]
@@ -1960,6 +2045,9 @@ public sealed class ProcurementControllerTests
         }
         public bool AreListingsReady(uint itemId) => ListingsReady;
         public void ResetListingRequest() { sessionItem = 0; }
+        // How long ago the result row was opened; null until it has been.
+        public TimeSpan? RequestAge { get; set; }
+        public TimeSpan? ListingRequestAge(uint itemId) => sessionItem == itemId ? RequestAge : null;
         public bool IsListingSessionReusable(uint itemId, TimeSpan maximumAge) =>
             SessionReuseEnabled && sessionItem == itemId && ListingsReady && BoardOpen &&
             Clock.GetUtcNow() - sessionObservedAt <= maximumAge;

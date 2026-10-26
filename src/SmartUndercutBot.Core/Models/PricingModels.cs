@@ -51,12 +51,16 @@ public sealed record RetainerListing(
     bool IsHighQuality,
     uint AcquisitionCost = 0);
 
+// ListingId keeps two identical stacks from one retainer distinct. Without it,
+// value equality merged them, so a snapshot undercounted the supply in front of a
+// price and the resale anchor walked straight past it.
 public sealed record MarketListing(
     uint PricePerUnit,
     uint Quantity,
     bool IsHighQuality,
     string? RetainerName = null,
-    ulong RetainerId = 0);
+    ulong RetainerId = 0,
+    ulong ListingId = 0);
 
 public sealed record MarketSnapshot(
     uint ItemId,

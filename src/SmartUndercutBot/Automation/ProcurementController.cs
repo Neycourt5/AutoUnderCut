@@ -1034,13 +1034,26 @@ public sealed partial class ProcurementController : IDisposable
         {
             nextActionAt = timeProvider.GetUtcNow().AddMilliseconds(1_200);
             Wait(ProcurementState.WaitingForStockHuntListings,
-                $"Waiting to scan {currentStockHuntRule.ItemName} on {WorldName}.", 6);
+                $"Waiting to scan {currentStockHuntRule.ItemName} on {WorldName}.", ListingSearchSeconds);
             return;
         }
         nextActionAt = timeProvider.GetUtcNow().AddMilliseconds(1_200);
         Wait(ProcurementState.WaitingForStockHuntListings,
-            $"Reading live {currentStockHuntRule.ItemName} listings on {WorldName}.", 6);
+            $"Reading live {currentStockHuntRule.ItemName} listings on {WorldName}.", ListingSearchSeconds);
     }
+
+    // Typing the name, the game's own name search (4-5 s on its own), opening the
+    // row and the server's answer all fit inside one attempt. The old 6 s budget
+    // expired just after the row opened, so every item was searched twice.
+    private const int ListingSearchSeconds = 15;
+
+    // Once the row is open the server is answering; give it this long from the
+    // request itself, however long the name search took to get there.
+    private static readonly TimeSpan ListingResponseGrace = TimeSpan.FromSeconds(10);
+
+    private bool ListingWaitExpired(uint itemId) =>
+        timeProvider.GetUtcNow() >= deadline &&
+        !(market.ListingRequestAge(itemId) is { } age && age < ListingResponseGrace);
 
     private void PollStockHuntListings()
     {
@@ -1059,7 +1072,7 @@ public sealed partial class ProcurementController : IDisposable
         if (!market.AreListingsReady(currentStockHuntRule.ItemId))
         {
             if (market.SearchStatus is { } searchStatus) detail = searchStatus;
-            if (timeProvider.GetUtcNow() >= deadline)
+            if (ListingWaitExpired(currentStockHuntRule.ItemId))
             {
                 if (RetryListingRequest(currentStockHuntRule.ItemName))
                     return;
@@ -1078,7 +1091,8 @@ public sealed partial class ProcurementController : IDisposable
             return;
         }
 
-        var live = market.ReadLiveListings(currentStockHuntRule.ItemId)
+        var board = market.ReadLiveListings(currentStockHuntRule.ItemId);
+        var live = board
             .Where(x => ResaleStockPolicy.BuyableQuality(
                 currentStockHuntRule, x.IsHighQuality, configuration.Current.BuyHighQualityOnly))
             .ToArray();
@@ -1086,7 +1100,7 @@ public sealed partial class ProcurementController : IDisposable
         worldSuccessfulScans++;
         if (priorityShopping)
         {
-            ObservePriorityItem(live);
+            ObservePriorityItem(live, boardEmpty: board.Count == 0);
             return;
         }
         foreach (var listing in live)
@@ -1367,12 +1381,12 @@ public sealed partial class ProcurementController : IDisposable
         if (!market.RequestListings(currentOrder.ItemId))
         {
             nextActionAt = timeProvider.GetUtcNow().AddMilliseconds(1_200);
-            Wait(ProcurementState.WaitingForListings, $"Waiting to request {currentOrder.ItemName}.", 6);
+            Wait(ProcurementState.WaitingForListings, $"Waiting to request {currentOrder.ItemName}.", ListingSearchSeconds);
             return;
         }
         Wait(ProcurementState.WaitingForListings, reuse
             ? $"Reusing the loaded {currentOrder.ItemName} listings for the next stack."
-            : $"Revalidating live prices for {currentOrder.ItemName}.", 6);
+            : $"Revalidating live prices for {currentOrder.ItemName}.", ListingSearchSeconds);
     }
 
     private void PollListings()
@@ -1446,7 +1460,7 @@ public sealed partial class ProcurementController : IDisposable
         if (!market.AreListingsReady(currentOrder.ItemId))
         {
             if (market.SearchStatus is { } searchStatus) detail = searchStatus;
-            if (timeProvider.GetUtcNow() >= deadline)
+            if (ListingWaitExpired(currentOrder.ItemId))
             {
                 if (RetryListingRequest(currentOrder.ItemName))
                     return;
@@ -1492,7 +1506,7 @@ public sealed partial class ProcurementController : IDisposable
                 currentOrderReusedSession = false;
                 market.ResetListingRequest();
                 nextActionAt = timeProvider.GetUtcNow().AddMilliseconds(1_200);
-                deadline = nextActionAt.AddSeconds(6);
+                deadline = nextActionAt.AddSeconds(ListingSearchSeconds);
                 detail = $"Refreshing {currentOrder.ItemName} listings once: the loaded results no longer hold a qualifying stack.";
                 log.Add(AutomationLogLevel.Information, $"MARKET BATCH REFRESH on {WorldName}: {detail}");
                 EndListingSession();
@@ -1806,7 +1820,7 @@ public sealed partial class ProcurementController : IDisposable
         listingRequestAttempts++;
         market.ResetListingRequest();
         nextActionAt = timeProvider.GetUtcNow().AddSeconds(listingRequestAttempts - 1);
-        deadline = nextActionAt.AddSeconds(6 * listingRequestAttempts);
+        deadline = nextActionAt.AddSeconds(ListingSearchSeconds);
         detail = $"Retrying the live search for {itemName} on {WorldName} (attempt {listingRequestAttempts}/3). No purchase has been submitted for this order.";
         log.Add(AutomationLogLevel.Warning, detail);
         return true;

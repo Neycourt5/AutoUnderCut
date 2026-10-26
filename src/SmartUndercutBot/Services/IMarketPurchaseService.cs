@@ -44,6 +44,19 @@ public interface IMarketPurchaseService
     DateTimeOffset? ListingsObservedAt(uint itemId);
 
     /// <summary>
+    /// How long ago the listings for this item were actually requested from the
+    /// server (the result row was opened), or null before that. Lets a route time
+    /// the server's answer from the request rather than from typing the search.
+    /// </summary>
+    TimeSpan? ListingRequestAge(uint itemId) => null;
+
+    /// <summary>
+    /// Whether the finished board holds fewer rows than the server declared. Such
+    /// a board still has the cheapest rows, but cannot speak for market depth.
+    /// </summary>
+    bool IsListingBoardPartial(uint itemId) => false;
+
+    /// <summary>
     /// Resolves the listing to buy. Excluded listing IDs are removed before any
     /// candidate is chosen - filtering after selection lets an already-purchased row
     /// that is still visible keep winning, and the fallback would never reach the

@@ -517,6 +517,7 @@ public sealed partial class ProcurementController
         {
             if (now - observed.At > maxAge) continue;
             if (homePriceTimes.TryGetValue(itemId, out var have) && have >= observed.At) continue;
+            if (!RepricingSnapshotAnchorsResale(itemId, observed.Listings)) continue;
             homePrices[itemId] = observed.Listings
                 .Where(x => x.PricePerUnit > 0 && x.Quantity > 0)
                 .Select(x => new ProcurementMarketListing(itemId, 0, x.RetainerId, homeWorld, 0,
@@ -528,6 +529,35 @@ public sealed partial class ProcurementController
         if (reused > 0)
             log.Add(AutomationLogLevel.Information,
                 $"Reused {reused} home price(s) already read during the retainer pass; those items are not re-checked.");
+    }
+
+    /// <summary>
+    /// Whether a repricing snapshot can stand in for a home read. Repricing only
+    /// needs the cheapest competitor, so its snapshot is usually the first page or
+    /// two. The resale anchor needs more: it walks up the board until the cheaper
+    /// competing stock outlasts half a day of demand, and on a shallow snapshot it
+    /// runs off the end and takes the dearest row seen - an inflated quote that
+    /// then counted as fresh, so the item was never read properly before buying.
+    /// A snapshot holding only our own listings has no competitor at all.
+    /// </summary>
+    private bool RepricingSnapshotAnchorsResale(uint itemId, IReadOnlyList<MarketListing> listings)
+    {
+        var config = configuration.Current;
+        var rule = config.ProcurementRules.FirstOrDefault(x => x.ItemId == itemId && x.Enabled && !x.LiquidateOnly);
+        if (rule is null)
+            return false;
+        var owned = retainerListings.OwnedRetainerIds;
+        foreach (var quality in new[] { false, true })
+        {
+            if (!ResaleStockPolicy.BuyableQuality(rule, quality, config.BuyHighQualityOnly)) continue;
+            var competing = listings.Where(x => x.IsHighQuality == quality && x.PricePerUnit > 0 && x.Quantity > 0 &&
+                    !owned.Contains(x.RetainerId))
+                .Sum(x => (decimal)x.Quantity);
+            var absorbable = decimal.Floor(HomeSalesPerDay(itemId, quality) * config.EconomicPolicy.AnchorAbsorptionDays);
+            if (competing == 0 || competing <= absorbable)
+                return false;
+        }
+        return true;
     }
 
     // Use the same lifetime when skipping a home read and when permitting a buy.
@@ -546,12 +576,17 @@ public sealed partial class ProcurementController
         configuration.Save();
     }
 
-    private void ObservePriorityItem(IReadOnlyList<LivePurchaseListing> live)
+    private void ObservePriorityItem(IReadOnlyList<LivePurchaseListing> live, bool boardEmpty = false)
     {
         var rule = currentStockHuntRule!;
         var rows = live.Select(x => new ProcurementMarketListing(x.ItemId, x.ListingId, x.RetainerId,
             WorldName, 0, x.PricePerUnit, x.Quantity, x.IsHighQuality)).ToArray();
-        if (stockHuntWorldIndex == 0)
+        // A board with no rows at all is the one reading that cannot be told apart
+        // from a read that went wrong, and a traded line is almost never really
+        // empty. Recording it as a fresh, empty home quote hid the item's resale
+        // price for the whole circuit; leaving it unknown lets the pre-purchase
+        // refresh read it again. Partly filled boards are real prices and are kept.
+        if (stockHuntWorldIndex == 0 && !boardEmpty)
         {
             homePrices[rule.ItemId] = rows;
             homePriceTimes[rule.ItemId] = timeProvider.GetUtcNow();
@@ -594,7 +629,10 @@ public sealed partial class ProcurementController
         {
             scoutListings.RemoveAll(x => x.WorldName == WorldName && x.ItemId == rule.ItemId);
             scoutListings.AddRange(rows);
-            scoutObservedAt[(WorldName, rule.ItemId)] = timeProvider.GetUtcNow();
+            // An empty board does not count as knowing this world's price: stamped,
+            // it kept the world off the next 24 hours of circuits for this item.
+            if (boardEmpty) scoutObservedAt.Remove((WorldName, rule.ItemId));
+            else scoutObservedAt[(WorldName, rule.ItemId)] = timeProvider.GetUtcNow();
         }
         foreach (var quality in new[] { false, true })
         {
@@ -606,8 +644,11 @@ public sealed partial class ProcurementController
                   $"expected profit {order.ExpectedProfit:N0} ({order.NetRoiPercent:N1}% net ROI), " +
                   $"{order.ExpectedGilPerDay:N0} gil/day, coverage {order.InventoryCoverageDays:N1}d -> {order.CoverageDaysAfterPurchase:N1}d, " +
                   $"estimated turnover {order.EstimatedDaysToSell:N2} days."
+                : stockHuntWorldIndex == 0 && boardEmpty
+                    ? "The board came back empty; the home price stays unknown and is read again before buying."
                 : !HomePriceIsFresh(rule.ItemId) ? "Saved for comparison after refreshing the home resale price."
                 : homePrices.GetValueOrDefault(rule.ItemId)?.Length is not > 0 ? "No confirmed home resale listings; skip buying."
+                : boardEmpty ? "The board came back empty; this world is checked again next circuit."
                 : "No deal passes home sales, ROI, portfolio quality, demand, budget and stock limits.";
             observations.Add(new(timeProvider.GetUtcNow(), WorldName, rule.ItemName, quality,
                 qualified.Length, qualified.Sum(x => (long)x.Quantity), qualified.Select(x => x.PricePerUnit).DefaultIfEmpty().Min(), decision));

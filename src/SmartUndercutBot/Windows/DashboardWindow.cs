@@ -1054,7 +1054,7 @@ public sealed class DashboardWindow : Window
         }
         if (ImGui.CollapsingHeader("Recent live price comparisons"))
         {
-            ImGui.TextWrapped("These checks are also saved to the session log on the Activity log tab. Zero listings means a completed empty server response.");
+            ImGui.TextWrapped("These checks are also saved to the session log on the Activity log tab, with a MARKET READ line describing what the server sent. Zero listings means the board stayed empty for 2.5 seconds after the server answered; an empty board is never trusted as a home price or as a checked world, so it is read again.");
             if (ImGui.BeginTable("live-comparisons", 5, ImGuiTableFlags.RowBg | ImGuiTableFlags.Borders | ImGuiTableFlags.ScrollY,
                     new Vector2(0, 260 * ImGuiHelpers.GlobalScale)))
             {
