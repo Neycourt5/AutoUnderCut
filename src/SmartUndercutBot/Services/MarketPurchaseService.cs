@@ -98,7 +98,16 @@ public sealed unsafe class MarketPurchaseService : IMarketPurchaseService, IDisp
     private void OnPurchaseResponse(InfoProxyItemSearch* proxy, uint itemId, uint error)
     {
         purchaseResponseHook.Original(proxy, itemId, error);
-        if (pendingPurchaseItem == 0 || itemId != pendingPurchaseItem) return;
+        if (pendingPurchaseItem == 0) return;
+        // High-quality answers name item + 1,000,000. Comparing raw ids dropped every
+        // HQ rejection, so a stack someone else bought first waited out the 30-second
+        // inventory check and stopped the whole route as an unknown outcome.
+        if (!ItemIdentity.SameItem(itemId, pendingPurchaseItem))
+        {
+            log.Add(AutomationLogLevel.Debug,
+                $"MARKET BUY server response for item {itemId} (error {error}) while waiting for {pendingPurchaseItem}; not this purchase.");
+            return;
+        }
         purchaseError = error;
         log.Add(error == 0 ? AutomationLogLevel.Information : AutomationLogLevel.Warning,
             $"MARKET BUY server response for item {itemId}: error {error}. Inventory verification still required.");

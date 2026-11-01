@@ -153,6 +153,10 @@ public sealed partial class ProcurementController : IDisposable
     private const int MaximumSessionPurchases = 25;
     private IReadOnlyList<PortfolioDecision> portfolioDecisions = [];
     private readonly MarketDiscoveryService? discovery;
+    // The durable price memory. Optional, so the controller still runs (and its
+    // tests still pass) without one; when present, live reads are recorded in it
+    // and a reload does not forget what the last circuit saw.
+    private readonly Func<PriceMemory>? priceMemory;
     private PortfolioAllocationSummary? portfolioSummary;
     private DateTimeOffset portfolioSummaryAt;
 
@@ -172,9 +176,11 @@ public sealed partial class ProcurementController : IDisposable
         ConfigurationService configuration,
         AutomationLog log,
         TimeProvider? timeProvider = null,
-        MarketDiscoveryService? discovery = null)
+        MarketDiscoveryService? discovery = null,
+        Func<PriceMemory>? priceMemory = null)
     {
         this.discovery = discovery;
+        this.priceMemory = priceMemory;
         this.framework = framework;
         this.playerState = playerState;
         this.commandManager = commandManager;
@@ -1492,6 +1498,8 @@ public sealed partial class ProcurementController : IDisposable
             // freshly scouted and suppress a real revisit later.
             scoutObservedAt[(WorldName, currentOrder.ItemId)] =
                 market.ListingsObservedAt(currentOrder.ItemId) ?? timeProvider.GetUtcNow();
+            var revisited = scoutListings.Where(x => x.WorldName == WorldName && x.ItemId == currentOrder.ItemId).ToArray();
+            RememberLiveRead(currentOrder.ItemId, revisited, atHome: false, boardEmpty: revisited.Length == 0);
         }
         if (CanSweepBargains(currentOrder) && !RefreshBargainOrder(rule))
             return;
@@ -2517,7 +2525,20 @@ public sealed partial class ProcurementController : IDisposable
     {
         if (consecutiveFailedWorlds < 2)
             return false;
-        FinishShopping("Live tour stopped: two consecutive worlds were reached but returned no completed item searches. Check the market-search log before restarting.");
+        const string stop = "Live tour stopped: two consecutive worlds were reached but returned no completed item searches. Check the market-search log before restarting.";
+        // Whatever the circuit already priced on other worlds is still worth acting
+        // on. Going straight home threw away up to an hour and a half of live
+        // observations; end the way a checkpoint does instead, as the
+        // unreachable-world limit already did.
+        if (priorityShopping && stockHuntScanning && !priorityRefreshingHome &&
+            scoutListings.Any(x => !x.WorldName.Equals(homeWorld, StringComparison.OrdinalIgnoreCase)))
+        {
+            log.Add(AutomationLogLevel.Warning, stop);
+            FinishPriorityScouting(
+                $"Stopped early after two unreadable worlds; comparing the {scoutListings.Count} listing(s) already observed.");
+            return true;
+        }
+        FinishShopping(stop);
         return true;
     }
 

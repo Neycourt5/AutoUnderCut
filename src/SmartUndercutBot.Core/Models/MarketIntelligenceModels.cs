@@ -26,7 +26,8 @@ public sealed record MarketItemFacts(
     bool IsTradable,
     bool CanBeHighQuality,
     bool IsFoodOrMedicine,
-    int StackSize);
+    int StackSize,
+    string Category = "");
 
 /// <summary>
 /// A per-item statistics source. Universalis and Saddlebag Exchange both provide

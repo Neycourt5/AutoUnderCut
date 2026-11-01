@@ -1852,8 +1852,13 @@ public sealed class ProcurementControllerTests
         public ProcurementController Controller { get; }
         public MarketDiscoveryService? Discovery { get; }
         private readonly Clock clock = new();
-        public Route(bool priority = false, IMarketStatisticsProvider? statistics = null)
+        public PriceMemory? Memory { get; }
+        public DateTimeOffset Now => clock.GetUtcNow();
+        public Route(bool priority = false, IMarketStatisticsProvider? statistics = null, PriceMemory? memory = null,
+            int startOffsetSeconds = 0)
         {
+            Memory = memory;
+            clock.Advance(startOffsetSeconds);
             Config.Current.PriorityShoppingEnabled = priority;
             Game.UseLiveListings = priority;
             Config.Current.MarketBoardTravelCommand = "/li mb";
@@ -1877,7 +1882,8 @@ public sealed class ProcurementControllerTests
             if (statistics is not null)
                 Discovery = new(statistics, Game.LookupItem, Config, Log, clock);
             Controller = new(Game, Game, Game, Game, Game, new ProcurementPlannerService(),
-                Game, Game, Game, Game, Ledger, Repricing, Config, Log, clock, Discovery);
+                Game, Game, Game, Game, Ledger, Repricing, Config, Log, clock, Discovery,
+                memory is null ? null : () => memory);
         }
         public void Tick(int seconds = 0) { clock.Advance(seconds); Game.Tick(); }
         public void Begin()

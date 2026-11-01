@@ -90,6 +90,45 @@ stock only.
 tier, units per day, expected profit, ROI, estimated turnover in days, and the
 reason for every decision, with a portfolio summary line on Home.
 
+### Price memory, market scans and sale tracking
+
+The plugin keeps its own price memory per character
+(`pluginConfigs/SmartUndercutBot/price-memory-<character>.json`, with a `.bak`):
+- every live board it reads, on every world;
+- the home market for each traded line: floor, depth, units per day, and the median sale price and size;
+- every one of your sales;
+- the latest sales ranking of the home world.
+
+Readings older than seven days are dropped, and sales after thirty.
+
+How it is used:
+- After a reload, the away-world prices from the last circuit that are younger than
+  "remember away-world prices" are restored instead of read again.
+- Worlds where memory shows cheap stock are visited first.
+- Buying still needs a fresh live board read, a fresh home price and every profit
+  guard. A remembered or cached price only decides where to look.
+
+**Market scans** run without travelling. Turn them off or change the interval on the Market tab.
+- Every 30 minutes, for each traded line, Universalis is asked:
+  - for the cheapest listings across North America, each dated by its world's last upload;
+  - for the home market.
+- This costs about two small requests per twenty items.
+- Once a day, Saddlebag Exchange is asked what sold on the home world over the
+  last week, and Universalis where each of those items is cheapest elsewhere.
+
+**Sale tracking** reads the game's own "has sold" message (LogMessage 745/748)
+while you are logged in.
+- Each sale is recorded with its quantity and the gil received after fees.
+- The next retainer check is brought forward to about 30 seconds later, so a sold
+  slot is refilled within a minute instead of waiting for the next scheduled pass.
+- The first few sales of each session also log their raw message parameters, so a
+  game patch that changes the message shows up in the session log.
+
+The **Market** tab shows:
+- your sales for the last day and week;
+- where each traded line is cheapest, with the units buyable at a 15% margin;
+- what sells on the home world, with its cheapest price elsewhere.
+
 ### Optional market discovery
 
 A daily market-statistics feed can suggest additional high-value, high-volume food

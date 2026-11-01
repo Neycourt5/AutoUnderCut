@@ -1,3 +1,135 @@
+# Current: 2026-10-31 volume review, price memory, scans and real sale tracking
+
+The user asked (2026-10-31, overnight run authorized):
+- Keep all 60 slots full and selling constantly. "Sales volume beats all."
+- Food and potions first, then whatever the API scans show sells well.
+- No wimpy sales: spend millions at a good margin.
+- Keep shopping trips.
+- Add a local price memory and periodic Universalis/Saddlebag scans, at whatever cadence Claude thinks best.
+- Do a full code + logic review and give an opinion.
+
+Evidence:
+- The installed plugin is 1.0.0.73. The game has not loaded it since 2026-09-26, so v74/v75 have never run.
+- Sep logs:
+  - Trips take 61–101 min, with repricing paused.
+  - About 20 sales/day across about 57 listings.
+  - 7,761 Popcorn bought; 28 of 51 slots were Popcorn.
+  - Floors kept every listing above market on 09-26.
+- Market research (Siren vs NA, 2026-10-31) and the verified API facts are in the AutoUnderCut memory note `market-data-apis`.
+
+Phase 1 (decision-independent, overnight). Each part is tested and defensive; nothing changes buying or pricing economics:
+- [ ] Retainer sale tracking from `IChatGui.LogMessage`.
+  - LogMessage 745 parameters: 0 = town, 1 = item, 2 = qty, 4 = gil after fees. Row 748 is a single item, with qty = 1.
+  - Log the raw parameters on the first sales, to confirm the layout in game.
+  - Keep a sales ledger and an early relist pass after a sale.
+- [ ] Persistent price memory, per character, in atomic JSON + .bak:
+  - live away and home reads, Universalis hints and depth, our sales
+  - restore scout knowledge within `ScoutKnowledgeMaxAgeHours` after a reload
+  - add memory-based route scoring
+- [ ] Scan scheduler:
+  - tracked items' NA aggregated hints and cheapest-100 depth every 30 min
+  - daily Saddlebag marketshare (Siren) plus Universalis spreads for candidates
+  - results on a Market tab
+- [ ] Fix the Saddlebag provider:
+  - rawstats is 7-day NA-wide, not one day on the home world
+  - add marketshare
+  - enable gzip and keep the user agent
+- [ ] Clear defects from the three read-only reviews (config, repricing, market path); see the review report.
+- [ ] Tests, Release build, version bump, publish, verify.
+
+## Review findings (2026-11-01, three read-only agents plus the economics core)
+
+These were checked against code and logs. Logs are from builds up to v1.0.0.73; v74/v75 have never run in game.
+
+**Purchase and travel path**
+- **P1 (critical).** `MarketPurchaseService.cs:98-105` records a server rejection only when `itemId == pendingPurchaseItem`. HQ responses carry item + 1,000,000, so a rejected HQ buy becomes "PURCHASE OUTCOME UNKNOWN" after 30 s. The halt is latched and the character is stranded with repricing halted. In the logs, 108 buy requests produced only 4 response lines, all NQ.
+- **P2.** In `ProcurementController.cs:1170,1205,2516-2522`, two "failed" worlds call `FinishShopping` and drop the whole scouted circuit with no comparison. The 6-unreachable path compares instead.
+- **P3.** There is no per-world breaker: a dead board burns about 11 min. Travel deadlines are 600 s, against a measured same-DC hop of 38 s and cross-DC of 136 s.
+- **P4.** A failure away from home idles at least 10 min (`ProcurementIntervalMinutes`) before starting home (`PC:364-366,493-497,2574-2578`). A user halt or unknown outcome never goes home.
+- **P5.** A closed board or Lifestream busy during the buy leg abandons the whole plan (`PC:1411-1415`). A test pins this as intentional.
+- **P6.** `IsListingBoardPartial` has no caller; partial home boards anchor resale as if complete. `MarketDataService` (repricer reads) still has the pre-rewrite first-request-id latch (`MDS:184`); latent.
+- **P7.** There is no gil-delta check after a purchase (`PC:1642-1665`).
+- **P8.** Minor: the second attempt for the last world is lost (`PC:1237`), and `LifestreamService` returns true on a decline.
+- **Throughput** (8 trips): 61–134 min, mean 99. Home leg 9–12 min, about 1.7–3.4 min per world, home refresh about 5 min, and about 4 s of actual buying. Each trip bought from 1–3 of 29–31 worlds. Repricing was paused for 59–91% of the time.
+
+**Repricing and listing**
+- **D1.** Price writes are lost after auto-listing bursts. 18 of 152 writes within 90 s of AUTO-LISTED failed verification, against 0 of 466 otherwise (`AC:749-757,1337-1422`, `RLS:409-410`).
+- **D2.** New bag stacks are listed at the median of our own stuck asks when BelowFloor or PriceWar (`BagListingController.cs:345-356`). This is tied to decision 1.
+- **D3.** Unknown-cost stock has a 1-gil floor, and the crash guard fails open when the history median is missing (`PositionCostPolicy.cs:66-67`, `PricingStrategyService.cs:58-62`, `MDS:48-53`).
+- **D4.** `StartBagListingNow` calls `ForgetProblemListings` on every automatic fill (`AC:302-314`, `BLC:386`).
+- **D5.** The bag depth walk returns the dearest row on a thin board (`PricingStrategyService.cs:120`). The agent's claim that Universalis retainer ids are hashed is wrong: live data has numeric strings.
+- **D6.** Legacy `MinimumPrice` values return once a tracked position sells out (`PositionCostPolicy.cs:61-67`). Live examples: Strength 5,930, Pink Dye 39,790. This needs a user decision.
+- **D7.** Reaching `MaximumUpdatesPerSession` calls `Complete` with no reschedule (`AC:1282-1287`). `CuratedAutoListItems` lacks Popoto Potage (`AC:67-74`).
+- **B1.** BelowFloor keeps the old ask, with no time relaxation. On 9-20, 29 of 58 listings were stuck for more than 1 h with the floor only 3% above market.
+- **B3.** Repricing runs on a 5-min idle plus a 2.3–3.5 min pass, a 7–9 min cycle.
+- **B4.** The queue is not grouped by item, so it reuses fewer reads (2.9 s vs 1.7 s per row).
+- **B6.** Manual-restart latches: a closed bell list, movement or an exception stops everything until Start.
+- **B7.** Ties are left alone. Prices never rise: 19 Potage stacks sat at 2,098 while we were the only seller.
+
+**Configuration and persistence**
+- **C1.** Price knowledge is RAM-only: homePrices, scout listings and stamps, regionHints, observations. Only RememberedBargains, capped at 8 for 24 h, persists.
+- **C2.** `PrepareScoutRoute`'s `leadsRoute` ignores the resume cursor, so a fresh remembered market can be skipped (`Priority.cs:119-140`).
+- **C3.** The cursor is persisted but its observations are not, so a reload mid-circuit skips worlds.
+- **C4.** On load, an unreadable config is treated as new and saved over: 268 rules and 30 cost floors, with no .bak.
+- **C5.** Floor-blocked listings are valued at the competitor price, and bag stock at the single cheapest row.
+- **C6.** Wealth samples mix the live wallet with stale listings ("Up 2.37M" on 9-26).
+- **C7.** Some dashboard text is wrong (the "100% bought immediately" claim and the route description), and "All automation: OFF" shows while running.
+- **C8.** Start overwrites the Advanced repeat intervals with 5.
+- **C9.** One config save per frame while dragging a slider, and computed properties are serialized.
+- **C10.** Trip bargains are flushed only on ReturnHome.
+- **C11.** The Plugin constructor is not exception-safe.
+
+**Economics core (Claude)**
+- **E1.** Coverage uses the whole Siren market's units/day with no capture share. With PreferredCoverageDays = 7 and BulkPreferredPurchases on, `EffectiveMaximumSlots` returns `int.MaxValue`, so the Popcorn target was about 13,700 units. In practice 7,761 were bought and 28 of 51 slots were Popcorn.
+- **E2.** Margin bars are thin: 10% core and 8% absolute. A normal 20% dip wipes them out; Popcorn went from about 2,600 to 2,098 after our own buying.
+
+## Phase 1: v1.0.0.76 (built overnight 2026-11-01)
+
+- [x] Core:
+  - `PriceMemoryModels` and `PriceMemory` (thread-safe; prune at 7 d, sales at 30 d).
+  - `RetainerSaleParser`: rows 745/748, macros read from game data with Lumina. Parameter 0 is the town, 1 the item (HQ adds 1,000,000), 2 the quantity, 4 the gil after fees.
+  - `SaddlebagParser`, `UniversalisMemoryParser` and `ItemIdentity`.
+- [x] Plugin:
+  - `PriceMemoryService`: per-character atomic JSON with .bak; saves off-thread at most every 2 min, and flushes on dispose or a character change.
+  - `MarketScanService` and `MarketScanSource`:
+    - Every 30 min, for tracked lines: NA cheapest-100 depth and the home market, using `fields` filters and gzip (about 1.3–1.9 KB per 2 items on the wire).
+    - Daily: Saddlebag marketshare for the home world, plus Universalis spreads.
+  - `RetainerSaleService` (`IChatGui.LogMessage`): writes a SOLD log line, records the sale and raises an event. The first 5 sales per session also log their raw parameters.
+  - `AutomationController.RequestEarlyCheck` moves a waiting pass to 30 s after a sale; it never starts a pass mid-run or after a stop.
+  - `KnownListings` and `KnownRetainerNames`.
+  - `ProcurementController.Memory`: records every live read (home reads also become home snapshots); restores live readings within `ScoutKnowledgeMaxAgeHours` after a reload; adds memory route scores to the hint scores.
+  - Market tab: your sales, where traded lines are cheapest (units at a 15% margin), and what sells on the home world.
+  - Settings, no migration: `MarketScanEnabled` (on), `MarketScanIntervalMinutes` 30, `MarketDiscoveryScanHours` 24, `SaleTrackingEnabled` (on), `RelistAfterSale` (on).
+- [x] Saddlebag:
+  - Rawstats quantities are now divided by 7 (they are 7-day NA-wide totals).
+  - Host changed to `api.`; gzip enabled; marketshare call added.
+  - Universalis client: gzip, plus `RegionListingsAsync`, `WorldMarketAsync`, `AggregatedAsync` and `ResolveWorldName`. `LookupItem` now carries the board category.
+- [x] Clear fixes:
+  - **P1:** HQ purchase answers are matched by base id.
+  - **P2:** two failed worlds after scouting now compare instead of discarding the circuit.
+  - **D3:** with no sale history, our own ask is the price-war reference, so the guard fails closed.
+  - **D4:** automatic fills no longer forget problem rows.
+  - **D7b:** Popoto Potage added to `CuratedAutoListItems`.
+  - **C2:** the remembered-market lead now respects the resume cursor.
+  - **C4:** a config that does not load is copied to `.unreadable-<ts>` before defaults are saved, and a config that loads is copied to `.bak` once per start.
+- [x] Tests: 558 pass (35 new).
+  - Mutation-checked: reverting C2, P2 or D3 fails its test.
+  - Release build: 0 warnings, 0 errors.
+
+Not changed (decision or game test needed): D1, D2, D6, D7a, B1, B3, B4, B6, B7, P3, P4, P5, P6, P7, C5–C11, E1, E2.
+
+Validation boundary: no native game operation was exercised. Still unverified in game:
+- The LogMessage parameter layout. It comes from game data; the first session log's `RETAINER SALE raw` lines confirm it.
+- Universalis field filters and Saddlebag responses were checked live from this machine with curl.
+
+Phase 2: wait for the user's answers to the numbered decision list in the review (pause until then):
+- stuck-stock exit below cost
+- per-item slot cap and capture-share sizing
+- discovery categories
+- margin and profit-per-listing floor
+- trip shape
+- stack sizes
+
 # Next: confirm the market-read rewrite from the first post-update session log
 
 Read the newest `%APPDATA%\XIVLauncher\pluginConfigs\SmartUndercutBot\logs` session

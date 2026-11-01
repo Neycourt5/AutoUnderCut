@@ -9,7 +9,7 @@ using SmartUndercutBot.Services;
 
 namespace SmartUndercutBot.Windows;
 
-public sealed class DashboardWindow : Window
+public sealed partial class DashboardWindow : Window
 {
     private readonly ConfigurationService configuration;
     private readonly AutomationController automation;
@@ -37,9 +37,13 @@ public sealed class DashboardWindow : Window
         IMarketDataService marketData,
         AutomationLog log,
         StockAutomationController stockAutomation,
-        WealthHistoryService wealthHistory)
+        WealthHistoryService wealthHistory,
+        PriceMemoryService priceMemory,
+        MarketScanService marketScan)
         : base("Smart Undercutter##Dashboard")
     {
+        this.priceMemory = priceMemory;
+        this.marketScan = marketScan;
         this.configuration = configuration;
         this.automation = automation;
         this.procurement = procurement;
@@ -77,6 +81,11 @@ public sealed class DashboardWindow : Window
         if (ImGui.BeginTabItem("Shopping"))
         {
             DrawProcurement();
+            ImGui.EndTabItem();
+        }
+        if (ImGui.BeginTabItem("Market"))
+        {
+            DrawMarket();
             ImGui.EndTabItem();
         }
         if (ImGui.BeginTabItem("Earnings"))

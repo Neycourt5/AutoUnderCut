@@ -71,6 +71,9 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
         "Grade 4 Gemdraught of Intelligence",
         "Grade 4 Gemdraught of Mind",
         "Caramel Popcorn",
+        // Curated everywhere else (ResaleStockPolicy.IsCuratedConsumable); without it
+        // here its safe prices were never remembered and seed repair skipped it.
+        "Popoto Potage",
     };
     private readonly IFramework framework;
     private readonly IRetainerListingService retainerListings;
@@ -192,6 +195,37 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
     public IReadOnlyList<StockExposure> ListedStock { get; private set; } = [];
     public bool IsActive => State is not (AutomationState.Idle or AutomationState.Completed or AutomationState.Halted or AutomationState.Faulted or AutomationState.WaitingForScheduledRun);
 
+    /// <summary>Every listing seen on the last pass of each retainer, with its asking price.</summary>
+    public IReadOnlyList<PortfolioListingEstimate> KnownListings => portfolioListings.Values.ToArray();
+
+    /// <summary>Names of this character's retainers seen so far, for recognising our own rows in cached data.</summary>
+    public IReadOnlySet<string> KnownRetainerNames => portfolioRetainers.Values
+        .Select(x => x.RetainerName).Where(x => !string.IsNullOrWhiteSpace(x))
+        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Delay before the early check a sale requests, so a burst of sales is handled by one pass.</summary>
+    public static readonly TimeSpan EarlyCheckDelay = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// Bring the next scheduled retainer check forward, for example because a sale
+    /// just freed a slot. Only ever moves a waiting pass earlier: it never starts a
+    /// pass while one is running, never interrupts shopping (the loop is halted
+    /// then) and never overrides a stop.
+    /// </summary>
+    public bool RequestEarlyCheck(string reason)
+    {
+        if (State != AutomationState.WaitingForScheduledRun || RequiresManualRestart ||
+            !configuration.Current.AutomationEnabled || !configuration.Current.RepeatBellRuns)
+            return false;
+        var at = timeProvider.GetUtcNow() + EarlyCheckDelay;
+        if (nextActionAt <= at)
+            return false;
+        nextActionAt = at;
+        detail = $"{reason} Next retainer check at {nextActionAt.LocalDateTime:T}.";
+        log.Add(AutomationLogLevel.Information, $"{reason} Moved the next retainer check forward to {nextActionAt.LocalDateTime:T}.");
+        return true;
+    }
+
     public AutomationStatus Status => new(
         State,
         detail,
@@ -306,7 +340,9 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
             return;
         RequiresManualRestart = false;
         requestedFillOnlyRun = true;
-        ForgetProblemListings();
+        // Only a deliberate Start forgets problem rows. Automatic fills run every few
+        // minutes while a slot is free; clearing the set-aside rows on each of them
+        // reopened a row that always fails, and paid a menu recovery for it every time.
         if (retainerListings.IsRetainerListOpen)
             BeginBellSession();
         else

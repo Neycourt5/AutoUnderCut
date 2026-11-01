@@ -449,6 +449,29 @@ public sealed class RetainerAutomationTests
         Assert.Equal(AutomationState.Completed, run.Bot.State);
     }
 
+    [Fact]
+    public void ASaleBringsTheNextCheckForwardButNeverStartsOneMidPass()
+    {
+        using var run = new Session();
+        // Mid-pass a request is refused: a pass is already running.
+        run.Bot.StartNow(); run.Tick();
+        Assert.False(run.Bot.RequestEarlyCheck("Sold Popcorn x99."));
+        run.CompletePass();
+        var scheduled = run.Bot.Status.NextActionAt!.Value;
+        Assert.True(run.Bot.RequestEarlyCheck("Sold Popcorn x99."));
+        var early = run.Bot.Status.NextActionAt!.Value;
+        Assert.True(early < scheduled);
+        // A second sale inside the window does not keep pushing it around.
+        Assert.False(run.Bot.RequestEarlyCheck("Sold Popcorn x50."));
+        Assert.Equal(early, run.Bot.Status.NextActionAt!.Value);
+        // The early check really starts a pass.
+        run.Tick((int)AutomationController.EarlyCheckDelay.TotalSeconds + 1);
+        Assert.NotEqual(AutomationState.WaitingForScheduledRun, run.Bot.State);
+        // A stopped loop is never restarted by a sale.
+        run.Bot.Halt("Stopped by user.");
+        Assert.False(run.Bot.RequestEarlyCheck("Sold Popcorn x99."));
+    }
+
     private sealed class Session : IDisposable
     {
         public Game Game { get; } = new();

@@ -56,15 +56,22 @@ public sealed class PricingStrategyService : IPricingStrategyService
             ? lowest
             : lowest > rule.UndercutAmount ? lowest - rule.UndercutAmount : 1u;
         var hasKnownCost = listing.AcquisitionCost > 0 || rule.CostBasis > 0;
+        // When the sale history did not arrive, our own asking price is the only
+        // reference left. Without it the guard failed open: stock with no known cost
+        // followed a one-gil troll listing straight down.
+        var reference = market.HistoricalMedianPrice is > 0 ? market.HistoricalMedianPrice : listing.CurrentPrice;
         // History can flag a large move, but it must not block selling known-cost
         // stock for a profit. Unknown-cost stock retains the historical safeguard.
         if (!(hasKnownCost && rawTarget >= floor) &&
-            IsPriceWar(lowest, market.HistoricalMedianPrice, rule.PriceWarDropPercent))
+            IsPriceWar(lowest, reference, rule.PriceWarDropPercent))
         {
             if (rule.PriceWarAction == PriceWarAction.LeaveUnchanged)
-                return Decision(PriceDecisionKind.PriceWar, listing, lowest, floor, "Lowest price breached the configured historical drop threshold.");
+                return Decision(PriceDecisionKind.PriceWar, listing, lowest, floor,
+                    market.HistoricalMedianPrice is > 0
+                        ? "Lowest price breached the configured historical drop threshold."
+                        : "No sale history arrived and the lowest price is far below this listing; holding instead of following it.");
 
-            var protectedFloor = Math.Max(floor, ProtectedHistoricalFloor(market.HistoricalMedianPrice!.Value, rule.PriceWarDropPercent));
+            var protectedFloor = Math.Max(floor, ProtectedHistoricalFloor(reference!.Value, rule.PriceWarDropPercent));
             if (listing.CurrentPrice == protectedFloor)
                 return Decision(PriceDecisionKind.NoChange, listing, lowest, protectedFloor, "Listing already matches the protected historical floor.");
 

@@ -48,7 +48,12 @@ public sealed class UniversalisService : IUniversalisService, IDisposable
 
     private const int MaximumAttempts = 3;
 
-    private readonly HttpClient httpClient = new() { Timeout = TimeSpan.FromSeconds(20) };
+    // Universalis compresses only when asked; uncompressed regional listing views are
+    // several times larger on the wire.
+    private readonly HttpClient httpClient = new(new SocketsHttpHandler
+    {
+        AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate | DecompressionMethods.Brotli,
+    }) { Timeout = TimeSpan.FromSeconds(20) };
     // Universalis rate-limits aggressively; keep the plugin well under it.
     private readonly SemaphoreSlim requestSlots = new(2);
     private readonly IPlayerState playerState;
@@ -303,7 +308,9 @@ public sealed class UniversalisService : IUniversalisService, IDisposable
             !row.IsUntradable && row.ItemSearchCategory.RowId != 0,
             row.CanBeHq,
             FoodAndMedicineCategories.Contains(category),
-            Math.Max(1, (int)Math.Min(999u, row.StackSize)));
+            Math.Max(1, (int)Math.Min(999u, row.StackSize)),
+            // The market board's own category ("Meals", "Medicine", "Metal") reads best.
+            row.ItemSearchCategory.ValueNullable?.Name.ToString() is { Length: > 0 } search ? search : category);
     }
 
     // The categories worth discovering automatically: the raid consumables the
@@ -349,6 +356,73 @@ public sealed class UniversalisService : IUniversalisService, IDisposable
                     return null;
             }
             finally { requestSlots.Release(); }
+        }
+        return null;
+    }
+
+    // Only what the price memory reads. A single id is answered without the "items"
+    // wrapper, so the field filter is only applied to batches.
+    private const string RegionListingFields =
+        "items.itemID,items.worldUploadTimes,items.listings.pricePerUnit,items.listings.quantity," +
+        "items.listings.worldName,items.listings.worldID,items.listings.hq,items.listings.lastReviewTime";
+    private const string WorldMarketFields =
+        "items.itemID,items.lastUploadTime,items.hqSaleVelocity,items.nqSaleVelocity,items.listings.pricePerUnit," +
+        "items.listings.quantity,items.listings.hq,items.listings.retainerName,items.listings.retainerID," +
+        "items.recentHistory.pricePerUnit,items.recentHistory.quantity,items.recentHistory.hq,items.recentHistory.timestamp";
+
+    /// <summary>The cheapest listings of one quality across a region, with each world's upload time.</summary>
+    public Task<JsonDocument?> RegionListingsAsync(IReadOnlyList<uint> itemIds, string region, bool highQuality,
+        int listings, CancellationToken token) => GetJsonAsync(
+        $"https://universalis.app/api/v2/{Uri.EscapeDataString(region)}/{string.Join(',', itemIds)}" +
+        $"?listings={Math.Clamp(listings, 1, 100)}&entries=0&hq={(highQuality ? "true" : "false")}" +
+        (itemIds.Count > 1 ? "&fields=" + RegionListingFields : string.Empty), itemIds.Count, token);
+
+    /// <summary>One world's listings and last week of sales for one quality.</summary>
+    public Task<JsonDocument?> WorldMarketAsync(IReadOnlyList<uint> itemIds, string world, bool highQuality,
+        CancellationToken token) => GetJsonAsync(
+        $"https://universalis.app/api/v2/{Uri.EscapeDataString(world)}/{string.Join(',', itemIds)}" +
+        $"?listings=20&entries=100&statsWithin=604800000&hq={(highQuality ? "true" : "false")}" +
+        (itemIds.Count > 1 ? "&fields=" + WorldMarketFields : string.Empty), itemIds.Count, token);
+
+    /// <summary>The cached aggregate for at most a hundred ids.</summary>
+    public Task<JsonDocument?> AggregatedAsync(IReadOnlyList<uint> itemIds, string scope, CancellationToken token) =>
+        GetJsonAsync($"https://universalis.app/api/v2/aggregated/{Uri.EscapeDataString(scope)}/" +
+                     string.Join(',', itemIds.Take(100)), itemIds.Count, token);
+
+    /// <summary>The world name for a world id, for routing hints. Null for unknown or non-public worlds.</summary>
+    public string? ResolveWorldName(uint worldId) => WorldName(worldId);
+
+    private async Task<JsonDocument?> GetJsonAsync(string endpoint, int items, CancellationToken token)
+    {
+        if (items == 0)
+            return null;
+        for (var attempt = 1; attempt <= MaximumAttempts; attempt++)
+        {
+            if (attempt > 1)
+                await Task.Delay(TimeSpan.FromSeconds(2 * (attempt - 1)), token).ConfigureAwait(false);
+            await requestSlots.WaitAsync(token).ConfigureAwait(false);
+            try
+            {
+                using var response = await httpClient.GetAsync(endpoint, token).ConfigureAwait(false);
+                if (!response.IsSuccessStatusCode)
+                {
+                    if (attempt == MaximumAttempts || !IsWorthRetrying(response.StatusCode))
+                        return null;
+                    continue;
+                }
+                await using var stream = await response.Content.ReadAsStreamAsync(token).ConfigureAwait(false);
+                return await JsonDocument.ParseAsync(stream, cancellationToken: token).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is HttpRequestException or JsonException ||
+                                       ex is TaskCanceledException && !token.IsCancellationRequested)
+            {
+                if (attempt == MaximumAttempts)
+                    return null;
+            }
+            finally
+            {
+                requestSlots.Release();
+            }
         }
         return null;
     }

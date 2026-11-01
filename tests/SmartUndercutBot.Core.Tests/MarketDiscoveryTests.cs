@@ -136,8 +136,10 @@ public sealed class MarketDiscoveryTests
         Assert.Equal("Honey Muffin", statistic.ItemName);
         Assert.Equal(65u, statistic.MedianNqPrice);
         Assert.Equal(299u, statistic.MedianHqPrice);
-        Assert.Equal(430m, statistic.NqUnitsSoldPerDay);
-        Assert.Equal(136m, statistic.HqUnitsSoldPerDay);
+        // The dataset covers seven days across the region (verified 2026-11-01:
+        // Caramel Popcorn showed 114,873 HQ units, about a week of all of North America).
+        Assert.Equal(430m / 7m, statistic.NqUnitsSoldPerDay);
+        Assert.Equal(136m / 7m, statistic.HqUnitsSoldPerDay);
         Assert.Equal(DateTimeOffset.FromUnixTimeSeconds(1788856100), statistic.UpdatedAt);
     }
 

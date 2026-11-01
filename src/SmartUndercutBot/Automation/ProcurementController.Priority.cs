@@ -103,6 +103,10 @@ public sealed partial class ProcurementController
             .ToArray();
         var scores = hints.GroupBy(x => x.Hint.WorldName, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(g => g.Key, g => g.Sum(x => x.Score), StringComparer.OrdinalIgnoreCase);
+        // Cheap stock the price memory has seen recently, live or from the
+        // periodic regional scan, pulls its world forward in the same way.
+        foreach (var (world, score) in MemoryRouteScores())
+            scores[world] = scores.GetValueOrDefault(world) + score;
         var expectedWorlds = NorthAmericaWorlds.Where(w => !w.Equals(homeWorld, StringComparison.OrdinalIgnoreCase)).ToArray();
         // Markets that were still selling cheaply when the last trip ran out of gil
         // or space. Their listings did not disappear because the wallet emptied, so
@@ -116,8 +120,14 @@ public sealed partial class ProcurementController
         // Keep the route stable across retainer checkpoints; repricing the hints
         // on each trip must not reorder worlds behind the saved cursor forever. A
         // new remembered market is the one thing that does justify reordering.
+        // A route that already starts with the remembered markets only "leads" with
+        // them if the saved cursor has not walked past them: resuming at the
+        // eighth stop skipped exactly the markets the route was ordered for.
+        var savedCursor = config.PriorityScoutRoute.FindIndex(w =>
+            w.Equals(config.PriorityNextWorld, StringComparison.OrdinalIgnoreCase));
         var leadsRoute = revisit.Length == 0 ||
-            config.PriorityScoutRoute.Take(revisit.Length).SequenceEqual(revisit, StringComparer.OrdinalIgnoreCase);
+            config.PriorityScoutRoute.Take(revisit.Length).SequenceEqual(revisit, StringComparer.OrdinalIgnoreCase) &&
+            savedCursor < revisit.Length;
         if (config.PriorityScoutRoute.Count != expectedWorlds.Length ||
             !config.PriorityScoutRoute.ToHashSet(StringComparer.OrdinalIgnoreCase).SetEquals(expectedWorlds) ||
             !leadsRoute)
@@ -406,6 +416,7 @@ public sealed partial class ProcurementController
 
         SeedHomePricesFromRepricing();
         PruneStaleScoutKnowledge();
+        RestoreScoutKnowledge();
         PrepareScoutRoute();
         comparisonBuyingStarted = null;
         priorityRefreshingHome = priorityHomeRefreshAttempted = false;
@@ -591,6 +602,7 @@ public sealed partial class ProcurementController
             homePrices[rule.ItemId] = rows;
             homePriceTimes[rule.ItemId] = timeProvider.GetUtcNow();
         }
+        RememberLiveRead(rule.ItemId, rows, stockHuntWorldIndex == 0, boardEmpty);
         var sales = priorityDemand.FirstOrDefault(x => x.ItemId == rule.ItemId)?.RecentSales ?? [];
         var config = configuration.Current;
         var candidates = new List<ProcurementOrder>();

@@ -100,6 +100,19 @@ public sealed class Configuration : IPluginConfiguration
     public bool MarketDiscoveryEnabled { get; set; }
     public int MarketDiscoveryCacheHours { get; set; } = 24;
     public string MarketDiscoveryRegion { get; set; } = "NA";
+    // The plugin's own price memory, refreshed without travelling: every traded
+    // line's cheapest North America listings and home market on this interval
+    // (a couple of small requests per twenty items), and a sales ranking of the
+    // home world once per discovery interval. Intelligence only - it changes where
+    // shopping looks first and what the Market tab shows, never what may be bought.
+    public bool MarketScanEnabled { get; set; } = true;
+    public int MarketScanIntervalMinutes { get; set; } = 30;
+    public int MarketDiscoveryScanHours { get; set; } = 24;
+    // Read the game's own "has sold" message. Every sale is recorded, and a sold
+    // slot brings the next retainer check forward so it is refilled within a minute
+    // rather than at the next scheduled pass.
+    public bool SaleTrackingEnabled { get; set; } = true;
+    public bool RelistAfterSale { get; set; } = true;
     // One circuit covers every away world. Cross-data-center travel is the
     // expensive part of a trip, so a thorough sweep beats four shallow ones; the
     // route still returns early when the bags or the wallet run out.
@@ -660,6 +673,8 @@ public sealed class Configuration : IPluginConfiguration
         ProcurementMinimumProfitPerSaleSlot = Math.Min(ProcurementMinimumProfitPerSaleSlot, 100_000_000u);
         MarketDiscoveryCacheHours = Math.Clamp(MarketDiscoveryCacheHours, 1, 168);
         MarketDiscoveryRegion = string.IsNullOrWhiteSpace(MarketDiscoveryRegion) ? "NA" : MarketDiscoveryRegion.Trim();
+        MarketScanIntervalMinutes = Math.Clamp(MarketScanIntervalMinutes, 10, 240);
+        MarketDiscoveryScanHours = Math.Clamp(MarketDiscoveryScanHours, 6, 168);
         ScoutKnowledgeMaxAgeHours = Math.Clamp(ScoutKnowledgeMaxAgeHours, 1, 168);
         ProcurementFillRoiPercent = Math.Clamp(ProcurementFillRoiPercent, 0m, 1_000m);
         ProcurementFastMoverRoiPercent = Math.Clamp(ProcurementFastMoverRoiPercent, 0m, 1_000m);

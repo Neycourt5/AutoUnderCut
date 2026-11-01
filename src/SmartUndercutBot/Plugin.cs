@@ -26,6 +26,7 @@ public sealed class Plugin : IDalamudPlugin
     [PluginService] private static IMarketBoard MarketBoard { get; set; } = null!;
     [PluginService] private static IGameInteropProvider Interop { get; set; } = null!;
     [PluginService] private static IPluginLog PluginLog { get; set; } = null!;
+    [PluginService] private static IChatGui ChatGui { get; set; } = null!;
 
     private readonly WindowSystem windowSystem = new("SmartUndercutBot");
     private readonly ConfigurationService configuration;
@@ -42,6 +43,9 @@ public sealed class Plugin : IDalamudPlugin
     private readonly TaskbarAttentionService taskbarAttention;
     private readonly SaddlebagStatisticsProvider marketStatistics;
     private readonly MarketDiscoveryService marketDiscovery;
+    private readonly PriceMemoryService priceMemory;
+    private readonly MarketScanService marketScan;
+    private readonly RetainerSaleService retainerSales;
 
     public Plugin()
     {
@@ -50,6 +54,11 @@ public sealed class Plugin : IDalamudPlugin
             Path.Combine(PluginInterface.ConfigDirectory.FullName, "logs"));
         automationLog.Add(AutomationLogLevel.Information,
             $"Session log: {automationLog.SessionFilePath ?? "disabled"}");
+        if (configuration.UnreadableSettingsCopy is { } unreadable)
+            automationLog.Add(AutomationLogLevel.Error,
+                $"The settings file could not be loaded, so defaults are in use. The original was kept as {unreadable}.");
+        priceMemory = new PriceMemoryService(PluginInterface.ConfigDirectory.FullName,
+            () => PlayerState.IsLoaded ? PlayerState.ContentId : 0, automationLog);
         var procurementLedger = new ProcurementLedger();
         marketData = new MarketDataService(MarketBoard, configuration);
         var retainerListings = new RetainerListingService(ClientState, ObjectTable, GameGui, DataManager);
@@ -160,7 +169,8 @@ public sealed class Plugin : IDalamudPlugin
             automation,
             configuration,
             automationLog,
-            discovery: marketDiscovery);
+            discovery: marketDiscovery,
+            priceMemory: () => priceMemory.Memory);
         bagListing = new BagListingController(
             Framework,
             CommandManager,
@@ -182,9 +192,28 @@ public sealed class Plugin : IDalamudPlugin
             PluginInterface.ConfigDirectory.FullName,
             characterId: () => PlayerState.IsLoaded ? PlayerState.ContentId : 0,
             canRecord: () => retainerListings.IsPlayerInventoryReady && !automation.IsActive && !bagListing.IsBusy);
+        marketScan = new MarketScanService(
+            new MarketScanSource(universalis, marketStatistics),
+            configuration,
+            () => priceMemory.Memory,
+            HomeWorldName,
+            () => automation.KnownRetainerNames,
+            () => retainerListings.OwnedRetainerIds,
+            universalis.LookupItem,
+            universalis.ResolveWorldName,
+            automationLog);
+        retainerSales = new RetainerSaleService(
+            ChatGui,
+            configuration,
+            () => priceMemory.Memory,
+            () => automation.KnownListings.Select(x => (x.ItemId, x.IsHighQuality, x.Quantity, x.AskingUnitPrice)),
+            id => universalis.LookupItem(id)?.Name,
+            automationLog);
+        retainerSales.SaleRecorded += OnSaleRecorded;
+        Framework.Update += OnFrameworkUpdate;
         dashboard = new DashboardWindow(
             configuration, automation, procurement, bagListing, universalis, procurementLedger, marketData,
-            automationLog, stockAutomation, wealthHistory);
+            automationLog, stockAutomation, wealthHistory, priceMemory, marketScan);
         guidedProcurement = new GuidedProcurementWindow(procurement);
         automation.RetainerInterfaceOpened += OnRetainerInterfaceOpened;
         procurement.GuidedReviewRequested += OnGuidedReviewRequested;
@@ -239,6 +268,43 @@ public sealed class Plugin : IDalamudPlugin
             ToggleDashboard();
     }
 
+    private static string? HomeWorldName()
+    {
+        if (!PlayerState.IsLoaded)
+            return null;
+        try
+        {
+            var name = PlayerState.HomeWorld.Value.Name.ToString();
+            return string.IsNullOrWhiteSpace(name) ? null : name;
+        }
+        catch (InvalidOperationException)
+        {
+            return null;
+        }
+    }
+
+    private void OnFrameworkUpdate(IFramework _)
+    {
+        try
+        {
+            priceMemory.Update();
+            marketScan.Update();
+        }
+        catch (Exception ex)
+        {
+            PluginLog.Warning(ex, "Price memory or market scan update failed.");
+        }
+    }
+
+    // A sold slot is refilled at the next retainer check. Bring that check forward,
+    // so the slot sits empty for about a minute rather than until the next pass.
+    private void OnSaleRecorded(RetainerSale sale)
+    {
+        if (configuration.Current.RelistAfterSale)
+            automation.RequestEarlyCheck(
+                $"Sold {sale.ItemName}{(sale.IsHighQuality ? " HQ" : string.Empty)} x{sale.Quantity}; refilling the slot.");
+    }
+
     private void OnRetainerInterfaceOpened()
     {
         if (configuration.Current.OpenDashboardOnRetainer)
@@ -257,6 +323,11 @@ public sealed class Plugin : IDalamudPlugin
     {
         automation.RetainerInterfaceOpened -= OnRetainerInterfaceOpened;
         procurement.GuidedReviewRequested -= OnGuidedReviewRequested;
+        Framework.Update -= OnFrameworkUpdate;
+        retainerSales.SaleRecorded -= OnSaleRecorded;
+        retainerSales.Dispose();
+        marketScan.Dispose();
+        priceMemory.Dispose();
         wealthHistory.Dispose();
         procurement.Dispose();
         marketPurchase.Dispose();
