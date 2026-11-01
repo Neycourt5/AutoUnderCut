@@ -103,11 +103,17 @@ public sealed partial class DashboardWindow
         ImGui.EndTable();
     }
 
+    private sealed record CheapestRow(string Item, string HomeFloor, string HomeUnits, string Worlds, string Buyable, string HomeAge);
+
+    // The table walks the whole memory once per traded line; draw from a copy that
+    // is at most two seconds old instead of recomputing it every frame.
+    private (DateTimeOffset At, IReadOnlyList<CheapestRow> Rows)? cheapestRows;
+
     private void DrawCheapestWorlds(PriceMemory memory, DateTimeOffset now)
     {
-        var config = configuration.Current;
-        var lines = MarketScanService.TrackedItems(config);
-        if (lines.Count == 0)
+        if (cheapestRows is not { } cached || now - cached.At > TimeSpan.FromSeconds(2))
+            cheapestRows = cached = (now, BuildCheapestRows(memory, now));
+        if (cached.Rows.Count == 0)
         {
             ImGui.TextDisabled("No traded lines are enabled.");
             return;
@@ -125,8 +131,25 @@ public sealed partial class DashboardWindow
         ImGui.TableSetupColumn("Buyable units", ImGuiTableColumnFlags.WidthFixed, 90 * ImGuiHelpers.GlobalScale);
         ImGui.TableSetupColumn("Home age", ImGuiTableColumnFlags.WidthFixed, 70 * ImGuiHelpers.GlobalScale);
         ImGui.TableHeadersRow();
+        foreach (var row in cached.Rows)
+        {
+            ImGui.TableNextRow();
+            ImGui.TableNextColumn(); ImGui.TextUnformatted(row.Item);
+            ImGui.TableNextColumn(); ImGui.TextUnformatted(row.HomeFloor);
+            ImGui.TableNextColumn(); ImGui.TextUnformatted(row.HomeUnits);
+            ImGui.TableNextColumn(); ImGui.TextUnformatted(row.Worlds);
+            ImGui.TableNextColumn(); ImGui.TextUnformatted(row.Buyable);
+            ImGui.TableNextColumn(); ImGui.TextUnformatted(row.HomeAge);
+        }
+        ImGui.EndTable();
+    }
+
+    private IReadOnlyList<CheapestRow> BuildCheapestRows(PriceMemory memory, DateTimeOffset now)
+    {
+        var config = configuration.Current;
         var fees = config.Fees;
-        foreach (var (itemId, quality) in lines)
+        var rows = new List<CheapestRow>();
+        foreach (var (itemId, quality) in MarketScanService.TrackedItems(config))
         {
             var name = config.ProcurementRules.FirstOrDefault(x => x.ItemId == itemId)?.ItemName ?? $"#{itemId}";
             var home = memory.LatestHome(itemId, quality, now, TimeSpan.FromDays(2));
@@ -138,16 +161,15 @@ public sealed partial class DashboardWindow
             var best = worlds.Take(3).Select(w =>
                 $"{w.World} {w.Lowest:N0}" + (ceiling > 0 ? $" ({w.UnitsAtOrBelow(ceiling):N0}u)" : string.Empty) +
                 $" {Age(w.ObservedAt, now)}");
-            ImGui.TableNextRow();
-            ImGui.TableNextColumn(); ImGui.TextUnformatted($"{name}{(quality ? " HQ" : string.Empty)}");
-            ImGui.TableNextColumn(); ImGui.TextUnformatted(home is { LowestCompetitor: > 0 } ? $"{home.LowestCompetitor:N0}" : "-");
-            ImGui.TableNextColumn(); ImGui.TextUnformatted(home is null ? "-" : $"{home.UnitsPerDay:N0}");
-            ImGui.TableNextColumn(); ImGui.TextUnformatted(worlds.Count == 0 ? "not scanned yet" : string.Join(" | ", best));
-            ImGui.TableNextColumn(); ImGui.TextUnformatted(ceiling == 0 ? "-"
-                : $"{worlds.Aggregate(0UL, (sum, w) => sum + w.UnitsAtOrBelow(ceiling)):N0}");
-            ImGui.TableNextColumn(); ImGui.TextUnformatted(home is null ? "-" : Age(home.ObservedAt, now));
+            rows.Add(new(
+                $"{name}{(quality ? " HQ" : string.Empty)}",
+                home is { LowestCompetitor: > 0 } ? $"{home.LowestCompetitor:N0}" : "-",
+                home is null ? "-" : $"{home.UnitsPerDay:N0}",
+                worlds.Count == 0 ? "not scanned yet" : string.Join(" | ", best),
+                ceiling == 0 ? "-" : $"{worlds.Aggregate(0UL, (sum, w) => sum + w.UnitsAtOrBelow(ceiling)):N0}",
+                home is null ? "-" : Age(home.ObservedAt, now)));
         }
-        ImGui.EndTable();
+        return rows;
     }
 
     private void DrawCandidates(PriceMemory memory, DateTimeOffset now)

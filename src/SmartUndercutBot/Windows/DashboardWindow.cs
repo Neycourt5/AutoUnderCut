@@ -111,7 +111,12 @@ public sealed partial class DashboardWindow : Window
             : running ? new Vector4(0.35f, 0.85f, 0.65f, 1f) : new Vector4(0.75f, 0.75f, 0.75f, 1f),
             attention ? "Paused - check the message below"
                 : running ? "All automation: ON" : "All automation: OFF");
-        ImGui.BeginDisabled(stockAutomation.StartIssue is not null);
+        if (configuration.UnreadableSettingsCopy is { } unreadable)
+            ImGui.TextColored(new Vector4(1f, 0.35f, 0.35f, 1f),
+                "Your settings file could not be loaded, so automation will not start: defaults have no cost floors " +
+                $"and would undercut stock below cost. The original was kept as {unreadable}. Restore it (or SmartUndercutBot.json.bak) " +
+                "with the game closed, then reload the plugin.");
+        ImGui.BeginDisabled(stockAutomation.StartIssue is not null || configuration.UnreadableSettingsCopy is not null);
         if (ImGui.Button("Start all automation"))
             stockAutomation.Start();
         ImGui.EndDisabled();

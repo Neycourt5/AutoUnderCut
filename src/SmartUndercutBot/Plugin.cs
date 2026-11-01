@@ -183,8 +183,13 @@ public sealed class Plugin : IDalamudPlugin
             automation,
             procurement,
             automationLog);
-        automation.IsStartBlocked = () => procurement.IsActive || bagListing.IsBusy;
-        procurement.IsStartBlocked = () => automation.IsActive || bagListing.IsBusy || bagListing.IsAutomaticRunDue;
+        // Defaults carry no cost floors: running on them after a settings file failed to
+        // load would undercut purchased stock below cost. Nothing starts until the
+        // user has looked at the kept copy.
+        automation.IsStartBlocked = () => procurement.IsActive || bagListing.IsBusy ||
+                                          configuration.UnreadableSettingsCopy is not null;
+        procurement.IsStartBlocked = () => automation.IsActive || bagListing.IsBusy || bagListing.IsAutomaticRunDue ||
+                                           configuration.UnreadableSettingsCopy is not null;
         stockAutomation = new StockAutomationController(configuration, automation, procurement, bagListing);
         automation.ReadBagPortfolio = () => EstimateBagPortfolio(retainerListings);
         automation.CanRefreshPortfolioInventory = () => PlayerState.IsLoaded && !bagListing.IsBusy;
@@ -207,7 +212,7 @@ public sealed class Plugin : IDalamudPlugin
             configuration,
             () => priceMemory.Memory,
             () => automation.KnownListings.Select(x => (x.ItemId, x.IsHighQuality, x.Quantity, x.AskingUnitPrice)),
-            id => universalis.LookupItem(id)?.Name,
+            universalis.LookupItem,
             automationLog);
         retainerSales.SaleRecorded += OnSaleRecorded;
         Framework.Update += OnFrameworkUpdate;

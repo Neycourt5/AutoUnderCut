@@ -113,9 +113,13 @@ public sealed class PriceMemory
     }
 
     /// <summary>
-    /// Record one of our sales. The same game message can be delivered twice, so an
-    /// identical sale inside a few seconds is recognised and dropped.
+    /// The window inside which an identical sale is one message delivered twice. A
+    /// buyer taking two identical stacks is two real sales, and even a fast buyer
+    /// needs well over a second between purchases, so the window stays tiny.
     /// </summary>
+    public static readonly TimeSpan DuplicateSaleWindow = TimeSpan.FromMilliseconds(250);
+
+    /// <summary>Record one of our sales, ignoring the same message delivered twice.</summary>
     public bool RecordSale(RetainerSale sale)
     {
         ArgumentNullException.ThrowIfNull(sale);
@@ -125,7 +129,7 @@ public sealed class PriceMemory
         {
             if (sales.Any(x => x.ItemId == sale.ItemId && x.Quantity == sale.Quantity &&
                                x.GilAfterFees == sale.GilAfterFees && x.TownId == sale.TownId &&
-                               (x.At - sale.At).Duration() <= TimeSpan.FromSeconds(5)))
+                               (x.At - sale.At).Duration() <= DuplicateSaleWindow))
                 return false;
             sales.Add(sale);
             if (sales.Count > 1 && sales[^2].At > sale.At)

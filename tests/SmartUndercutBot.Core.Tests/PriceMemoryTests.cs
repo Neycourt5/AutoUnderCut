@@ -61,15 +61,18 @@ public sealed class PriceMemoryTests
         var memory = new PriceMemory();
         var sale = new RetainerSale(Now.AddHours(-1), 49240, true, 99, 272_000, 2, "Caramel Popcorn");
         Assert.True(memory.RecordSale(sale));
-        Assert.False(memory.RecordSale(sale with { At = sale.At.AddSeconds(2) }));
+        // The same message delivered twice is one sale...
+        Assert.False(memory.RecordSale(sale with { At = sale.At.AddMilliseconds(50) }));
+        // ...but a buyer taking an identical second stack a couple of seconds later is two.
+        Assert.True(memory.RecordSale(sale with { At = sale.At.AddSeconds(2) }));
         Assert.True(memory.RecordSale(sale with { At = sale.At.AddMinutes(20), Quantity = 50, GilAfterFees = 137_000 }));
         Assert.True(memory.RecordSale(new(Now.AddDays(-2), 49234, true, 99, 390_000, 2)));
 
         var day = memory.SummarizeSales(Now, TimeSpan.FromDays(1));
         var popcorn = Assert.Single(day);
-        Assert.Equal(2, popcorn.Sales);
-        Assert.Equal(149UL, popcorn.Units);
-        Assert.Equal(409_000UL, popcorn.GilAfterFees);
+        Assert.Equal(3, popcorn.Sales);
+        Assert.Equal(248UL, popcorn.Units);
+        Assert.Equal(681_000UL, popcorn.GilAfterFees);
         Assert.Equal("Caramel Popcorn", popcorn.ItemName);
         Assert.Equal(2, memory.SummarizeSales(Now, TimeSpan.FromDays(7)).Count);
     }

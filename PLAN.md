@@ -112,6 +112,11 @@ These were checked against code and logs. Logs are from builds up to v1.0.0.73; 
   - **D7b:** Popoto Potage added to `CuratedAutoListItems`.
   - **C2:** the remembered-market lead now respects the resume cursor.
   - **C4:** a config that does not load is copied to `.unreadable-<ts>` before defaults are saved, and a config that loads is copied to `.bak` once per start.
+- [x] Pre-release hardening:
+  - Sales dedupe only inside 250 ms, so two identical stacks bought seconds apart count twice.
+  - A parsed sale is accepted only for a tradable item within its stack size, which guards against an off-by-one in the parameter layout.
+  - Start is blocked, and Home shows a red notice, while the settings file could not be loaded. Defaults have no cost floors.
+  - The Market tab's cheapest-world rows are cached for 2 s.
 - [x] Tests: 558 pass (35 new).
   - Mutation-checked: reverting C2, P2 or D3 fails its test.
   - Release build: 0 warnings, 0 errors.
