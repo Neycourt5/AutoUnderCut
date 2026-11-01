@@ -2,52 +2,64 @@
 
 On 2026-11-01 the user answered the decision list from the review with "All recommendations". Each decision is implemented as recommended in the review report; the shipped values are listed below.
 
-- [ ] 1. **Stuck stock.**
-  - When the market is below cost, list at break-even right away instead of holding the old ask.
-  - After 24 h continuously below cost, follow the market down to at most 5% under cost.
-  - Never while a price war (crash) is detected.
-  - "Below cost since" is persisted per item and quality. It is cleared when the market recovers or the position empties.
-  - D2 follows from this: new bag stacks get the same price.
-- [ ] 2. **Raise prices.**
-  - Re-price to 1 gil under the true cheapest competitor, capped at 110% of the same-quality recent median sale (in-game history).
-  - No same-quality median means no raise. Never raise during a price war.
-  - Sole seller: raise to the cap only when the read looks complete (row count not a multiple of 10).
-  - Ties are undercut.
-- [ ] 3. **Spread across items.**
-  - At most 9 listings per item (`ProcurementEmergencyMaximumSlotsPerItem` 9), enforced on both listing paths (bag listing, plus the ledger auto-list predicate).
-  - Bulk preferred holdings stay coverage-bounded, with velocity multiplied by a capture share (30% default, measured from the sale tracker once it has enough watched time).
-  - Liquidity and tier tests keep using whole-market velocity.
-- [ ] 4. **Margin floors.**
-  - 20% net for food and potions (preferred, plus the new `Consumable` flag); 25% for everything else; absolute minimum 20%.
-  - Fill ROI 25%, which switches the top-up off.
+- [x] 1. **Stuck stock.**
+  - When the market is below cost, list at break-even right away instead of holding the old ask (`PricingStrategyService`, with a `StuckStockPolicy`).
+  - After 24 h continuously below cost, follow the market down to at most 5% under cost (`PositionCostPolicy.RelaxedListingPrice`).
+  - Never during a detected price war (crash); the price-war branch comes first.
+  - `Configuration.BelowCostSince` is persisted per item and quality, started by live repricer reads. It is cleared when the market recovers or the position sells out (`ReconcilePositionCosts`).
+  - D2 follows: bag listing passes the same policy, so new stacks get break-even, not our stuck median.
+- [x] 2. **Raise prices.**
+  - Re-price to 1 gil under the true cheapest competitor (not the depth-adjusted price), capped at 110% of the same-quality median. `MarketDataService` now splits the in-game history by `IsHq`, needing at least 3 sales.
+  - No same-quality median means no raise. Never raise during a price war; the check is repeated for known-cost stock above its floor.
+  - Sole seller: raised to the cap only when the board was read (rows > 0) and the row count is not a multiple of 10.
+  - Ties are undercut. A listing already strictly cheapest within the undercut band is left alone.
+  - A listing below its floor while the market is below cost is raised to break-even, not left at a loss.
+- [x] 3. **Spread across items.**
+  - At most 9 listings per item (`ProcurementEmergencyMaximumSlotsPerItem` 9). Enforced in `BagListingController` and by the `MayListAnotherOf` predicate on `TryAutoListPurchase`, which counts the live retainer plus `portfolioListings`.
+  - Bulk preferred holdings stay coverage-bounded. Velocity for sizing is the market rate times the capture share: 30% default, or measured by `CaptureShareEstimator` from sales during watched spans after 12 h of listening and 5+ sales, clamped to 5–90%.
+  - Liquidity and tier tests keep whole-market velocity. A first lot the whole market could carry may still open a position.
+- [x] 4. **Margin floors.**
+  - Fast mover 20, high volume 25, standard 25, absolute 20.
+  - Fill 25, which switches the top-up off.
   - 25,000 profit per purchase lot, with the Core exemption removed.
-- [ ] 5. **Targeted trips.**
-  - Go to the up-to-6 best memory/hint worlds, about 40 minutes away at most.
-  - The route uses its own fields and never touches `PriorityScoutRoute` or its cursor.
-  - A full circuit only when there is no evidence, at most every 6 h (`LastFullCircuitAt`). Otherwise stay home with a clear reason.
-- [ ] 6. **Listing sizes.**
-  - Per-rule `ListingStackSize` is separate from `TargetStackSize`, which remains the purchase-lot ceiling.
-  - Values: Popcorn and Potage 50; G4 gemdraughts 99; Nachos 20.
-  - Every listing is at least about 100k gil.
-  - Listing-side accounting switches to the listing size: bag listing, ledger, `CollectBagStock`, `PreferredRestockSlots`. The planner stays on lots.
-- [ ] 7. **New lines.**
-  - New rules: Nachos HQ (49239), Mason's Abrasive (46252, NQ), Multifaceted Alchemic (27796, NQ). All are secondary and non-curated, with ListFromBags on and bag reserve 0.
-  - Command Materia XI/XII (41767/41780) get more slots.
-  - The daily Siren scan auto-adds food and medicine through the `MarketDiscoveryService` merge, with three changes:
-    - retire to LiquidateOnly after 3 failed scans;
-    - never auto-pin to core;
-    - a cap of 6 rules.
-  - `MarketDiscoveryEnabled` (NA rawstats) stays off.
-- [ ] 8. **Legacy minimums.** Clear `MinimumPrice` and `MinimumMarginPercent`, and the stale `CostBasis` where `CostBasisUnits` is 0, on every rule not opted in. Keep a backup map and a restore button, and log each one.
-- [ ] 9. **Faster passes.** 2 minutes between passes. Fix the clamp (min 5) and `EnableStockAutomation` (C8), and migrate 5/5 to 2/2.
-- [ ] Config v46 migration (the live config is v44, so v45 and v46 run together), seeding flag, dashboard knobs, README.
-- [ ] Tests, then mutation-check each decision, then Release build and publish 1.0.0.77.
+  - The `Consumable` flag gives non-preferred food the 20% bar.
+- [x] 5. **Targeted trips** (`ProcurementController.Trips.cs`).
+  - Targets are up to 6 worlds whose remembered rows, at the home reference, clear each line's required ROI for at least one lot of profit. Remembered bargains count.
+  - The trip stops scouting at 75% of 40 min.
+  - It never touches `PriorityScoutRoute`, `PriorityNextWorld` or its item.
+  - A full circuit runs when there are fewer than 3 targets and none for at least 6 h (`LastFullCircuitAt`, set at start).
+  - With no targets and no circuit due, the scheduler holds before scanning. `Shop now` still travels.
+- [x] 6. **Listing sizes.**
+  - `ListingStackSize` separates the listing size from `TargetStackSize`, which remains the lot. Values: Popcorn and Potage 50, G4 99, Nachos 20, Command Materia XI 4 and XII 3, Mason's 5, Alchemic 99.
+  - `ResaleStockPolicy.ListingQuantity` raises explicit sizes to 100,000 gil.
+  - Converted to listing size: bag listing, the purchase ledger, `CollectBagStock` and `PreferredRestockSlots`. The planner stays on lots.
+- [x] 7. **New lines.**
+  - Nachos HQ 49239, Mason's Abrasive 46252 and Multifaceted Alchemic 27796 are seeded once (`SecondaryLinesSeeded`), with ListFromBags on and reserve 0. Command XI/XII already existed; demand already lifts their slot floor.
+  - The daily Siren scan offers food and medicine (`MarketDiscoveryPolicy.ProposeFromHomeRanking`: 50+ units/day, 5+ sales/day, worth 150k per lot, 30%+ spread) to the `MarketDiscoveryService` merge.
+  - The merge adds at most 2 per scan and 6 in all, retires to LiquidateOnly after 3 misses, and never pins.
+  - Incomplete scans are not offered. `MarketDiscoveryEnabled` (NA rawstats) stays off.
+- [x] 8. **Legacy minimums.**
+  - `ClearLegacyMinimums` clears `MinimumPrice`, `MinimumMarginPercent`, and untracked `CostBasis`/`AcquisitionFloor` on rules not opted in. The values are kept in `ClearedLegacyMinimums`, logged once at start, and restorable from Advanced > Pricing.
+  - Live copy: 26 cleared. They are 24 untracked dyes and materia, whose floors drop from up to 13,264 to 1, plus G4 Strength and Pastel Pink Dye, which keep their tracked basis.
+- [x] 9. **Faster passes.** 2/2 minutes; the clamp minimum is now 2, and `EnableStockAutomation` sets 2.
+- [x] Config v46 migration, seeding, dashboard (listing column, cap, share, trips, stuck stock and raises, restore button), README.
+- [x] Tests: 628 pass (70 new since v76).
+  - The route harness pins old share, cap, trips and margins for the older mechanics cases; the new behaviour has its own tests.
+  - Mutation checks: reverting any of the 16 key lines across the nine decisions fails its test.
+  - The real v46 migration was run on a copy of the live settings through the built plugin DLL, including a Newtonsoft round trip: version 44 → 46, all values as listed.
+- [ ] Release build, publish 1.0.0.77, verify.
 
 Points where the approved decisions do not fit together; tell the user each one:
 - Materia median purchase is 3–4 units (about 39k), under the 100k per-listing and 25k profit floors. Implemented literally, so about 11 per listing; editable per rule.
 - 25k is measured per purchase lot. Measured per 50-unit sale listing, it would silently raise the Popcorn/Potage bar to about 27%.
 - Nachos is a secondary line, not curated: no 100-unit bag reserve.
 - Discovered food is never auto-pinned to core.
+
+Validation boundary: nothing was run in the game. Unverified until the first session log:
+- the LogMessage layout from v76;
+- the per-quality history split;
+- live auto-listing under the cap;
+- targeted routes against real Universalis memory.
 
 # Previous: 2026-10-31 volume review, price memory, scans and real sale tracking
 

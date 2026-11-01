@@ -84,7 +84,7 @@ then the profit velocity of the good stock, then absolute profit, and only last 
 how many slots get filled. A 300% return on a stack worth two thousand gil loses
 to a large, fast-moving stack of raid food, and **an empty slot is preferred to a
 slot of junk**. The lower fill-up margin reaches preferred and high-liquidity
-stock only.
+stock only, and is off by default since 1.0.0.77 (it equals the standard bar).
 
 **Shopping > Why each item was chosen or skipped** and the session log show the
 tier, units per day, expected profit, ROI, estimated turnover in days, and the
@@ -104,7 +104,7 @@ Readings older than seven days are dropped, and sales after thirty.
 How it is used:
 - After a reload, the away-world prices from the last circuit that are younger than
   "remember away-world prices" are restored instead of read again.
-- Worlds where memory shows cheap stock are visited first.
+- Trips go to the worlds where memory shows cheap stock (see targeted trips below).
 - Buying still needs a fresh live board read, a fresh home price and every profit
   guard. A remembered or cached price only decides where to look.
 
@@ -129,10 +129,43 @@ The **Market** tab shows:
 - where each traded line is cheapest, with the units buyable at a 15% margin;
 - what sells on the home world, with its cheapest price elsewhere.
 
+### Trading rules chosen on 2026-11-01 (1.0.0.77)
+
+- **Stuck stock.** When the market falls below what stock cost, the listing goes to
+  break-even straight away instead of holding an ask nobody pays. If the market
+  stays below cost for 24 hours, the listing follows it down, never more than 5%
+  under cost and never while the price-war guard sees a crash. New bag stacks get
+  the same prices.
+- **Raises.** A listing cheaper than it needs to be moves up to 1 gil under the
+  cheapest competitor, capped at 110% of what the same quality recently sold for
+  in game. No same-quality history means no raise; a lone seller is raised to the
+  cap only when the board was read in full. Ties are undercut.
+- **Spread.** At most 9 listings per item across the retainers (15% of 60).
+  Holdings are sized on our share of each market: 30% until the sale tracker has
+  measured the real one (12 hours of listening and 5 sales of that line).
+- **Margins.** 20% net after both taxes for food and potions, 25% for everything
+  else, never below 20%, and at least 25,000 gil profit per purchased lot.
+- **Targeted trips.** A trip goes straight to up to 6 worlds that the price memory
+  shows holding stock cheap enough to clear those margins, and is back within about
+  40 minutes. A full circuit of every world runs only when memory knows fewer than
+  3 such worlds, and at most every 6 hours. With nothing worth a trip, a scheduled
+  trip stays home; **Shop now** still travels.
+- **Listing sizes.** Listings come in the sizes home buyers take: gemdraughts in
+  99s, Popcorn and Potage in 50s, Nachos in 20s. A line with a listing size is
+  raised until one listing is worth about 100,000 gil. Each rule's size is the
+  "Listing" column under Shopping.
+- **Lines.** Nachos HQ, Mason's Abrasive and Multifaceted Alchemic are secondary
+  lines. The daily home-world scan adds food and medicine that sell well at home
+  with a 30%+ spread: at most 2 a scan and 6 in all, retired to sell-off after 3
+  scans in a row without qualifying, and never pinned as core.
+- **Old minimums.** Minimums older versions set automatically were cleared on
+  update and kept; **Advanced > Pricing** can restore them.
+- **Passes.** 2 minutes between retainer passes.
+
 ### Optional market discovery
 
-A daily market-statistics feed can suggest additional high-value, high-volume food
-and medicine. Candidates are validated against the game's own item data (the item
+Separately from the daily home-world scan above, a region-wide market-statistics
+feed can suggest additional high-value, high-volume food and medicine. Candidates are validated against the game's own item data (the item
 exists, is tradable, its high-quality capability, and its category) before a rule
 is created, and results are cached for 24 hours. This is intelligence, not
 authorization: a suggested item still has to pass fresh live market-board prices,
@@ -167,7 +200,7 @@ that allowance. Sale-only backlog and personal reserves do not count as trading
 stock. Real free bag space is always required. Open sale slots allow normal
 shopping after the listing pass when spendable gil meets the trip minimum.
 Full retainers with replacement stock hunt every six scan intervals (at least
-60 minutes), while five-minute listing/undercut checks continue between trips.
+60 minutes), while two-minute listing/undercut checks continue between trips.
 New vacancies or missing preferred replacements lift the slower schedule.
 Disable comfortable-stock mode to use the fixed spare-stack and vacancy targets.
 
