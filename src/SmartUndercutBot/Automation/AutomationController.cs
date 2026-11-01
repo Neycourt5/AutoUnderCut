@@ -1246,12 +1246,19 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
         // floor for that first live pricing pass; the configured cost floor still wins.
         if (returnToAutoListingAfterCurrent && rule.PriceWarAction == PriceWarAction.LeaveUnchanged)
             rule.PriceWarAction = PriceWarAction.MatchProtectedFloor;
+        var config = configuration.Current;
+        var now = timeProvider.GetUtcNow();
         currentDecision = pricing.Evaluate(new PricingContext(
             entry.Listing,
             currentMarket!,
             rule,
             retainerListings.OwnedRetainerIds,
-            Fees: configuration.Current.Fees));
+            Fees: config.Fees,
+            StuckStock: config.CurrentStuckStockPolicy(),
+            BelowCostSince: config.BelowCostSinceFor(entry.Listing.ItemId, entry.Listing.IsHighQuality),
+            Now: now,
+            Raise: config.CurrentRaisePolicy()));
+        TrackBelowCost(entry.Listing, currentDecision, now);
 
         if (IsUnresolvedCuratedPrice(entry.Listing) &&
             (!currentDecision.ShouldUpdate || currentDecision.TargetPrice is not { } proposed ||
@@ -1324,6 +1331,36 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
 
         Schedule(AutomationState.WaitingBeforeCommit,
             $"Waiting before updating {entry.Listing.ItemName} to {currentDecision.TargetPrice:N0} gil.");
+    }
+
+    /// <summary>
+    /// Keep the clock behind the stuck-stock relaxation. It starts the first time a
+    /// live read puts the market under this stock's cost and stops as soon as one
+    /// shows it back above; a read that said nothing about the market leaves it be.
+    /// </summary>
+    private void TrackBelowCost(RetainerListing listing, PriceDecision decision, DateTimeOffset now)
+    {
+        if (decision.Kind is PriceDecisionKind.InvalidData or PriceDecisionKind.NoMarketData)
+            return;
+        var config = configuration.Current;
+        var key = Configuration.QualityKey(listing.ItemId, listing.IsHighQuality);
+        if (decision.MarketBelowCost)
+        {
+            if (!config.BelowCostSince.TryAdd(key, now))
+                return;
+            log.Add(AutomationLogLevel.Information,
+                $"BELOW COST {listing.ItemName}: the market is under this stock's cost" +
+                (config.ListStuckStockAtBreakEven
+                    ? $", so it is listed at break-even; after {config.StuckStockRelaxAfterHours}h it may follow the " +
+                      $"market to at most {config.StuckStockMaximumLossPercent:N0}% under cost."
+                    : "; stuck-stock pricing is off, so the old ask is held."));
+        }
+        else if (config.BelowCostSince.Remove(key))
+            log.Add(AutomationLogLevel.Information,
+                $"BACK ABOVE COST {listing.ItemName}: the market again pays more than this stock cost.");
+        else
+            return;
+        configuration.Save();
     }
 
     private void UpdatePortfolioMarketEstimate(

@@ -70,6 +70,30 @@ public static class PositionCostPolicy
     }
 
     /// <summary>
+    /// The floor once stock has sat below cost long enough to accept a small loss:
+    /// a price whose proceeds after sale tax are <paramref name="maximumLossPercent"/>
+    /// under the landed cost. A minimum the user set by hand still wins, and stock
+    /// of unknown cost has nothing to relax, so both keep the ordinary floor.
+    /// </summary>
+    public static uint RelaxedListingPrice(
+        PricingRule rule, FeeModel? fees, uint acquisitionCost, decimal maximumLossPercent)
+    {
+        ArgumentNullException.ThrowIfNull(rule);
+        var floor = MinimumListingPrice(rule, fees, acquisitionCost);
+        var cost = acquisitionCost == 0 ? rule.CostBasis : acquisitionCost;
+        var model = fees ?? FeeModel.Default;
+        if (cost == 0 || maximumLossPercent <= 0 || !model.IsValid)
+            return floor;
+        var trackedPurchase = rule.CostBasisUnits > 0;
+        var configured = trackedPurchase && !rule.ApplyMinimumPriceToPurchasedStock
+            ? 1u
+            : Math.Max(1u, rule.MinimumPrice);
+        var requiredNet = (uint)Math.Max(1m,
+            decimal.Ceiling(cost * (1m - Math.Min(maximumLossPercent, 50m) / 100m)));
+        return Math.Min(floor, Math.Max(configured, model.ListingPriceForNet(requiredNet)));
+    }
+
+    /// <summary>
     /// Retire cost information for units that have left the position. Once the
     /// tracked units reach zero the basis is cleared with them, so the next
     /// purchase rebases the item instead of inheriting an old, higher price.

@@ -318,6 +318,69 @@ public sealed class RetainerAutomationTests
     }
 
     [Fact]
+    public void AListingTheMarketFellBelowGoesToBreakEvenAndStartsTheClock()
+    {
+        using var run = new Session();
+        run.Game.LiveRepricing = true;
+        run.Config.Current.PerItemRules[200] = new PricingRule { CostBasis = 2_142, CostBasisUnits = 500 };
+        run.Game.CompetitorOffset = -210;
+        run.Game.HistoricalMedian = 2_400;
+        run.Game.Listings.Add(new(1, "Test Retainer", 4, 200, "Test Stew", 50, 2_400, false));
+        run.Bot.StartNow();
+        run.CompletePass();
+        // Held at 2,400 the stack never sold; at 2,256 it returns what it cost.
+        Assert.Equal(new[] { (200u, (short)4, 2_256u) }, run.Game.Commits);
+        Assert.True(run.Config.Current.BelowCostSince.ContainsKey("200:N"));
+    }
+
+    [Fact]
+    public void AfterADayBelowCostTheListingFollowsTheMarketWithinTheLossLimit()
+    {
+        using var run = new Session();
+        run.Game.LiveRepricing = true;
+        run.Config.Current.PerItemRules[200] = new PricingRule { CostBasis = 2_142, CostBasisUnits = 500 };
+        run.Config.Current.BelowCostSince["200:N"] = DateTimeOffset.UtcNow.AddHours(-25);
+        run.Game.CompetitorOffset = -66;
+        run.Game.HistoricalMedian = 2_400;
+        run.Game.Listings.Add(new(1, "Test Retainer", 4, 200, "Test Stew", 50, 2_256, false));
+        run.Bot.StartNow();
+        run.CompletePass();
+        Assert.Equal(new[] { (200u, (short)4, 2_189u) }, run.Game.Commits);
+    }
+
+    [Fact]
+    public void AMarketBackAboveCostRaisesTheListingAndStopsTheClock()
+    {
+        using var run = new Session();
+        run.Game.LiveRepricing = true;
+        run.Config.Current.PerItemRules[200] = new PricingRule { CostBasis = 2_142, CostBasisUnits = 500 };
+        run.Config.Current.BelowCostSince["200:N"] = DateTimeOffset.UtcNow.AddHours(-3);
+        run.Game.CompetitorOffset = 344;
+        run.Game.HistoricalMedian = 2_400;
+        run.Game.NqMedian = 2_400;
+        run.Game.Listings.Add(new(1, "Test Retainer", 4, 200, "Test Stew", 50, 2_256, false));
+        run.Bot.StartNow();
+        run.CompletePass();
+        Assert.Equal(new[] { (200u, (short)4, 2_599u) }, run.Game.Commits);
+        Assert.Empty(run.Config.Current.BelowCostSince);
+    }
+
+    [Fact]
+    public void ACheapListingIsRaisedToJustUnderTheCheapestCompetitor()
+    {
+        using var run = new Session();
+        run.Game.LiveRepricing = true;
+        run.Game.CompetitorOffset = 402;
+        run.Game.HistoricalMedian = 2_400;
+        run.Game.NqMedian = 2_400;
+        run.Game.Listings.Add(new(1, "Test Retainer", 4, 200, "Test Stew", 50, 2_098, false));
+        run.Bot.StartNow();
+        run.CompletePass();
+        // 19 stacks of Potage sat at 2,098 while the next seller asked far more.
+        Assert.Equal(new[] { (200u, (short)4, 2_499u) }, run.Game.Commits);
+    }
+
+    [Fact]
     public void AHealthyListingIsStillOpenedNormally()
     {
         using var run = new Session();
@@ -617,6 +680,8 @@ public sealed class RetainerAutomationTests
         // history median the reply carries (the listing's own price by default).
         public long CompetitorOffset = -1;
         public uint? HistoricalMedian;
+        // What NQ alone sold for; null leaves a raise without a same-quality cap.
+        public uint? NqMedian;
         public override bool RequestComparePrices()
         {
             pricesReturned = true;
@@ -624,7 +689,7 @@ public sealed class RetainerAutomationTests
                 request!.SetException(new TimeoutException("Wrong provisional inventory item filtered out the actual reply."));
             else request!.SetResult(new(Editor.ItemId, DateTimeOffset.UtcNow,
                 [new((uint)(Editor.CurrentPrice + CompetitorOffset), 2, false, "Competitor", 99)],
-                HistoricalMedian ?? Editor.CurrentPrice));
+                HistoricalMedian ?? Editor.CurrentPrice, HistoricalMedianNormalQuality: NqMedian));
             return true;
         }
         public override PriceUpdateResult CommitPrice(RetainerListing expected, uint price)

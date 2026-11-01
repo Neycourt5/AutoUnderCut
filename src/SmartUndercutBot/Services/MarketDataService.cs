@@ -47,12 +47,12 @@ public sealed class MarketDataService : IMarketDataService, IDisposable
             // the price-war guard can use the live sale history without slowing every item.
             var historyReady = request.History.Task;
             await Task.WhenAny(historyReady, Task.Delay(750, timeout.Token)).ConfigureAwait(false);
-            var historical = historyReady.IsCompletedSuccessfully ? historyReady.Result : Array.Empty<uint>();
-            uint? median = historical.Length == 0
-                ? null
-                : historical.Order().ElementAt(historical.Length / 2);
+            var historical = historyReady.IsCompletedSuccessfully ? historyReady.Result : [];
 
-            return new MarketSnapshot(request.ResolvedItemId, DateTimeOffset.UtcNow, listings, median);
+            return new MarketSnapshot(request.ResolvedItemId, DateTimeOffset.UtcNow, listings,
+                Median(historical.Select(x => x.Price), 1),
+                HistoricalMedianHighQuality: Median(historical.Where(x => x.IsHq).Select(x => x.Price), MinimumQualitySales),
+                HistoricalMedianNormalQuality: Median(historical.Where(x => !x.IsHq).Select(x => x.Price), MinimumQualitySales));
         }
         finally
         {
@@ -128,8 +128,18 @@ public sealed class MarketDataService : IMarketDataService, IDisposable
         request.MarkHistorySeen();
         request.History.TrySetResult(history.HistoryListings
             .Where(x => x.SalePrice > 0)
-            .Select(x => x.SalePrice)
+            .Select(x => (x.SalePrice, x.IsHq))
             .ToArray());
+    }
+
+    // A raise is capped against what one quality sold for, and one or two sales say
+    // nothing about that. The mixed median keeps its old one-sale rule.
+    private const int MinimumQualitySales = 3;
+
+    private static uint? Median(IEnumerable<uint> prices, int minimumSales)
+    {
+        var sorted = prices.Order().ToArray();
+        return sorted.Length < Math.Max(1, minimumSales) ? null : sorted[sorted.Length / 2];
     }
 
     public void Dispose()
@@ -163,7 +173,7 @@ public sealed class MarketDataService : IMarketDataService, IDisposable
         public int? RequestId { get; private set; }
         public TaskCompletionSource<IReadOnlyList<MarketListing>> Offerings { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
-        public TaskCompletionSource<uint[]> History { get; } =
+        public TaskCompletionSource<(uint Price, bool IsHq)[]> History { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public void MarkHistorySeen() => HistorySeen = true;

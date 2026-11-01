@@ -2335,9 +2335,14 @@ public sealed partial class ProcurementController : IDisposable
             PositionCostPolicy.RecordSale(rule, (uint)(tracked - units));
             changed = true;
             if (rule.CostBasisUnits == 0)
+            {
+                // The stuck-stock clock belonged to the stock that just left.
+                config.BelowCostSince.Remove(Configuration.QualityKey(itemId, true));
+                config.BelowCostSince.Remove(Configuration.QualityKey(itemId, false));
                 log.Add(AutomationLogLevel.Information,
                     $"COST BASIS CLEARED for item {itemId}: the position sold out, so the next purchase " +
                     "sets a fresh basis instead of inheriting the old one.");
+            }
         }
         if (changed)
             configuration.Save();

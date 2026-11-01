@@ -113,6 +113,21 @@ public sealed class Configuration : IPluginConfiguration
     // rather than at the next scheduled pass.
     public bool SaleTrackingEnabled { get; set; } = true;
     public bool RelistAfterSale { get; set; } = true;
+    // When the market falls below what stock cost: list at break-even straight away
+    // instead of holding an ask nobody pays, and once it has stayed there for the
+    // relaxation period, follow it down to a small, bounded loss. Never in a crash.
+    public bool ListStuckStockAtBreakEven { get; set; } = true;
+    public int StuckStockRelaxAfterHours { get; set; } = 24;
+    public decimal StuckStockMaximumLossPercent { get; set; } = 5m;
+    /// <summary>
+    /// When each item's market was first seen under its cost, per "itemId:H|N".
+    /// Kept across restarts because the relaxation period is longer than a session.
+    /// </summary>
+    public Dictionary<string, DateTimeOffset> BelowCostSince { get; set; } = [];
+    // Listings cheaper than they need to be move up to just under the cheapest
+    // competitor, capped at this premium over the same quality's recent median sale.
+    public bool RaisePricesToMarket { get; set; } = true;
+    public decimal RaiseMedianCapPercent { get; set; } = 110m;
     // One circuit covers every away world. Cross-data-center travel is the
     // expensive part of a trip, so a thorough sweep beats four shallow ones; the
     // route still returns early when the bags or the wallet run out.
@@ -183,6 +198,20 @@ public sealed class Configuration : IPluginConfiguration
 
     public PricingRule GetEffectiveRule(uint itemId) =>
         PerItemRules.TryGetValue(itemId, out var rule) ? rule.Clone() : GlobalRule.Clone();
+
+    public static string QualityKey(uint itemId, bool highQuality) => $"{itemId}:{(highQuality ? 'H' : 'N')}";
+
+    // Methods rather than properties: computed properties end up in the saved file.
+    public StuckStockPolicy? CurrentStuckStockPolicy() => ListStuckStockAtBreakEven
+        ? new(TimeSpan.FromHours(StuckStockRelaxAfterHours), StuckStockMaximumLossPercent)
+        : null;
+
+    public PriceRaisePolicy? CurrentRaisePolicy() => RaisePricesToMarket
+        ? PriceRaisePolicy.Default with { MedianCapPercent = RaiseMedianCapPercent }
+        : null;
+
+    public DateTimeOffset? BelowCostSinceFor(uint itemId, bool highQuality) =>
+        BelowCostSince.TryGetValue(QualityKey(itemId, highQuality), out var since) ? since : null;
 
     /// <summary>
     /// The one transaction-cost model. Planning, the displayed ROI, the live
@@ -673,6 +702,10 @@ public sealed class Configuration : IPluginConfiguration
         ProcurementMinimumProfitPerSaleSlot = Math.Min(ProcurementMinimumProfitPerSaleSlot, 100_000_000u);
         MarketDiscoveryCacheHours = Math.Clamp(MarketDiscoveryCacheHours, 1, 168);
         MarketDiscoveryRegion = string.IsNullOrWhiteSpace(MarketDiscoveryRegion) ? "NA" : MarketDiscoveryRegion.Trim();
+        StuckStockRelaxAfterHours = Math.Clamp(StuckStockRelaxAfterHours, 1, 720);
+        StuckStockMaximumLossPercent = Math.Clamp(StuckStockMaximumLossPercent, 0m, 50m);
+        RaiseMedianCapPercent = Math.Clamp(RaiseMedianCapPercent, 100m, 300m);
+        BelowCostSince ??= [];
         MarketScanIntervalMinutes = Math.Clamp(MarketScanIntervalMinutes, 10, 240);
         MarketDiscoveryScanHours = Math.Clamp(MarketDiscoveryScanHours, 6, 168);
         ScoutKnowledgeMaxAgeHours = Math.Clamp(ScoutKnowledgeMaxAgeHours, 1, 168);

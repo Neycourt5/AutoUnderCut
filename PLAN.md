@@ -1,4 +1,55 @@
-# Current: 2026-10-31 volume review, price memory, scans and real sale tracking
+# Current: Phase 2, the user's nine decisions (v1.0.0.77)
+
+On 2026-11-01 the user answered the decision list from the review with "All recommendations". Each decision is implemented as recommended in the review report; the shipped values are listed below.
+
+- [ ] 1. **Stuck stock.**
+  - When the market is below cost, list at break-even right away instead of holding the old ask.
+  - After 24 h continuously below cost, follow the market down to at most 5% under cost.
+  - Never while a price war (crash) is detected.
+  - "Below cost since" is persisted per item and quality. It is cleared when the market recovers or the position empties.
+  - D2 follows from this: new bag stacks get the same price.
+- [ ] 2. **Raise prices.**
+  - Re-price to 1 gil under the true cheapest competitor, capped at 110% of the same-quality recent median sale (in-game history).
+  - No same-quality median means no raise. Never raise during a price war.
+  - Sole seller: raise to the cap only when the read looks complete (row count not a multiple of 10).
+  - Ties are undercut.
+- [ ] 3. **Spread across items.**
+  - At most 9 listings per item (`ProcurementEmergencyMaximumSlotsPerItem` 9), enforced on both listing paths (bag listing, plus the ledger auto-list predicate).
+  - Bulk preferred holdings stay coverage-bounded, with velocity multiplied by a capture share (30% default, measured from the sale tracker once it has enough watched time).
+  - Liquidity and tier tests keep using whole-market velocity.
+- [ ] 4. **Margin floors.**
+  - 20% net for food and potions (preferred, plus the new `Consumable` flag); 25% for everything else; absolute minimum 20%.
+  - Fill ROI 25%, which switches the top-up off.
+  - 25,000 profit per purchase lot, with the Core exemption removed.
+- [ ] 5. **Targeted trips.**
+  - Go to the up-to-6 best memory/hint worlds, about 40 minutes away at most.
+  - The route uses its own fields and never touches `PriorityScoutRoute` or its cursor.
+  - A full circuit only when there is no evidence, at most every 6 h (`LastFullCircuitAt`). Otherwise stay home with a clear reason.
+- [ ] 6. **Listing sizes.**
+  - Per-rule `ListingStackSize` is separate from `TargetStackSize`, which remains the purchase-lot ceiling.
+  - Values: Popcorn and Potage 50; G4 gemdraughts 99; Nachos 20.
+  - Every listing is at least about 100k gil.
+  - Listing-side accounting switches to the listing size: bag listing, ledger, `CollectBagStock`, `PreferredRestockSlots`. The planner stays on lots.
+- [ ] 7. **New lines.**
+  - New rules: Nachos HQ (49239), Mason's Abrasive (46252, NQ), Multifaceted Alchemic (27796, NQ). All are secondary and non-curated, with ListFromBags on and bag reserve 0.
+  - Command Materia XI/XII (41767/41780) get more slots.
+  - The daily Siren scan auto-adds food and medicine through the `MarketDiscoveryService` merge, with three changes:
+    - retire to LiquidateOnly after 3 failed scans;
+    - never auto-pin to core;
+    - a cap of 6 rules.
+  - `MarketDiscoveryEnabled` (NA rawstats) stays off.
+- [ ] 8. **Legacy minimums.** Clear `MinimumPrice` and `MinimumMarginPercent`, and the stale `CostBasis` where `CostBasisUnits` is 0, on every rule not opted in. Keep a backup map and a restore button, and log each one.
+- [ ] 9. **Faster passes.** 2 minutes between passes. Fix the clamp (min 5) and `EnableStockAutomation` (C8), and migrate 5/5 to 2/2.
+- [ ] Config v46 migration (the live config is v44, so v45 and v46 run together), seeding flag, dashboard knobs, README.
+- [ ] Tests, then mutation-check each decision, then Release build and publish 1.0.0.77.
+
+Points where the approved decisions do not fit together; tell the user each one:
+- Materia median purchase is 3–4 units (about 39k), under the 100k per-listing and 25k profit floors. Implemented literally, so about 11 per listing; editable per rule.
+- 25k is measured per purchase lot. Measured per 50-unit sale listing, it would silently raise the Popcorn/Potage bar to about 27%.
+- Nachos is a secondary line, not curated: no 100-unit bag reserve.
+- Discovered food is never auto-pinned to core.
+
+# Previous: 2026-10-31 volume review, price memory, scans and real sale tracking
 
 The user asked (2026-10-31, overnight run authorized):
 - Keep all 60 slots full and selling constantly. "Sales volume beats all."

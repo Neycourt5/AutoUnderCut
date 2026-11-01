@@ -44,8 +44,9 @@ public sealed class PricingStrategyService : IPricingStrategyService
             .ToArray();
 
         if (competitors.Length == 0)
-            return Decision(PriceDecisionKind.NoMarketData, listing, null, floor,
-                $"No competitor listings matched {QualityDescription(rule.QualityFilter, listing.IsHighQuality)}.");
+            return RaiseAsSoleSeller(context) ??
+                   Decision(PriceDecisionKind.NoMarketData, listing, null, floor,
+                       $"No competitor listings matched {QualityDescription(rule.QualityFilter, listing.IsHighQuality)}.");
 
         // Depth-aware: a one-unit undercut in a market that turns over hundreds of
         // units a day is gone long before our stack is reached, and chasing it just
@@ -55,6 +56,8 @@ public sealed class PricingStrategyService : IPricingStrategyService
         var rawTarget = rule.Mode == PricingMode.MatchLowest
             ? lowest
             : lowest > rule.UndercutAmount ? lowest - rule.UndercutAmount : 1u;
+        // Matching the market would mean selling under what this stock cost.
+        var belowCost = rawTarget < floor;
         var hasKnownCost = listing.AcquisitionCost > 0 || rule.CostBasis > 0;
         // When the sale history did not arrive, our own asking price is the only
         // reference left. Without it the guard failed open: stock with no known cost
@@ -62,6 +65,8 @@ public sealed class PricingStrategyService : IPricingStrategyService
         var reference = market.HistoricalMedianPrice is > 0 ? market.HistoricalMedianPrice : listing.CurrentPrice;
         // History can flag a large move, but it must not block selling known-cost
         // stock for a profit. Unknown-cost stock retains the historical safeguard.
+        // A crash also comes before every stuck-stock and raise rule below: stock is
+        // never sold under cost into one, and nothing is raised during one.
         if (!(hasKnownCost && rawTarget >= floor) &&
             IsPriceWar(lowest, reference, rule.PriceWarDropPercent))
         {
@@ -69,28 +74,63 @@ public sealed class PricingStrategyService : IPricingStrategyService
                 return Decision(PriceDecisionKind.PriceWar, listing, lowest, floor,
                     market.HistoricalMedianPrice is > 0
                         ? "Lowest price breached the configured historical drop threshold."
-                        : "No sale history arrived and the lowest price is far below this listing; holding instead of following it.");
+                        : "No sale history arrived and the lowest price is far below this listing; holding instead of following it.",
+                    belowCost);
 
             var protectedFloor = Math.Max(floor, ProtectedHistoricalFloor(reference!.Value, rule.PriceWarDropPercent));
             if (listing.CurrentPrice == protectedFloor)
-                return Decision(PriceDecisionKind.NoChange, listing, lowest, protectedFloor, "Listing already matches the protected historical floor.");
+                return Decision(PriceDecisionKind.NoChange, listing, lowest, protectedFloor,
+                    "Listing already matches the protected historical floor.", belowCost);
 
             return new PriceDecision(PriceDecisionKind.Update, listing.CurrentPrice, protectedFloor, lowest, protectedFloor,
-                "Price war detected; using the protected historical floor.");
+                "Price war detected; using the protected historical floor.", belowCost);
         }
 
-        if (listing.CurrentPrice <= lowest)
+        // Below cost, the stuck-stock policy lists at break-even straight away, and
+        // once the market has stayed there long enough, down to the accepted loss.
+        var effectiveFloor = floor;
+        if (belowCost && context.StuckStock is { } stuck && RelaxationDue(context, stuck))
+            effectiveFloor = PositionCostPolicy.RelaxedListingPrice(
+                rule, context.Fees, listing.AcquisitionCost, stuck.MaximumLossPercent);
+        // Where this listing belongs: just under the competition, never under its floor.
+        var desired = Math.Max(effectiveFloor, RoundDown(rawTarget, rule.Rounding));
+
+        if (context.Raise is { } raise)
+        {
+            // Known-cost stock above its floor skips the crash check above, so it is
+            // repeated here: nothing is ever raised into a collapsing market.
+            if (listing.CurrentPrice < desired && !IsPriceWar(lowest, reference, rule.PriceWarDropPercent))
+                return RaiseTowardFront(context, competitors, floor, desired, belowCost, raise);
+            // Strictly cheaper than every competitor is already the front of the
+            // queue; only a tie or a dearer ask still needs the undercut.
+            if (listing.CurrentPrice < lowest)
+                return Decision(PriceDecisionKind.NoChange, listing, lowest, effectiveFloor,
+                    $"Current listing is already the cheapest in {QualityDescription(rule.QualityFilter, listing.IsHighQuality)}.",
+                    belowCost);
+        }
+        else if (listing.CurrentPrice <= lowest)
             return Decision(PriceDecisionKind.NoChange, listing, lowest, floor,
-                $"Current listing is already at or below the lowest competitor in {QualityDescription(rule.QualityFilter, listing.IsHighQuality)}.");
+                $"Current listing is already at or below the lowest competitor in {QualityDescription(rule.QualityFilter, listing.IsHighQuality)}.",
+                belowCost);
 
         if (WithinTolerance(listing.CurrentPrice, lowest, rule))
-            return Decision(PriceDecisionKind.WithinTolerance, listing, lowest, floor, "Current price is inside the configured tolerance band.");
+            return Decision(PriceDecisionKind.WithinTolerance, listing, lowest, floor,
+                "Current price is inside the configured tolerance band.", belowCost);
 
-        if (rawTarget < floor)
-            return Decision(PriceDecisionKind.BelowFloor, listing, lowest, floor, "Competitive target would fall below the effective minimum price.");
+        if (belowCost)
+        {
+            if (context.StuckStock is null || desired >= listing.CurrentPrice)
+                return Decision(PriceDecisionKind.BelowFloor, listing, lowest, effectiveFloor,
+                    "Competitive target would fall below the effective minimum price.", true);
+            return new PriceDecision(PriceDecisionKind.Update, listing.CurrentPrice, desired, lowest, effectiveFloor,
+                effectiveFloor < floor
+                    ? $"The market has stayed below this stock's cost for {HoursBelowCost(context):N0}h; following it " +
+                      $"down to at most {context.StuckStock.MaximumLossPercent:N0}% under cost."
+                    : "The market is below this stock's cost; listing at break-even instead of holding the old price.",
+                true);
+        }
 
-        var rounded = RoundDown(rawTarget, rule.Rounding);
-        var target = Math.Max(floor, rounded);
+        var target = desired;
         if (target > MaximumListingPrice)
             return Decision(PriceDecisionKind.InvalidData, listing, lowest, floor, "Calculated target exceeds the game's listing-price limit.");
 
@@ -101,8 +141,83 @@ public sealed class PricingStrategyService : IPricingStrategyService
             $"{rule.Mode} target calculated from the lowest valid competitor price.");
     }
 
-    private static PriceDecision Decision(PriceDecisionKind kind, RetainerListing listing, uint? lowest, uint floor, string reason) =>
-        new(kind, listing.CurrentPrice, null, lowest, floor, reason);
+    private static PriceDecision Decision(
+        PriceDecisionKind kind, RetainerListing listing, uint? lowest, uint floor, string reason, bool belowCost = false) =>
+        new(kind, listing.CurrentPrice, null, lowest, floor, reason, belowCost);
+
+    private static bool RelaxationDue(PricingContext context, StuckStockPolicy stuck) =>
+        context.BelowCostSince is { } since && context.Now is { } now && now - since >= stuck.RelaxAfter;
+
+    private static double HoursBelowCost(PricingContext context) =>
+        context.BelowCostSince is { } since && context.Now is { } now ? (now - since).TotalHours : 0;
+
+    /// <summary>
+    /// A listing cheaper than it needs to be moves up to the front of the queue: one
+    /// undercut under the cheapest competitor itself, not the depth-adjusted price,
+    /// which can sit behind cheaper rows and would give up first place. Below cost
+    /// the goal is the floor instead, so stock is not left listed at a loss.
+    /// </summary>
+    private static PriceDecision RaiseTowardFront(PricingContext context, IReadOnlyList<MarketListing> competitors,
+        uint floor, uint desired, bool belowCost, PriceRaisePolicy raise)
+    {
+        var rule = context.Rule;
+        var cheapest = competitors.Min(x => x.PricePerUnit);
+        var front = rule.Mode == PricingMode.MatchLowest
+            ? cheapest
+            : cheapest > rule.UndercutAmount ? cheapest - rule.UndercutAmount : 1u;
+        var goal = belowCost ? desired : Math.Max(floor, RoundDown(front, rule.Rounding));
+        return RaiseTo(context, goal, cheapest, floor, raise, belowCost) ??
+               Decision(PriceDecisionKind.NoChange, context.Listing, cheapest, floor,
+                   "Current listing is already at the front of the queue.", belowCost);
+    }
+
+    /// <summary>
+    /// The only competition is our own stock, so nothing marks a front to sit behind
+    /// and the recent median sets the price. A board that came back empty proves
+    /// nothing, and a row count on a page boundary may be a read that stopped short
+    /// of a dearer competitor, so either keeps the listing where it is.
+    /// </summary>
+    private static PriceDecision? RaiseAsSoleSeller(PricingContext context)
+    {
+        if (context.Raise is not { } raise)
+            return null;
+        var count = context.Market.Listings.Count;
+        if (count == 0 || count % 10 == 0 || context.Market.HistoricalMedianFor(context.Listing.IsHighQuality) is not > 0)
+            return null;
+        var floor = PositionCostPolicy.MinimumListingPrice(context.Rule, context.Fees, context.Listing.AcquisitionCost);
+        return RaiseTo(context, MaximumListingPrice, null, floor, raise, false);
+    }
+
+    /// <summary>
+    /// Raise to <paramref name="goal"/>, capped at a premium over what this quality
+    /// recently sold for. Null when no raise is due: no same-quality history to bound
+    /// it, or a step too small to be worth a price write.
+    /// </summary>
+    private static PriceDecision? RaiseTo(PricingContext context, uint goal, uint? lowest, uint floor,
+        PriceRaisePolicy raise, bool belowCost)
+    {
+        var listing = context.Listing;
+        if (goal <= listing.CurrentPrice)
+            return null;
+        if (context.Market.HistoricalMedianFor(listing.IsHighQuality) is not (> 0 and var median))
+            return Decision(PriceDecisionKind.NoChange, listing, lowest, floor,
+                $"Priced under the market, but no {(listing.IsHighQuality ? "HQ" : "NQ")} sale history arrived to " +
+                "bound a raise; holding.", belowCost);
+        var cap = (uint)Math.Min(MaximumListingPrice, decimal.Floor(median * raise.MedianCapPercent / 100m));
+        var target = RoundDown(Math.Min(goal, cap), context.Rule.Rounding);
+        if (target <= listing.CurrentPrice ||
+            (target - listing.CurrentPrice) * 100m < listing.CurrentPrice * raise.MinimumRaisePercent)
+            return null;
+        var quality = listing.IsHighQuality ? "HQ" : "NQ";
+        return new PriceDecision(PriceDecisionKind.Update, listing.CurrentPrice, target, lowest, floor,
+            !lowest.HasValue
+                ? $"No other {quality} seller; raised to {raise.MedianCapPercent:N0}% of the recent median sale ({median:N0})."
+                : goal > cap
+                    ? $"Raised toward the cheapest competitor, capped at {raise.MedianCapPercent:N0}% of the recent " +
+                      $"{quality} median sale ({median:N0})."
+                    : "Raised to just under the cheapest competitor instead of selling cheaper than needed.",
+            belowCost);
+    }
 
     /// <summary>
     /// The cheapest price with more competing inventory in front of it than the

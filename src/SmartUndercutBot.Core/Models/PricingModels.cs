@@ -71,7 +71,41 @@ public sealed record MarketSnapshot(
     // Competing units the market absorbs before our own stack is realistically
     // reached. Zero keeps the plain "cheapest listing wins" behaviour; a positive
     // value lets a big stack ignore a trivial undercut it would outlive anyway.
-    decimal AbsorbableUnits = 0m);
+    decimal AbsorbableUnits = 0m,
+    // The same sale history split by quality. HistoricalMedianPrice mixes both, so
+    // cheap NQ sales would hold an HQ price below what HQ buyers actually pay.
+    uint? HistoricalMedianHighQuality = null,
+    uint? HistoricalMedianNormalQuality = null)
+{
+    public uint? HistoricalMedianFor(bool highQuality) =>
+        highQuality ? HistoricalMedianHighQuality : HistoricalMedianNormalQuality;
+}
+
+/// <summary>
+/// What to do when the market sits below what the stock cost. Without this the
+/// old ask is held, which on a falling market means it never sells at all.
+/// </summary>
+public sealed record StuckStockPolicy(
+    // How long the market must stay below cost before a loss is accepted.
+    TimeSpan RelaxAfter,
+    // The deepest loss accepted after that, as a percentage of the landed cost.
+    decimal MaximumLossPercent)
+{
+    public static StuckStockPolicy Default { get; } = new(TimeSpan.FromHours(24), 5m);
+}
+
+/// <summary>
+/// Raising a listing that is cheaper than it needs to be. The raise only ever
+/// goes to just under the cheapest competitor, never past a premium over what
+/// the same quality recently sold for.
+/// </summary>
+public sealed record PriceRaisePolicy(
+    decimal MedianCapPercent,
+    // Smaller raises are not worth a price write.
+    decimal MinimumRaisePercent)
+{
+    public static PriceRaisePolicy Default { get; } = new(110m, 1m);
+}
 
 public sealed class PricingRule
 {
@@ -114,7 +148,14 @@ public sealed record PricingContext(
     MarketSnapshot Market,
     PricingRule Rule,
     IReadOnlySet<ulong>? OwnedRetainerIds = null,
-    FeeModel? Fees = null);
+    FeeModel? Fees = null,
+    // Null keeps the old behaviour: a listing the market has fallen below is held.
+    StuckStockPolicy? StuckStock = null,
+    // When this item's market was first seen below its cost, and the time now.
+    DateTimeOffset? BelowCostSince = null,
+    DateTimeOffset? Now = null,
+    // Null keeps the old behaviour: a listing is never raised.
+    PriceRaisePolicy? Raise = null);
 
 public sealed record PriceDecision(
     PriceDecisionKind Kind,
@@ -122,7 +163,10 @@ public sealed record PriceDecision(
     uint? TargetPrice,
     uint? LowestMarketPrice,
     uint EffectiveFloor,
-    string Reason)
+    string Reason,
+    // The competitive target was under this stock's cost floor. The caller keeps
+    // the "below cost since" clock from this, whatever the decision itself was.
+    bool MarketBelowCost = false)
 {
     public bool ShouldUpdate => Kind == PriceDecisionKind.Update && TargetPrice.HasValue;
 }

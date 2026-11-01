@@ -334,14 +334,21 @@ public sealed class BagListingController : IDisposable
             var placeholder = new RetainerListing(
                 0, "New bag listing", -1, stock.ItemId, stock.ItemName, (uint)stock.TargetStackSize,
                 PricingStrategyService.MaximumListingPrice, stock.IsHighQuality, rule.CostBasis);
+            // The same stuck-stock rules as the repricer, so a fresh stack of an item
+            // whose market sits below cost goes up at break-even rather than at the
+            // median of our own unsold asks.
+            var config = configuration.Current;
             var decision = pricing.Evaluate(new PricingContext(
                 placeholder,
                 new MarketSnapshot(stock.ItemId, this.timeProvider.GetUtcNow(), listings, historicalMedian, true,
                     AbsorbableUnits: market is null ? 0m : Math.Min(stock.TargetStackSize / 2m,
-                        SalesVelocityPolicy.DailyUnits(market, stock.IsHighQuality) * configuration.Current.ProcurementAnchorAbsorptionDays)),
+                        SalesVelocityPolicy.DailyUnits(market, stock.IsHighQuality) * config.ProcurementAnchorAbsorptionDays)),
                 rule,
                 retainerListings.OwnedRetainerIds,
-                Fees: configuration.Current.Fees));
+                Fees: config.Fees,
+                StuckStock: config.CurrentStuckStockPolicy(),
+                BelowCostSince: config.BelowCostSinceFor(stock.ItemId, stock.IsHighQuality),
+                Now: this.timeProvider.GetUtcNow()));
             uint? target = decision.ShouldUpdate && decision.TargetPrice is { } marketTarget &&
                            MarketPriceSafety.IsSafeAutomaticUnitPrice(stock.ItemName, marketTarget, (uint)stock.TargetStackSize)
                 ? marketTarget
