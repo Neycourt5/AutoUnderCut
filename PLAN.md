@@ -121,6 +121,14 @@ These were checked against code and logs. Logs are from builds up to v1.0.0.73; 
   - Mutation-checked: reverting C2, P2 or D3 fails its test.
   - Release build: 0 warnings, 0 errors.
 
+- [x] Published:
+  - Commits c32b951 and c303a33 pushed to origin/main with annotated tag v1.0.0.76.
+  - Release workflow 41277901151 and Build 41277900405 both succeeded.
+  - Verified 2026-11-01: the public latest `repo.json` and the ZIP manifest report 1.0.0.76 / API 15, with the install and update URLs unchanged.
+  - Both DLLs are at the ZIP root, the same layout as v1.0.0.75.
+  - ZIP is 762,942 bytes. Its SHA-256 matches GitHub's digest: 7141E8A9E375E91915A590E64D34E8DA4414EE82E7EC1BDFC1F90F210953D1AC.
+  - Ready through the Dalamud installer.
+
 Not changed (decision or game test needed): D1, D2, D6, D7a, B1, B3, B4, B6, B7, P3, P4, P5, P6, P7, C5–C11, E1, E2.
 
 Validation boundary: no native game operation was exercised. Still unverified in game:
