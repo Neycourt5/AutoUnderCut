@@ -1895,6 +1895,8 @@ public sealed class ProcurementControllerTests
             // their own tests.
             Config.Current.ProcurementCaptureSharePercent = 100m;
             Config.Current.ProcurementEmergencyMaximumSlotsPerItem = 20;
+            // They also drive the full circuit. Targeted trips have their own tests.
+            Config.Current.TargetedTripsEnabled = false;
             Config.Current.ProcurementRules.Add(new()
             {
                 ItemId = 1, ItemName = "Popcorn", AllowHighQuality = true, RequireHighQuality = true, HuntOnTour = true,

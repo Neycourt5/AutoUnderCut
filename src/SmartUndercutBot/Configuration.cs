@@ -137,6 +137,16 @@ public sealed class Configuration : IPluginConfiguration
     // route still returns early when the bags or the wallet run out.
     public int PriorityWorldsPerTrip { get; set; } = 31;
     public int PriorityMinutesPerTrip { get; set; } = 180;
+    // Targeted trips go straight to the few worlds the price memory shows holding
+    // stock cheap enough to buy, and are back within about TargetedTripMinutes. A
+    // full circuit runs only when memory knows fewer than TargetedTripMinimumWorlds
+    // such worlds, and at most once every FullCircuitIntervalHours.
+    public bool TargetedTripsEnabled { get; set; } = true;
+    public int TargetedTripMinimumWorlds { get; set; } = 3;
+    public int TargetedTripMaximumWorlds { get; set; } = 6;
+    public int TargetedTripMinutes { get; set; } = 40;
+    public int FullCircuitIntervalHours { get; set; } = 6;
+    public DateTimeOffset? LastFullCircuitAt { get; set; }
     // The same freshness limit applies to reusing a quote and approving a buy.
     public int HomePriceMaxAgeMinutes { get; set; } = 30;
     // The home price is the resale anchor, so it is kept fresh - and a retainer pass
@@ -731,6 +741,10 @@ public sealed class Configuration : IPluginConfiguration
         ProcurementBufferValueTarget = Math.Min(ProcurementBufferValueTarget, 999_999_999u);
         PriorityWorldsPerTrip = Math.Clamp(PriorityWorldsPerTrip, 1, 40);
         PriorityMinutesPerTrip = Math.Clamp(PriorityMinutesPerTrip, 5, 480);
+        TargetedTripMaximumWorlds = Math.Clamp(TargetedTripMaximumWorlds, 1, 20);
+        TargetedTripMinimumWorlds = Math.Clamp(TargetedTripMinimumWorlds, 1, TargetedTripMaximumWorlds);
+        TargetedTripMinutes = Math.Clamp(TargetedTripMinutes, 10, 240);
+        FullCircuitIntervalHours = Math.Clamp(FullCircuitIntervalHours, 1, 168);
         HomePriceMaxAgeMinutes = Math.Clamp(HomePriceMaxAgeMinutes, 5, 30);
         LiveWorldStockHuntMaximumItems = Math.Clamp(LiveWorldStockHuntMaximumItems, 1, 40);
         ProcurementBufferGilPercent = Math.Clamp(ProcurementBufferGilPercent, 0m, 100m);

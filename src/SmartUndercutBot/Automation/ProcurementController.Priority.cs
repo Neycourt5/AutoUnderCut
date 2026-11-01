@@ -77,9 +77,15 @@ public sealed partial class ProcurementController
         return await local.ConfigureAwait(false);
     }
 
-    private void PrepareScoutRoute()
+    /// <summary>
+    /// Lay out this trip: a targeted trip to the worlds memory shows holding cheap
+    /// stock, or a full circuit when memory knows too few of them. False when a
+    /// scheduled trip is not worth making at all, which keeps the character home.
+    /// </summary>
+    private bool PrepareScoutRoute()
     {
         var config = configuration.Current;
+        targetedTrip = false;
         // Score each cached hint by the margin a target stack would carry against
         // the home reference. Hints have no retainer id, but they only ever choose
         // where to travel: the home world is excluded here, and every purchase is
@@ -117,6 +123,37 @@ public sealed partial class ProcurementController
             .Where(w => !w.Equals(homeWorld, StringComparison.OrdinalIgnoreCase) &&
                         ProcurementTravelPolicy.CanShopOnWorld(w))
             .ToArray();
+        // The snipe block - food, potions and the rare dyes - is checked on every
+        // world; only the secondary lines rotate. Rotating the whole list is what
+        // let the window walk past the gemdraughts by the third stop of a circuit.
+        var preferredItems = stockHuntRules.Where(IsScoutBlock).Select(r => r.ItemId).ToArray();
+        var secondaryItems = stockHuntRules.Where(r => !IsScoutBlock(r)).Select(r => r.ItemId).ToArray();
+        if (config.TargetedTripsEnabled)
+        {
+            var targets = TripTargets(stockHuntRules);
+            var enough = Math.Clamp(config.TargetedTripMinimumWorlds, 1, Math.Max(1, config.TargetedTripMaximumWorlds));
+            if (targets.Count >= enough || targets.Count > 0 && !FullCircuitDue)
+            {
+                PrepareTargetedRoute(targets, hints, remembered, preferredItems, secondaryItems);
+                stockHuntWorlds = new[] { homeWorld }.Concat(stockHuntWorlds.Skip(1)
+                    .Where(w => scoutItems[w].Any(item => !ScoutKnowledgeIsFresh(w, item)))).ToList();
+                configuration.Save();
+                return true;
+            }
+            if (targets.Count == 0 && !FullCircuitDue && !manualTripRequested)
+            {
+                log.Add(AutomationLogLevel.Information,
+                    $"STAYING HOME: {TargetedTripWaitReason ?? "no remembered world is worth a trip."} " +
+                    "Undercutting carries on.");
+                return false;
+            }
+            // Too little in memory to aim a trip at: a full circuit finds the rest,
+            // and is not run again for the configured interval.
+            config.LastFullCircuitAt = timeProvider.GetUtcNow();
+            log.Add(AutomationLogLevel.Information,
+                $"FULL CIRCUIT: memory knows {targets.Count} world(s) with stock cheap enough to buy, fewer than " +
+                $"the {enough} a targeted trip is aimed at, so every world is read this time.");
+        }
         // Keep the route stable across retainer checkpoints; repricing the hints
         // on each trip must not reorder worlds behind the saved cursor forever. A
         // new remembered market is the one thing that does justify reordering.
@@ -150,11 +187,6 @@ public sealed partial class ProcurementController
         stockHuntWorlds = new[] { homeWorld }.Concat(config.PriorityScoutRoute.Skip(Math.Max(0, resume))).ToList();
         scoutItems.Clear();
         var limit = Math.Max(1, config.PriorityItemsPerWorld);
-        // The snipe block - food, potions and the rare dyes - is checked on every
-        // world; only the secondary lines rotate. Rotating the whole list is what
-        // let the window walk past the gemdraughts by the third stop of a circuit.
-        var preferredItems = stockHuntRules.Where(IsScoutBlock).Select(r => r.ItemId).ToArray();
-        var secondaryItems = stockHuntRules.Where(r => !IsScoutBlock(r)).Select(r => r.ItemId).ToArray();
         for (var i = 0; i < config.PriorityScoutRoute.Count; i++)
         {
             var world = config.PriorityScoutRoute[i];
@@ -183,6 +215,7 @@ public sealed partial class ProcurementController
             $"{string.Join(" > ", stockHuntWorlds.Skip(1).Take(6))}{(stockHuntWorlds.Count > 7 ? " > ..." : string.Empty)}. " +
             "Cached offers only choose where to look; purchasing requires live observations.");
         configuration.Save();
+        return true;
     }
 
     private bool ShouldScoutItem(uint item) =>
@@ -417,7 +450,13 @@ public sealed partial class ProcurementController
         SeedHomePricesFromRepricing();
         PruneStaleScoutKnowledge();
         RestoreScoutKnowledge();
-        PrepareScoutRoute();
+        if (!PrepareScoutRoute())
+        {
+            priorityShopping = false;
+            detail = $"Price search finished; staying home because {TargetedTripWaitReason ?? "no remembered world is worth a trip"}. " +
+                     "Retainer checks continue.";
+            return;
+        }
         comparisonBuyingStarted = null;
         priorityRefreshingHome = priorityHomeRefreshAttempted = false;
         purchasedSlotsByItem.Clear();
@@ -481,13 +520,21 @@ public sealed partial class ProcurementController
         var roomToScout = config.ContinueShoppingWhenStocked || AvailablePurchaseSlots() > 0 ||
             !ResaleStockPolicy.BufferIsComfortable(ResaleBagSlots, ComfortableStockTarget,
                 ResaleBagValue, config.ProcurementBufferValueTarget);
+        // A targeted trip visits only its own few worlds, and keeps a quarter of its
+        // time for buying the winners and getting home.
+        var worldLimit = targetedTrip ? int.MaxValue : config.PriorityWorldsPerTrip;
+        var scouting = targetedTrip
+            ? TimeSpan.FromMinutes(Math.Max(1, config.TargetedTripMinutes) * 0.75)
+            : TimeSpan.FromMinutes(config.PriorityMinutesPerTrip);
         if (roomToScout && SpendableGil() > 0 &&
             market.FreeInventorySlots > config.ProcurementInventoryReserve &&
-            priorityWorldsCompleted < config.PriorityWorldsPerTrip &&
-            timeProvider.GetUtcNow() - priorityDepartedAt < TimeSpan.FromMinutes(config.PriorityMinutesPerTrip))
+            priorityWorldsCompleted < worldLimit &&
+            timeProvider.GetUtcNow() - priorityDepartedAt < scouting)
             return false;
         SavePriorityCursor();
-        FinishPriorityScouting("Scout checkpoint reached. The next trip resumes here.");
+        FinishPriorityScouting(targetedTrip
+            ? "Targeted trip time limit reached; comparing what it saw."
+            : "Scout checkpoint reached. The next trip resumes here.");
         return true;
     }
 
@@ -580,7 +627,8 @@ public sealed partial class ProcurementController
 
     private void SavePriorityCursor()
     {
-        if (!priorityShopping || stockHuntWorldIndex == 0) return;
+        // The cursor belongs to the full circuit; a targeted trip never moves it.
+        if (!priorityShopping || targetedTrip || stockHuntWorldIndex == 0) return;
         configuration.Current.PriorityNextWorld = WorldName;
         configuration.Current.PriorityNextItem = stockHuntRuleIndex < stockHuntRules.Count
             ? stockHuntRules[stockHuntRuleIndex].ItemId : 0;

@@ -334,6 +334,7 @@ public sealed partial class ProcurementController : IDisposable
     {
         if (IsActive || IsStartBlocked?.Invoke() == true)
             return;
+        manualTripRequested = true;
         if (configuration.Current.PriorityShoppingEnabled)
         {
             StartScan(ProcurementRunMode.AutomaticPurchase);
@@ -1165,7 +1166,8 @@ public sealed partial class ProcurementController : IDisposable
             if (stockHuntWorldIndex == 1)
             {
                 priorityDepartedAt = timeProvider.GetUtcNow();
-                var resumeItem = stockHuntRules.FindIndex(x => x.ItemId == configuration.Current.PriorityNextItem);
+                var resumeItem = targetedTrip ? -1
+                    : stockHuntRules.FindIndex(x => x.ItemId == configuration.Current.PriorityNextItem);
                 if (resumeItem >= 0) stockHuntRuleIndex = resumeItem;
             }
             else priorityWorldsCompleted++;
@@ -1245,7 +1247,7 @@ public sealed partial class ProcurementController : IDisposable
         {
             stockHuntWorlds.Add(world);
             var route = configuration.Current.PriorityScoutRoute;
-            if (route.RemoveAll(x => x.Equals(world, StringComparison.OrdinalIgnoreCase)) > 0)
+            if (!targetedTrip && route.RemoveAll(x => x.Equals(world, StringComparison.OrdinalIgnoreCase)) > 0)
             {
                 route.Add(world);
                 configuration.Save();
@@ -1273,6 +1275,11 @@ public sealed partial class ProcurementController : IDisposable
 
     private void CompleteStockHuntScan()
     {
+        if (priorityShopping && targetedTrip)
+        {
+            FinishPriorityScouting("Targeted trip compared.");
+            return;
+        }
         if (priorityShopping)
         {
             configuration.Current.PriorityNextWorld = string.Empty;
@@ -2116,6 +2123,11 @@ public sealed partial class ProcurementController : IDisposable
             return;
         if (ShoppingWaitReason is not null)
             return;
+        // Nothing in memory is worth a trip and a full circuit is not due: the scan
+        // itself would only conclude that, so it is not spent. A sale, new gil or
+        // the next regional scan changes what memory knows.
+        if (TargetedTripWaitReason is not null)
+            return;
 
         // A stocked portfolio slows hunts rather than disabling them. Keep this
         // ahead of income/capacity triggers so routine collections cannot bypass
@@ -2149,6 +2161,7 @@ public sealed partial class ProcurementController : IDisposable
         // do not spend a regional Universalis pass to reach that conclusion. The
         // capacity and income triggers above still wake it the moment a hold lifts.
         nextAutomaticScan = timeProvider.GetUtcNow().AddMinutes(configuration.Current.ProcurementIntervalMinutes);
+        manualTripRequested = false;
         StartScan(ProcurementRunMode.AutomaticPurchase);
     }
 
