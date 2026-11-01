@@ -420,12 +420,7 @@ public sealed partial class ProcurementController
             // The snipe block is never dropped for a thin sales week - a rare dye
             // barely trades at home yet is exactly what a far world underprices.
             // Everything else has to show the demand to earn a price check.
-            .Where(rule => IsScoutBlock(rule) || new[] { false, true }.Any(quality =>
-                ResaleStockPolicy.BuyableQuality(rule, quality, config.BuyHighQualityOnly) &&
-                markets.Where(m => m.ItemId == rule.ItemId).SelectMany(m => m.RecentSales)
-                    .Where(s => s.IsHighQuality == quality && s.PricePerUnit > 0 &&
-                        s.SoldAt >= timeProvider.GetUtcNow().AddDays(-7) && s.SoldAt <= timeProvider.GetUtcNow())
-                    .Sum(s => (long)s.Quantity) >= Math.Max(1, rule.MinimumWeeklyUnitsSold)))
+            .Where(rule => IsScoutBlock(rule) || HasHomeDemand(rule, markets))
             // The scan walks this order, so the block comes first on every world:
             // a trip cut short by the clock or a bad board still priced the food.
             .OrderBy(x => IsScoutBlock(x) ? 0 : 1)
@@ -486,6 +481,18 @@ public sealed partial class ProcurementController
             $"rotating flips, up to {config.PriorityItemsPerWorld} items per away world. " +
             $"Compare after {config.PriorityWorldsPerTrip} worlds or {config.PriorityMinutesPerTrip} minutes; refresh aging home prices before buying.");
         TravelToCurrentWorld();
+    }
+
+    /// <summary>Whether a line sold its weekly minimum at home in the last seven days.</summary>
+    private bool HasHomeDemand(ProcurementRule rule, IReadOnlyList<ProcurementMarketItem> markets)
+    {
+        var config = configuration.Current;
+        var now = timeProvider.GetUtcNow();
+        return new[] { false, true }.Any(quality =>
+            ResaleStockPolicy.BuyableQuality(rule, quality, config.BuyHighQualityOnly) &&
+            markets.Where(m => m.ItemId == rule.ItemId).SelectMany(m => m.RecentSales)
+                .Where(s => s.IsHighQuality == quality && s.PricePerUnit > 0 && s.SoldAt >= now.AddDays(-7) && s.SoldAt <= now)
+                .Sum(s => (long)s.Quantity) >= Math.Max(1, rule.MinimumWeeklyUnitsSold));
     }
 
     private bool PriorityTripShouldReturn()

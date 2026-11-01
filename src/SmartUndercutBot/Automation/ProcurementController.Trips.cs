@@ -45,8 +45,13 @@ public sealed partial class ProcurementController
         var now = timeProvider.GetUtcNow();
         if (rules is null && targetCache is not null && now - targetCacheAt < TimeSpan.FromMinutes(1))
             return targetCache;
+        // By default the lines a trip would actually price: once a home scan has
+        // loaded, the ones with home demand, exactly as the trip itself filters.
+        // Otherwise the gate could start a scan for a line the trip then drops.
         var targets = FindTripTargets(rules ?? configuration.Current.ProcurementRules
-            .Where(x => x.Enabled && x.ItemId != 0 && !x.LiquidateOnly).DistinctBy(x => x.ItemId).ToArray(), now);
+            .Where(x => x.Enabled && x.ItemId != 0 && !x.LiquidateOnly).DistinctBy(x => x.ItemId)
+            .Where(x => priorityDemand.Count == 0 || IsScoutBlock(x) || HasHomeDemand(x, priorityDemand))
+            .ToArray(), now);
         if (rules is null)
         {
             targetCache = targets;

@@ -43,7 +43,7 @@ On 2026-11-01 the user answered the decision list from the review with "All reco
   - Live copy: 26 cleared. They are 24 untracked dyes and materia, whose floors drop from up to 13,264 to 1, plus G4 Strength and Pastel Pink Dye, which keep their tracked basis.
 - [x] 9. **Faster passes.** 2/2 minutes; the clamp minimum is now 2, and `EnableStockAutomation` sets 2.
 - [x] Config v46 migration, seeding, dashboard (listing column, cap, share, trips, stuck stock and raises, restore button), README.
-- [x] Tests: 628 pass (70 new since v76).
+- [x] Tests: 629 pass (71 new since v76).
   - The route harness pins old share, cap, trips and margins for the older mechanics cases; the new behaviour has its own tests.
   - Mutation checks: reverting any of the 16 key lines across the nine decisions fails its test.
   - The real v46 migration was run on a copy of the live settings through the built plugin DLL, including a Newtonsoft round trip: version 44 → 46, all values as listed.

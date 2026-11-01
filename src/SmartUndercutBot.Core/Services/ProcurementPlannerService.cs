@@ -451,7 +451,10 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
             orders.Add(chosen);
             notes.Add(Describe(chosen, true, SelectionReason(chosen, policy.CoverageDaysFor(chosen.Tier))));
             var chosenKey = (chosen.ItemId, chosen.IsHighQuality);
-            itemSlots[chosen.ItemId] = itemSlots.GetValueOrDefault(chosen.ItemId) + 1;
+            // Counted in the retainer listings the lot will fill, the unit owned
+            // stock and the per-item limit are both measured in.
+            itemSlots[chosen.ItemId] = itemSlots.GetValueOrDefault(chosen.ItemId) +
+                ListingsFilled(context.Rules[chosen.ItemId], chosen.Quantity);
             tierSlots[chosen.Tier] = tierSlots.GetValueOrDefault(chosen.Tier) + chosen.SaleSlots;
             boughtUnits[chosenKey] = boughtUnits.GetValueOrDefault(chosenKey) + chosen.Quantity;
             addedByKey[chosenKey] = addedByKey.GetValueOrDefault(chosenKey) + 1;
@@ -599,9 +602,11 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
         bool BudgetBlocked);
 
     /// <summary>
-    /// How many sale slots one item may occupy. The fixed per-rule number is a floor,
-    /// not a ceiling: a market whose own demand supports more inventory is allowed
-    /// more, up to a hard emergency limit that no amount of demand can exceed.
+    /// How many retainer listings one item may occupy. The fixed per-rule number is a
+    /// floor, not a ceiling: a market whose own demand supports more inventory is
+    /// allowed more, up to a hard emergency limit that no amount of demand can exceed.
+    /// Measured in listings, like the owned stock it is compared with, so a line
+    /// listed smaller than it is bought is not refused while demand still has room.
     /// </summary>
     public static int EffectiveMaximumSlots(
         ProcurementEconomicPolicy policy, ProcurementRule rule, ProcurementOrder candidate)
@@ -614,8 +619,15 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
             return rule.MaximumSaleSlots;
         var demandSlots = InventoryCoveragePolicy.DemandJustifiedSlots(
             candidate.OwnSalesPerDay, days + policy.CoverageOvershootDays,
-            Math.Max(1, rule.TargetStackSize), policy.EmergencyMaximumSlotsPerItem);
+            ResaleStockPolicy.ListingSize(rule, rule.ItemName), policy.EmergencyMaximumSlotsPerItem);
         return Math.Min(policy.EmergencyMaximumSlotsPerItem, Math.Max(rule.MaximumSaleSlots, demandSlots));
+    }
+
+    /// <summary>Retainer listings a lot of this size fills.</summary>
+    private static int ListingsFilled(ProcurementRule rule, uint quantity)
+    {
+        var size = ResaleStockPolicy.ListingSize(rule, rule.ItemName);
+        return Math.Max(1, (int)(((long)quantity + size - 1) / size));
     }
 
     private static string SelectionReason(ProcurementOrder order, decimal coverageDays)

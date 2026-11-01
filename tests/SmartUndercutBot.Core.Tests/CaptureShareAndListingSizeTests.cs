@@ -162,6 +162,31 @@ public sealed class CaptureShareAndListingSizeTests
     }
 
     [Fact]
+    public void ALineListedSmallerThanItIsBoughtIsCappedInListingsNotLots()
+    {
+        // Nachos: bought in lots of up to 99, listed 20 at a time. 60 in the bags fill
+        // three listings; at 30% of 147 a day, 2.5 days of demand is six listings,
+        // and 40 more units still fit the coverage ceiling. Counted in lots, the
+        // demand was two "slots" against three held, and nothing more was bought.
+        var nachos = new ProcurementMarketItem(49239, "Nachos",
+            [new(49239, 1, 1, "Siren", 1, 5_594, 20, true), new(49239, 100, 600, "Cactuar", 2, 2_300, 40, true)],
+            Enumerable.Range(1, 4).Select(i => new ProcurementSale(5_594, 30, true, DateTimeOffset.UtcNow.AddDays(-i * 0.5))).ToArray(),
+            HqSalesPerDay: 147m);
+        var rule = new ProcurementRule
+        {
+            ItemId = 49239, ItemName = "Nachos", TargetStackSize = 99, ListingStackSize = 20, MaximumSaleSlots = 1,
+            MinimumWeeklyUnitsSold = 20, AllowHighQuality = true, RequireHighQuality = true, Consumable = true,
+        };
+
+        var plan = planner.BuildPlan(new([nachos], [rule], 20_000_000, 100, 140, 20m, 100,
+            HomeWorld: "Siren", OwnedStock: [new(49239, true, 60, 3, PortfolioTier.Secondary)],
+            Portfolio: new(75m, 10m, 2_500), PortfolioCapacitySlots: 60,
+            Economics: ProcurementEconomicPolicy.Default with { CaptureShare = 0.3m }));
+
+        Assert.Equal(40u, Assert.Single(plan.Orders).Quantity);
+    }
+
+    [Fact]
     public void TheListingSizeIsTheRulesOwnThenWholeStacksForCuratedFoodThenTheLot()
     {
         Assert.Equal(50, ResaleStockPolicy.ListingSize(new() { ListingStackSize = 50, TargetStackSize = 99 }, "Caramel Popcorn"));
