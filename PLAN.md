@@ -47,7 +47,18 @@ On 2026-11-01 the user answered the decision list from the review with "All reco
   - The route harness pins old share, cap, trips and margins for the older mechanics cases; the new behaviour has its own tests.
   - Mutation checks: reverting any of the 16 key lines across the nine decisions fails its test.
   - The real v46 migration was run on a copy of the live settings through the built plugin DLL, including a Newtonsoft round trip: version 44 → 46, all values as listed.
-- [ ] Release build, publish 1.0.0.77, verify.
+- [x] Review follow-up before the tag:
+  - The per-item cap counted demand in purchase lots against stock counted in listings. A line listed smaller than it is bought (Nachos: lot 99, listing 20) was refused with coverage to spare; both now count listings, with a mutation-checked test.
+  - The pre-scan trip gate now uses the same lines as the trip.
+- [x] Published:
+  - Release build: 0 warnings, 0 errors. 629 tests pass.
+  - Commits ab52e48, 8b789f4, 8c3c8de, 8ceee4f, 9fbcf82 and 6a62b36 pushed to origin/main with annotated tag v1.0.0.77.
+  - Release workflow 41290551833 and Build 41290550053 both succeeded.
+  - Verified 2026-11-01:
+    - the public latest `repo.json` and the ZIP manifest report 1.0.0.77 / API 15, with the install and update URLs unchanged;
+    - both DLLs are at the ZIP root;
+    - the ZIP is 811,594 bytes, and its SHA-256 matches GitHub's digest: 9AFD353B704F4CFF6C9F16476121E0764771CA723F747D3142B9E9A88589BFBA.
+  - Ready through the Dalamud installer.
 
 Points where the approved decisions do not fit together; tell the user each one:
 - Materia median purchase is 3–4 units (about 39k), under the 100k per-listing and 25k profit floors. Implemented literally, so about 11 per listing; editable per rule.
