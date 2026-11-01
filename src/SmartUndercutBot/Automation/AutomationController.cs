@@ -130,6 +130,8 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
     private int marketRequestAttempts;
     private bool currentRowMapped;
     private int updatesSubmitted;
+    // Items whose listing cap was reported this pass, so the log says it once.
+    private readonly HashSet<uint> listingCapNoted = [];
     private int retainerIndex;
     private int retainerCount;
     private int listingsSeenAcrossRetainers;
@@ -639,6 +641,7 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
         queue.Clear();
         processedSlots.Clear();
         freshlyRepricedAutoListingSlots.Clear();
+        listingCapNoted.Clear();
         retainerRows.Clear();
         currentIndex = 0;
         updatesSubmitted = 0;
@@ -765,7 +768,7 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
             }
 
             if (configuration.Current.AllowAutomaticListing &&
-                retainerListings.TryAutoListPurchase(procurementLedger, out var fillListing) && fillListing is not null)
+                retainerListings.TryAutoListPurchase(procurementLedger, MayListAnotherOf, out var fillListing) && fillListing is not null)
             {
                 pendingAutoListing = fillListing;
                 verificationDeadline = timeProvider.GetUtcNow().AddSeconds(10);
@@ -777,13 +780,13 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
             log.Add(AutomationLogLevel.Information,
                 currentListings.Count >= 20
                     ? $"{retainerListings.ActiveRetainerName}: already has 20/20 listings; skipped."
-                    : $"{retainerListings.ActiveRetainerName}: no additional eligible 99-stack could be placed; skipped existing-price scan.");
+                    : $"{retainerListings.ActiveRetainerName}: no additional eligible stack could be placed; skipped existing-price scan.");
             FinishCurrentRetainer();
             return;
         }
 
         if (configuration.Current.AllowAutomaticListing &&
-            retainerListings.TryAutoListPurchase(procurementLedger, out var autoListing) && autoListing is not null)
+            retainerListings.TryAutoListPurchase(procurementLedger, MayListAnotherOf, out var autoListing) && autoListing is not null)
         {
             pendingAutoListing = autoListing;
             verificationDeadline = timeProvider.GetUtcNow().AddSeconds(10);
@@ -812,6 +815,30 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
             return;
         }
         BeginCurrentListing();
+    }
+
+    /// <summary>
+    /// Whether another listing of this item fits under the per-item cap. Counted
+    /// across every retainer: the one open now from its live sell list, the others
+    /// from what their last visit recorded. Without the cap a deep position filled
+    /// 28 of 51 slots with one item, and everything else waited behind it.
+    /// </summary>
+    private bool MayListAnotherOf(uint itemId)
+    {
+        var cap = configuration.Current.ProcurementEmergencyMaximumSlotsPerItem;
+        var here = retainerListings.ReadCurrentListings();
+        var activeId = retainerListings.ActiveRetainerId != 0
+            ? retainerListings.ActiveRetainerId
+            : here.FirstOrDefault()?.RetainerId ?? 0;
+        var listed = here.Count(x => x.ItemId == itemId) +
+                     portfolioListings.Values.Count(x => x.RetainerId != activeId && x.ItemId == itemId);
+        if (listed < cap)
+            return true;
+        if (listingCapNoted.Add(itemId))
+            log.Add(AutomationLogLevel.Information,
+                $"LISTING CAP item {itemId}: already {listed} listing(s) across the retainers, the most one item may " +
+                $"hold ({cap}); the rest stays in the bags until some of it sells.");
+        return false;
     }
 
     private void CapturePortfolioListings(IReadOnlyList<RetainerListing> listings)
@@ -898,7 +925,7 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
         pendingAutoListing = null;
         freshlyRepricedAutoListingSlots.Add(verified.MarketSlot);
         Transition(AutomationState.ReadingListings,
-            "Validated listing created; looking for the next eligible 99-stack.");
+            "Validated listing created; looking for the next eligible stack.");
     }
 
     private void BeginSafetySeedPricing(RetainerListing listing, int visibleRowCount)
@@ -1515,7 +1542,7 @@ public sealed class AutomationController : IRetainerAutomation, IDisposable
             marketTask = null;
             currentMarket = null;
             currentDecision = null;
-            Transition(AutomationState.ReadingListings, "Live price committed; looking for the next eligible 99-stack.");
+            Transition(AutomationState.ReadingListings, "Live price committed; looking for the next eligible stack.");
             return;
         }
         currentIndex++;

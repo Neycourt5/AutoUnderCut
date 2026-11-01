@@ -254,8 +254,9 @@ public sealed partial class ProcurementController : IDisposable
                 // Count actual replacement lots even before demand is loaded. The
                 // general buffer can cap a deep holding by its old per-rule limit.
                 CollectBagStock().Where(IsCore).Sum(x => (int)Math.Min(int.MaxValue,
-                    ((long)x.Quantity + Math.Max(1, rules[x.ItemId].TargetStackSize) - 1) /
-                    Math.Max(1, rules[x.ItemId].TargetStackSize))), config.PreferredPortfolioTargetPercent);
+                    ((long)x.Quantity + ListingSize(rules[x.ItemId]) - 1) / ListingSize(rules[x.ItemId]))),
+                config.PreferredPortfolioTargetPercent);
+            static int ListingSize(ProcurementRule rule) => ResaleStockPolicy.ListingSize(rule, rule.ItemName);
         }
     }
 
@@ -699,7 +700,7 @@ public sealed partial class ProcurementController : IDisposable
             Portfolio: config.PortfolioGates,
             PortfolioCapacitySlots: PortfolioCapacitySlots(),
             MarketTaxPercent: config.Fees.MarketTaxPercent,
-            Economics: config.EconomicPolicy,
+            Economics: Economics,
             NonPreferredGilBudget: NonPreferredSpendableGil(),
             NonPreferredSaleSlots: OrdinaryPurchaseSlots()));
         LogPortfolioDecisions("DEAL SEARCH", Plan);
@@ -1308,7 +1309,7 @@ public sealed partial class ProcurementController : IDisposable
             Portfolio: config.PortfolioGates,
             PortfolioCapacitySlots: PortfolioCapacitySlots(),
             MarketTaxPercent: config.Fees.MarketTaxPercent,
-            Economics: config.EconomicPolicy,
+            Economics: Economics,
             NonPreferredGilBudget: NonPreferredSpendableGil(),
             NonPreferredSaleSlots: OrdinaryPurchaseSlots()));
         LogPortfolioDecisions("LIVE TOUR", Plan);
@@ -1451,7 +1452,7 @@ public sealed partial class ProcurementController : IDisposable
             !ResaleStockPolicy.BuyableQuality(rule, currentOrder.IsHighQuality, configuration.Current.BuyHighQualityOnly) ||
             (!CanSweepBargains(currentOrder) &&
              CollectOwnedStock().Where(x => x.ItemId == currentOrder.ItemId).Sum(x => x.SaleSlots) >=
-                ProcurementPlannerService.EffectiveMaximumSlots(configuration.Current.EconomicPolicy, rule, currentOrder)))
+                ProcurementPlannerService.EffectiveMaximumSlots(Economics, rule, currentOrder)))
         {
             SkipCurrentOrder($"SKIPPED BUY {currentOrder.ItemName}: its current rule no longer permits this order.");
             return;
@@ -1549,9 +1550,9 @@ public sealed partial class ProcurementController : IDisposable
         }
         var ownedUnits = (ulong)CollectOwnedStock().Where(x => x.ItemId == live.ItemId &&
             x.IsHighQuality == live.IsHighQuality).Sum(x => (long)x.Quantity);
-        var economics = configuration.Current.EconomicPolicy;
+        var economics = Economics;
         if (!InventoryCoveragePolicy.CanAdd(ownedUnits, live.Quantity, currentOrder.SalesPerDay,
-                economics.CoverageDaysFor(currentOrder.Tier), economics.CoverageOvershootDays))
+                currentOrder.CaptureShare, economics.CoverageDaysFor(currentOrder.Tier), economics.CoverageOvershootDays))
         {
             SkipCurrentOrder($"SKIPPED BUY {currentOrder.ItemName}: current demand coverage does not permit more stock.");
             return;
@@ -1640,7 +1641,7 @@ public sealed partial class ProcurementController : IDisposable
             PricePerUnit = currentLiveListing.PricePerUnit,
             Quantity = currentLiveListing.Quantity,
         };
-        var stackSize = configuration.Current.ProcurementRules.FirstOrDefault(x => x.ItemId == actual.ItemId)?.TargetStackSize ?? 99;
+        var buyRule = configuration.Current.ProcurementRules.FirstOrDefault(x => x.ItemId == actual.ItemId);
         var pricingRule = configuration.Current.PerItemRules.TryGetValue(actual.ItemId, out var existingRule)
             ? existingRule
             : configuration.Current.GlobalRule.Clone();
@@ -1664,6 +1665,8 @@ public sealed partial class ProcurementController : IDisposable
             TargetSalePrice = Math.Max(actual.TargetSalePrice,
                 PositionCostPolicy.MinimumListingPrice(pricingRule, configuration.Current.Fees)),
         };
+        // Listed in the size its buyers take, not the size it was bought in.
+        var stackSize = buyRule is null ? 99 : ResaleStockPolicy.ListingQuantity(buyRule, buyRule.ItemName, actual.TargetSalePrice);
         ledger.RecordPurchase(actual, stackSize);
         // Owned stock just changed, so the next cap check must not use the cache.
         portfolioSummary = null;
@@ -1804,8 +1807,8 @@ public sealed partial class ProcurementController : IDisposable
         // under that same bar. Re-deriving it at the full bar here would reject at
         // the board exactly what the planner just approved.
         var policy = order.IsFillOrder
-            ? config.EconomicPolicy.RelaxedTo(config.ProcurementFillRoiPercent)
-            : config.EconomicPolicy;
+            ? Economics.RelaxedTo(config.ProcurementFillRoiPercent)
+            : Economics;
         // Mirror the planner's reference: a full target stack, not this listing's
         // quantity, so a part stack cannot land in a different margin band here than
         // it did during planning.
@@ -1815,7 +1818,7 @@ public sealed partial class ProcurementController : IDisposable
         // before the settings changed can never buy under a laxer rule than the one
         // now in force.
         return Math.Max(order.RequiredRoiPercent, PortfolioPolicy.RequiredRoiPercent(
-            policy, rule?.PreferredStock == true, order.SalesPerDay, referenceValuePerSlot));
+            policy, rule is { PreferredStock: true } or { Consumable: true }, order.SalesPerDay, referenceValuePerSlot));
     }
 
     private ulong positionUnitsBeforePurchase;
@@ -2455,7 +2458,10 @@ public sealed partial class ProcurementController : IDisposable
             var held = (uint)Math.Clamp(holdings.GetValueOrDefault(key) - reserve, 0L, uint.MaxValue);
             // The ledger describes the same inventory, not another pile of stock.
             var quantity = Math.Max(held, entry?.PendingQuantity ?? 0);
-            var size = Math.Max(1, rule?.TargetStackSize ?? entry?.TargetStackSize ?? 99);
+            // Counted in retainer listings, which is what this stock can refill.
+            var size = rule is not null
+                ? ResaleStockPolicy.ListingSize(rule, rule.ItemName)
+                : Math.Max(1, entry?.TargetStackSize ?? 99);
             var slots = (int)(((long)quantity + size - 1) / size);
             // Cap by what this item may actually occupy on the retainers. A pile of
             // 999 materia is not 50 stacks of trading buffer when its rule allows one
@@ -2464,7 +2470,9 @@ public sealed partial class ProcurementController : IDisposable
             if (rule is not null && !rule.PreferredStock && rule.MaximumSaleSlots > 0)
                 slots = Math.Min(slots, Math.Min(config.ProcurementEmergencyMaximumSlotsPerItem,
                     Math.Max(rule.MaximumSaleSlots, InventoryCoveragePolicy.DemandJustifiedSlots(
-                        HomeSalesPerDay(key.ItemId, key.IsHighQuality), config.ProcurementPreferredCoverageDays,
+                        HomeSalesPerDay(key.ItemId, key.IsHighQuality) *
+                        Economics.CaptureShareFor(key.ItemId, key.IsHighQuality),
+                        config.ProcurementPreferredCoverageDays,
                         size, config.ProcurementEmergencyMaximumSlotsPerItem))));
             if (entry is not null && rule?.PreferredStock != true)
                 slots = Math.Max(slots, (int)Math.Min(entry.PendingQuantity, (long)entry.MaximumListingSlots - entry.ListingsCreated));

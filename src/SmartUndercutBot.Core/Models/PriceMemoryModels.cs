@@ -121,6 +121,15 @@ public sealed record MarketCandidate(
     public decimal UnitsPerSale => SalesPerDay <= 0 ? 0m : UnitsPerDay / SalesPerDay;
 }
 
+/// <summary>
+/// A stretch of time the sale tracker was listening. Sales outside these spans
+/// were never seen, so a share measured against all elapsed time would read low.
+/// </summary>
+public sealed record WatchedSpan(DateTimeOffset Start, DateTimeOffset End)
+{
+    public TimeSpan Duration => End > Start ? End - Start : TimeSpan.Zero;
+}
+
 /// <summary>The persisted shape of the price memory.</summary>
 public sealed class PriceMemoryData
 {
@@ -130,4 +139,5 @@ public sealed class PriceMemoryData
     public List<RetainerSale> Sales { get; set; } = [];
     public List<MarketCandidate> Candidates { get; set; } = [];
     public DateTimeOffset? CandidatesObservedAt { get; set; }
+    public List<WatchedSpan> Watched { get; set; } = [];
 }

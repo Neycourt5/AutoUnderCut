@@ -124,7 +124,14 @@ public sealed class ProcurementRule
     public bool Enabled { get; set; } = true;
     public bool AllowHighQuality { get; set; }
     public uint MaximumUnitPrice { get; set; }
+    // The largest market listing bought in one go, and the planner's unit of stock.
     public int TargetStackSize { get; set; } = 99;
+    // Units per retainer listing when it differs from the purchase lot. Buyers take
+    // whole listings, so this matches what they usually buy. Zero means the lot size.
+    public int ListingStackSize { get; set; }
+    // Food or medicine. Held to the consumable margin bar whether or not it is
+    // pinned as preferred stock.
+    public bool Consumable { get; set; }
     public int MaximumSaleSlots { get; set; } = 8;
     public int MinimumWeeklyUnitsSold { get; set; } = 20;
     public bool RequireHighQuality { get; set; }
@@ -273,9 +280,16 @@ public sealed record ProcurementOrder(
     ulong OwnedUnitsBefore = 0,
     ulong TargetUnits = 0,
     decimal AllocationScore = 0m,
-    decimal RequiredRoiPercent = 0m)
+    decimal RequiredRoiPercent = 0m,
+    // The share of the market's sales our listings are expected to win. Sizing and
+    // time-to-sell use it; whether a market is liquid is a property of the whole
+    // market and does not.
+    decimal CaptureShare = 1m)
 {
     private int Slots => Math.Max(1, SaleSlots);
+
+    /// <summary>Units a day our own listings are expected to sell.</summary>
+    public decimal OwnSalesPerDay => SalesPerDay * Math.Clamp(CaptureShare, 0.01m, 1m);
 
     /// <summary>Gil actually at risk in this purchase, fee included.</summary>
     public ulong CapitalAtRisk => LandedCost > 0 ? LandedCost : FeeModel.Default.LandedCost(PricePerUnit, Quantity);
@@ -288,7 +302,7 @@ public sealed record ProcurementOrder(
 
     public ulong ResaleValuePerSaleSlot => ExpectedResaleValue / (ulong)Slots;
     public ulong ExpectedProfitPerSaleSlot => ExpectedProfit / (ulong)Slots;
-    public decimal EstimatedDaysToSell => PortfolioPolicy.DaysToSell(Quantity, SalesPerDay);
+    public decimal EstimatedDaysToSell => PortfolioPolicy.DaysToSell(Quantity, OwnSalesPerDay);
 
     /// <summary>
     /// Expected gil generated per day of sale-slot occupancy. The primary measure of
@@ -303,7 +317,7 @@ public sealed record ProcurementOrder(
     /// <see cref="EstimatedDaysToSell"/> when the position is empty.
     /// </summary>
     public decimal MarginalDaysToClear =>
-        PortfolioPolicy.MarginalDaysToClear(OwnedUnitsBefore, Quantity, SalesPerDay);
+        PortfolioPolicy.MarginalDaysToClear(OwnedUnitsBefore, Quantity, OwnSalesPerDay);
 
     /// <summary>
     /// Gil per day of committed capital for this stack given the inventory in front
@@ -312,15 +326,15 @@ public sealed record ProcurementOrder(
     /// position; this is what it earns where it will actually sit.
     /// </summary>
     public decimal MarginalGilPerDay =>
-        PortfolioPolicy.MarginalGilPerDay(ExpectedProfit, OwnedUnitsBefore, Quantity, SalesPerDay) / Slots;
+        PortfolioPolicy.MarginalGilPerDay(ExpectedProfit, OwnedUnitsBefore, Quantity, OwnSalesPerDay) / Slots;
 
-    /// <summary>Days of this market's demand already held before the purchase.</summary>
+    /// <summary>Days of our own expected sales already held before the purchase.</summary>
     public decimal InventoryCoverageDays =>
-        InventoryCoveragePolicy.CoverageDays(OwnedUnitsBefore, SalesPerDay);
+        InventoryCoveragePolicy.CoverageDays(OwnedUnitsBefore, OwnSalesPerDay);
 
-    /// <summary>Days of demand held once this stack lands.</summary>
+    /// <summary>Days of our own expected sales held once this stack lands.</summary>
     public decimal CoverageDaysAfterPurchase =>
-        InventoryCoveragePolicy.CoverageDays(OwnedUnitsBefore + Quantity, SalesPerDay);
+        InventoryCoveragePolicy.CoverageDays(OwnedUnitsBefore + Quantity, OwnSalesPerDay);
 
     /// <summary>
     /// The one ROI definition in the codebase: profit over the gil actually put at

@@ -79,6 +79,36 @@ public static class ResaleStockPolicy
     public static bool BuyableQuality(ProcurementRule rule, bool hq, bool highQualityOnly) =>
         QualityAllowed(rule, hq) && (hq || !highQualityOnly || !TradesHighQuality(rule));
 
+    /// <summary>
+    /// The least a listing of a line sized to its buyers may be worth. Buyers take
+    /// whole listings, so a listing only as big as one typical purchase sells
+    /// soonest - but a forty-thousand-gil listing is a wasted retainer slot.
+    /// </summary>
+    public const uint MinimumListingValue = 100_000;
+
+    /// <summary>
+    /// Units per retainer listing: the rule's own listing size when it has one,
+    /// whole 99-stacks for the curated consumables, otherwise the purchase lot.
+    /// </summary>
+    public static int ListingSize(ProcurementRule? rule, string name) =>
+        rule?.ListingStackSize is > 0 and var size ? Math.Min(size, 999)
+        : IsCuratedConsumable(name) ? 99
+        : Math.Max(1, rule?.TargetStackSize ?? 1);
+
+    /// <summary>
+    /// The listing size at this price, raised until one listing is worth
+    /// <see cref="MinimumListingValue"/>. Only lines with an explicit listing size
+    /// are sized to their buyers; everything else keeps the size it always had.
+    /// </summary>
+    public static int ListingQuantity(ProcurementRule? rule, string name, uint unitPrice)
+    {
+        var size = ListingSize(rule, name);
+        if (rule?.ListingStackSize is not > 0 || unitPrice == 0)
+            return size;
+        var needed = (int)Math.Min(999u, (MinimumListingValue + unitPrice - 1) / unitPrice);
+        return Math.Clamp(Math.Max(size, needed), 1, 999);
+    }
+
     public static bool CanListFromBags(ProcurementRule? rule, string name, bool hq) =>
         rule?.Enabled != false && (rule is null || QualityAllowed(rule, hq)) &&
         (rule?.ListFromBags ?? (hq && IsCuratedConsumable(name)));

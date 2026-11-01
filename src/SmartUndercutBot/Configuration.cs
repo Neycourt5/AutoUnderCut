@@ -75,8 +75,12 @@ public sealed class Configuration : IPluginConfiguration
     // Days of demand worth of cheap competing stock the market swallows before it
     // should move our resale anchor or provoke an undercut.
     public decimal ProcurementAnchorAbsorptionDays { get; set; } = 0.5m;
-    // Hard concentration limit no amount of demand may exceed.
-    public int ProcurementEmergencyMaximumSlotsPerItem { get; set; } = 20;
+    // Hard concentration limit no amount of demand may exceed, and the most
+    // listings one item may hold across the retainers: 15% of 60.
+    public int ProcurementEmergencyMaximumSlotsPerItem { get; set; } = 9;
+    // The share of each home market's sales our listings are assumed to win until
+    // the sale tracker has measured the real one. Holdings are sized on it.
+    public decimal ProcurementCaptureSharePercent { get; set; } = 30m;
 
     /// <summary>
     /// The retainer sale tax the game itself last reported, in percent. Every
@@ -235,7 +239,8 @@ public sealed class Configuration : IPluginConfiguration
         AbsoluteMinimumRoiPercent: ProcurementAbsoluteMinimumRoiPercent,
         EmergencyMaximumSlotsPerItem: ProcurementEmergencyMaximumSlotsPerItem,
         AnchorAbsorptionDays: ProcurementAnchorAbsorptionDays,
-        BulkPreferredPurchases: ContinueShoppingWhenStocked);
+        BulkPreferredPurchases: ContinueShoppingWhenStocked,
+        CaptureShare: ProcurementCaptureSharePercent / 100m);
 
     public PortfolioGates PortfolioGates => new(
         PreferredPortfolioTargetPercent, OpportunisticPortfolioMaximumPercent, ProcurementMinimumProfitPerSaleSlot);
@@ -693,6 +698,7 @@ public sealed class Configuration : IPluginConfiguration
         ProcurementLowValueRoiPercent = Math.Clamp(ProcurementLowValueRoiPercent, 8m, 1_000m);
         ProcurementAnchorAbsorptionDays = Math.Clamp(ProcurementAnchorAbsorptionDays, 0m, 0.5m);
         ProcurementEmergencyMaximumSlotsPerItem = Math.Clamp(ProcurementEmergencyMaximumSlotsPerItem, 1, 60);
+        ProcurementCaptureSharePercent = Math.Clamp(ProcurementCaptureSharePercent, 5m, 100m);
         // A nonsense reading must never widen a margin. Anything outside the range
         // the game can actually charge falls back to the standard rate.
         if (ObservedMarketTaxPercent is < 0m or >= 100m)

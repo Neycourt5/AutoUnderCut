@@ -66,7 +66,8 @@ public interface IRetainerListingService
     void CancelBankDialog();
     bool CloseRetainerMenu();
     bool AdvanceTalk();
-    bool TryAutoListPurchase(ProcurementLedger ledger, out PendingAutoListing? pending);
+    // mayListItem refuses an item that already fills its share of the retainers.
+    bool TryAutoListPurchase(ProcurementLedger ledger, Func<uint, bool>? mayListItem, out PendingAutoListing? pending);
     IReadOnlyList<BagListingCandidate> ReadBagListingCandidates();
     bool TryListBagItem(
         BagListingCandidate candidate,

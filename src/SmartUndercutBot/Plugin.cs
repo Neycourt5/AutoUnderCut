@@ -293,6 +293,9 @@ public sealed class Plugin : IDalamudPlugin
         try
         {
             priceMemory.Update();
+            // The measured capture share counts only time the sale tracker heard.
+            if (configuration.Current.SaleTrackingEnabled && PlayerState.IsLoaded)
+                priceMemory.Memory.MarkWatching(DateTimeOffset.UtcNow);
             marketScan.Update();
         }
         catch (Exception ex)

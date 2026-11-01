@@ -523,6 +523,22 @@ public sealed class ProcurementControllerTests
     }
 
     [Fact]
+    public void PurchasedStockIsListedInTheSizeItsBuyersTakeNotTheSizeItWasBought()
+    {
+        using var run = new Route();
+        var rule = run.Config.Current.ProcurementRules[0];
+        rule.ListingStackSize = 50;
+        run.ReachPurchase();
+        run.Game.Inventory = 99;
+        run.Tick();
+        var entry = Assert.Single(run.Ledger.Snapshot());
+        Assert.Equal(99u, entry.PendingQuantity);
+        // Fifty a listing, nudged up only as far as a 100,000 gil listing needs.
+        Assert.Equal(ResaleStockPolicy.ListingQuantity(rule, rule.ItemName, entry.TargetSalePrice), entry.TargetStackSize);
+        Assert.InRange(entry.TargetStackSize, 50, 60);
+    }
+
+    [Fact]
     public void StopAbortsTravelAndDoesNotAutomaticallyRestart()
     {
         using var run = new Route();
@@ -1874,6 +1890,11 @@ public sealed class ProcurementControllerTests
             // shipped default now sweeps all 31 away worlds. Tests that assert a
             // full circuit set this back explicitly.
             Config.Current.PriorityWorldsPerTrip = 8;
+            // These fixtures were written against whole-market sizing and the old
+            // twenty-slot cap. Capture-share sizing and the nine-listing cap have
+            // their own tests.
+            Config.Current.ProcurementCaptureSharePercent = 100m;
+            Config.Current.ProcurementEmergencyMaximumSlotsPerItem = 20;
             Config.Current.ProcurementRules.Add(new()
             {
                 ItemId = 1, ItemName = "Popcorn", AllowHighQuality = true, RequireHighQuality = true, HuntOnTour = true,

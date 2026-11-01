@@ -368,13 +368,28 @@ public sealed class BagListingController : IDisposable
                 continue;
             }
 
+            // A listing sized to its buyers must still be worth a retainer slot at
+            // the price it is actually going up at.
+            var buyRule = config.ProcurementRules.FirstOrDefault(x => x.ItemId == stock.ItemId);
+            var size = Math.Max(stock.TargetStackSize, ResaleStockPolicy.ListingQuantity(buyRule, stock.ItemName, target.Value));
+            var stacks = size == stock.TargetStackSize
+                ? stock.StackCount
+                : (int)Math.Min(stock.StackCount, stock.ListableQuantity / (uint)size);
+            if (stacks == 0)
+            {
+                log.Add(AutomationLogLevel.Information,
+                    $"BAG STOCK HELD {stock.ItemName}: {stock.ListableQuantity:N0} unit(s) are fewer than one {size}-unit " +
+                    $"listing, the size that keeps a listing at {target.Value:N0} gil worth at least " +
+                    $"{ResaleStockPolicy.MinimumListingValue:N0}.");
+                continue;
+            }
             plannedPrices[(stock.ItemId, stock.IsHighQuality)] = target.Value;
             ledger.QueueExistingStock(stock.ItemId, stock.ItemName, stock.ListableQuantity, target.Value,
-                stock.TargetStackSize, stock.IsHighQuality, stock.ReservedQuantity,
-                ResaleStockPolicy.IsCuratedConsumable(stock.ItemName), stock.StackCount);
-            queuedStacks += stock.StackCount;
+                size, stock.IsHighQuality, stock.ReservedQuantity,
+                ResaleStockPolicy.IsCuratedConsumable(stock.ItemName), stacks);
+            queuedStacks += stacks;
             log.Add(AutomationLogLevel.Information,
-                $"BAG STOCK QUEUED {stock.ItemName}: up to {stock.StackCount} stack(s) of {stock.TargetStackSize} at {target.Value:N0} gil; keeping {stock.ReservedQuantity:N0} in bags.");
+                $"BAG STOCK QUEUED {stock.ItemName}: up to {stacks} stack(s) of {size} at {target.Value:N0} gil; keeping {stock.ReservedQuantity:N0} in bags.");
         }
 
         ScheduleNextAttempt();
@@ -435,14 +450,16 @@ public sealed class BagListingController : IDisposable
                 var reserve = ResaleStockPolicy.BagReserve(buyRule, group.Key.ItemName,
                     (uint)configuration.Current.BagListingReservePerItem);
                 var fullStacks = ResaleStockPolicy.IsCuratedConsumable(group.Key.ItemName);
-                var stackSize = fullStacks ? 99 : Math.Max(1, buyRule?.TargetStackSize ?? 1);
+                // The size its buyers take: 50 for popcorn, 99 for gemdraughts.
+                var stackSize = ResaleStockPolicy.ListingSize(buyRule, group.Key.ItemName);
                 var ownedSlots = automation.ListedStock.Where(x => x.ItemId == group.Key.ItemId).Sum(x => x.SaleSlots);
                 var slotLimit = Math.Max(0, (buyRule?.LiquidateOnly == true ? buyRule.MaximumSaleSlots : configuration.Current.ProcurementEmergencyMaximumSlotsPerItem) - ownedSlots);
                 var surplus = total > reserve ? total - reserve : 0;
                 var listable = eligible ? Math.Min(surplus, (uint)(slotLimit * stackSize)) : 0;
                 if (fullStacks)
-                    listable = Math.Min(listable / 99, (uint)group.Sum(x => x.Quantity / 99)) * 99;
-                var sourceSlots = fullStacks ? (int)(listable / 99)
+                    listable = Math.Min(listable / (uint)stackSize,
+                        (uint)group.Sum(x => x.Quantity / stackSize)) * (uint)stackSize;
+                var sourceSlots = fullStacks ? (int)(listable / (uint)stackSize)
                     : (int)group.Sum(x => ((long)x.Quantity + stackSize - 1) / stackSize);
                 var stackCount = listable == 0 ? 0 : Math.Min(slotLimit, sourceSlots);
                 var pricingRule = configuration.Current.GetEffectiveRule(group.Key.ItemId);

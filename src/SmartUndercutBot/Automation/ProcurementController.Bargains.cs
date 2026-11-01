@@ -12,7 +12,7 @@ public sealed partial class ProcurementController
     private bool CanSweepBargains(ProcurementOrder order)
     {
         var config = configuration.Current;
-        var policy = config.EconomicPolicy;
+        var policy = Economics;
         return priorityShopping && !stockHuntScanning && config.ContinueShoppingWhenStocked &&
             !order.IsFillOrder && order.Tier == PortfolioTier.Core && IsPreferredStock(order.ItemId) &&
             policy.UsesBulkStockTarget(true, order.SalesPerDay,
@@ -54,7 +54,7 @@ public sealed partial class ProcurementController
             ResaleListings: homePrices.GetValueOrDefault(template.ItemId) ?? [],
             Portfolio: config.PortfolioGates, PortfolioCapacitySlots: PortfolioCapacitySlots(),
             MarketTaxPercent: config.Fees.MarketTaxPercent,
-            Economics: config.EconomicPolicy));
+            Economics: Economics));
         if (refreshed.Orders.FirstOrDefault() is { } next)
         {
             currentOrder = next with

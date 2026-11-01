@@ -44,7 +44,7 @@ namespace SmartUndercutBot.Core.Tests.Automation
         public virtual void CancelPriceEditor() { }
         public virtual void CancelBankDialog() { }
         public virtual Vector3? GetPlayerPosition() => Vector3.Zero;
-        public virtual bool TryAutoListPurchase(ProcurementLedger ledger, out PendingAutoListing? pending)
+        public virtual bool TryAutoListPurchase(ProcurementLedger ledger, Func<uint, bool>? mayListItem, out PendingAutoListing? pending)
         { pending = null; return false; }
         public virtual bool VerifyAutoListing(PendingAutoListing pending) => throw new NotSupportedException();
         public virtual bool TryReadListing(short slot, out RetainerListing? listing) => throw new NotSupportedException();

@@ -42,9 +42,21 @@ public sealed record ProcurementEconomicPolicy(
     decimal AnchorAbsorptionDays = 0.5m,
     // Bulk preferred fast movers are held for repeated resale, so their unit
     // coverage replaces the ordinary per-item listing-count limit.
-    bool BulkPreferredPurchases = false)
+    bool BulkPreferredPurchases = false,
+    // The share of each market's sales our listings are assumed to win, as a
+    // fraction. Coverage counts days of our own sales, not the whole market's:
+    // sized at 100%, one line bought a week of every seller's volume at once.
+    decimal CaptureShare = 1m,
+    // Shares the sale tracker has measured, per item and quality. They replace the
+    // assumption above for those lines.
+    IReadOnlyDictionary<(uint ItemId, bool IsHighQuality), decimal>? MeasuredCaptureShares = null)
 {
     public static ProcurementEconomicPolicy Default { get; } = new();
+
+    public decimal CaptureShareFor(uint itemId, bool highQuality) =>
+        Math.Clamp(MeasuredCaptureShares is not null && MeasuredCaptureShares.TryGetValue((itemId, highQuality), out var measured)
+            ? measured
+            : CaptureShare, 0.01m, 1m);
 
     public bool UsesBulkStockTarget(bool preferred, decimal salesPerDay, ulong valuePerStack) =>
         BulkPreferredPurchases && preferred && PreferredCoverageDays > 0 &&

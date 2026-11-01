@@ -280,7 +280,7 @@ public sealed partial class ProcurementController
             HighQualityOnly: config.BuyHighQualityOnly, ResaleListings: homePrices.Values.SelectMany(x => x).ToArray(),
             Portfolio: config.PortfolioGates, PortfolioCapacitySlots: PortfolioCapacitySlots(),
             MarketTaxPercent: config.Fees.MarketTaxPercent,
-            Economics: config.EconomicPolicy,
+            Economics: Economics,
             NonPreferredGilBudget: NonPreferredSpendableGil(),
             NonPreferredSaleSlots: OrdinaryPurchaseSlots()));
         LogPortfolioDecisions("SCOUT", compared);
@@ -344,7 +344,7 @@ public sealed partial class ProcurementController
             // absolute floor, the low-value bar and every coverage target stand, so
             // this can buy good stock a little cheaper - never junk, and never more
             // than the market's own demand supports.
-            Economics: config.EconomicPolicy.RelaxedTo(config.ProcurementFillRoiPercent),
+            Economics: Economics.RelaxedTo(config.ProcurementFillRoiPercent),
             NonPreferredGilBudget: (uint)Math.Max(0m, NonPreferredSpendableGil() -
                 compared.Orders.Where(o => !IsPreferredStock(o.ItemId)).Sum(o => (decimal)o.CapitalAtRisk)),
             NonPreferredSaleSlots: Math.Max(0, OrdinaryPurchaseSlots() -
@@ -564,7 +564,7 @@ public sealed partial class ProcurementController
             var competing = listings.Where(x => x.IsHighQuality == quality && x.PricePerUnit > 0 && x.Quantity > 0 &&
                     !owned.Contains(x.RetainerId))
                 .Sum(x => (decimal)x.Quantity);
-            var absorbable = decimal.Floor(HomeSalesPerDay(itemId, quality) * config.EconomicPolicy.AnchorAbsorptionDays);
+            var absorbable = decimal.Floor(HomeSalesPerDay(itemId, quality) * Economics.AnchorAbsorptionDays);
             if (competing == 0 || competing <= absorbable)
                 return false;
         }
@@ -629,7 +629,7 @@ public sealed partial class ProcurementController
                     HighQualityOnly: config.BuyHighQualityOnly, ResaleListings: resale,
                     Portfolio: config.PortfolioGates, PortfolioCapacitySlots: PortfolioCapacitySlots(),
                     MarketTaxPercent: config.Fees.MarketTaxPercent,
-                    Economics: config.EconomicPolicy,
+                    Economics: Economics,
                     NonPreferredGilBudget: NonPreferredSpendableGil(),
                     NonPreferredSaleSlots: OrdinaryPurchaseSlots()));
                 candidates.AddRange(plan.Orders);

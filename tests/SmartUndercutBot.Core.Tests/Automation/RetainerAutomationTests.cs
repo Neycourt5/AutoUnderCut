@@ -380,6 +380,22 @@ public sealed class RetainerAutomationTests
         Assert.Equal(new[] { (200u, (short)4, 2_499u) }, run.Game.Commits);
     }
 
+    [Theory]
+    [InlineData(8, true)]
+    [InlineData(9, false)]
+    public void NoItemIsListedPastItsShareOfTheRetainers(int alreadyListed, bool allowed)
+    {
+        using var run = new Session();
+        for (short slot = 0; slot < alreadyListed; slot++)
+            run.Game.Listings.Add(new(1, "Test Retainer", slot, 300, "Test Stew", 50, 2_000, false));
+        run.Game.QueuedListingItem = 300;
+        run.Bot.StartNow();
+        for (var i = 0; i < 100 && run.Game.ListingCapAnswers.Count == 0; i++)
+            run.Tick();
+        // Nine of sixty slots is the most one item may hold.
+        Assert.Equal(allowed, run.Game.ListingCapAnswers.First());
+    }
+
     [Fact]
     public void AHealthyListingIsStillOpenedNormally()
     {
@@ -628,8 +644,13 @@ public sealed class RetainerAutomationTests
         public override bool SelectSellItems() { menuOpen = false; sellOpen = true; return true; }
         public override bool CloseSellList() { sellOpen = false; menuOpen = true; return true; }
         public override bool CloseRetainerMenu() { menuOpen = false; BellOpen = true; CompletedPasses++; return true; }
-        public override bool TryAutoListPurchase(ProcurementLedger ledger, out PendingAutoListing? pending)
+        // An item queued for listing: each attempt records whether the cap allowed it.
+        public uint QueuedListingItem;
+        public List<bool> ListingCapAnswers = [];
+        public override bool TryAutoListPurchase(ProcurementLedger ledger, Func<uint, bool>? mayListItem, out PendingAutoListing? pending)
         {
+            if (QueuedListingItem != 0 && mayListItem is not null)
+                ListingCapAnswers.Add(mayListItem(QueuedListingItem));
             pending = UnverifiedListing ? new(1, "Test Dye", 1, 1000, 0, false) : null;
             if (pending is not null) ListingSubmissions++;
             return pending is not null;

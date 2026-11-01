@@ -52,6 +52,19 @@ public static class InventoryCoveragePolicy
     }
 
     /// <summary>
+    /// <see cref="CanAdd(ulong, uint, decimal, decimal, decimal)"/> measured on our own
+    /// expected sales - the market's rate times the share our listings win. A
+    /// position may still be opened with one lot the whole market's rate would
+    /// carry: the share decides how deep a position goes, never whether a line is
+    /// traded at all, or a thin market could not be stocked with even one lot.
+    /// </summary>
+    public static bool CanAdd(
+        ulong ownedUnits, uint quantity, decimal marketSalesPerDay, decimal captureShare,
+        decimal coverageDays, decimal overshootDays) =>
+        CanAdd(ownedUnits, quantity, marketSalesPerDay * Math.Clamp(captureShare, 0m, 1m), coverageDays, overshootDays) ||
+        ownedUnits == 0 && CanAdd(0, quantity, marketSalesPerDay, coverageDays, overshootDays);
+
+    /// <summary>
     /// Sale slots this market's demand justifies, used to lift the fixed per-item
     /// slot cap for markets that genuinely support more capital. Bounded by the
     /// emergency limit so a velocity spike cannot concentrate the whole portfolio.

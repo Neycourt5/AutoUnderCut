@@ -22,6 +22,11 @@ public sealed class PriceMemory
     public const int MaximumWorldSnapshots = 20_000;
     public const int MaximumSales = 5_000;
     public const int MaximumCandidates = 200;
+    // A pause shorter than this is the same session; longer means the tracker was
+    // not listening (logged out, plugin unloaded) and a new span starts.
+    public static readonly TimeSpan WatchGap = TimeSpan.FromMinutes(5);
+    public static readonly TimeSpan WatchRetention = TimeSpan.FromDays(30);
+    public const int MaximumWatchSpans = 2_000;
 
     private readonly object sync = new();
     private readonly Dictionary<(string World, uint ItemId, bool Hq, PriceSource Source), WorldPriceSnapshot> worlds =
@@ -30,6 +35,8 @@ public sealed class PriceMemory
     private readonly List<RetainerSale> sales = [];
     private List<MarketCandidate> candidates = [];
     private DateTimeOffset? candidatesObservedAt;
+    private readonly List<WatchedSpan> watched = [];
+    private DateTimeOffset lastWatchRevisionAt;
 
     public PriceMemory(PriceMemoryData? data = null)
     {
@@ -47,6 +54,7 @@ public sealed class PriceMemory
         sales.Sort((a, b) => a.At.CompareTo(b.At));
         candidates = (data.Candidates ?? []).Where(x => x is { ItemId: > 0 }).Take(MaximumCandidates).ToList();
         candidatesObservedAt = data.CandidatesObservedAt;
+        watched.AddRange((data.Watched ?? []).Where(x => x is not null && x.End >= x.Start).OrderBy(x => x.Start));
     }
 
     /// <summary>Increments on every change, so a store can tell whether there is anything to save.</summary>
@@ -214,6 +222,46 @@ public sealed class PriceMemory
             return home.Values.ToArray();
     }
 
+    /// <summary>
+    /// Note that the sale tracker is listening now. Marks within <see cref="WatchGap"/>
+    /// of the last one extend its span; a longer silence starts a new span.
+    /// </summary>
+    public void MarkWatching(DateTimeOffset now)
+    {
+        lock (sync)
+        {
+            if (watched.Count > 0)
+            {
+                var last = watched[^1];
+                if (now < last.End)
+                    return;
+                if (now - last.End <= WatchGap)
+                {
+                    watched[^1] = last with { End = now };
+                    // The end moves on every frame; only every few minutes is it a
+                    // change worth saving.
+                    if (now - lastWatchRevisionAt >= TimeSpan.FromMinutes(10))
+                    {
+                        lastWatchRevisionAt = now;
+                        Revision++;
+                    }
+                    return;
+                }
+            }
+            watched.Add(new(now, now));
+            if (watched.Count > MaximumWatchSpans)
+                watched.RemoveRange(0, watched.Count - MaximumWatchSpans);
+            lastWatchRevisionAt = now;
+            Revision++;
+        }
+    }
+
+    public IReadOnlyList<WatchedSpan> WatchedSince(DateTimeOffset since)
+    {
+        lock (sync)
+            return watched.Where(x => x.End >= since).ToArray();
+    }
+
     public IReadOnlyList<RetainerSale> SalesSince(DateTimeOffset since)
     {
         lock (sync)
@@ -251,6 +299,7 @@ public sealed class PriceMemory
             foreach (var key in home.Where(x => now - x.Value.ObservedAt > HomeRetention).Select(x => x.Key).ToArray())
                 removed += home.Remove(key) ? 1 : 0;
             removed += sales.RemoveAll(x => now - x.At > SalesRetention);
+            removed += watched.RemoveAll(x => now - x.End > WatchRetention);
             if (removed > 0)
                 Revision++;
             return removed;
@@ -268,6 +317,7 @@ public sealed class PriceMemory
                 Sales = sales.ToList(),
                 Candidates = candidates.ToList(),
                 CandidatesObservedAt = candidatesObservedAt,
+                Watched = watched.ToList(),
             };
     }
 

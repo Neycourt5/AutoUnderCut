@@ -555,7 +555,7 @@ public sealed unsafe class RetainerListingService : IRetainerListingService
         return true;
     }
 
-    public bool TryAutoListPurchase(ProcurementLedger ledger, out PendingAutoListing? pending)
+    public bool TryAutoListPurchase(ProcurementLedger ledger, Func<uint, bool>? mayListItem, out PendingAutoListing? pending)
     {
         pending = null;
         var manager = InventoryManager.Instance();
@@ -596,7 +596,8 @@ public sealed unsafe class RetainerListingService : IRetainerListingService
                 var isHighQuality = item != null &&
                                     (item->Flags & InventoryItem.ItemFlags.HighQuality) != 0;
                 if (item == null || item->ItemId == 0 || item->Quantity <= 0 ||
-                    !ledger.TryGetPending(item->ItemId, isHighQuality, out var entry) || entry is null)
+                    !ledger.TryGetPending(item->ItemId, isHighQuality, out var entry) || entry is null ||
+                    mayListItem?.Invoke(entry.ItemId) == false)
                     continue;
                 if (entry.RequireFullStacks && item->Quantity < entry.TargetStackSize)
                     continue;

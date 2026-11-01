@@ -21,6 +21,40 @@ public sealed partial class ProcurementController
     /// <summary>How old cached (Universalis) readings may be to steer a route.</summary>
     private static readonly TimeSpan CachedRouteEvidenceAge = TimeSpan.FromHours(3);
 
+    private IReadOnlyDictionary<(uint ItemId, bool IsHighQuality), decimal>? measuredShares;
+    private DateTimeOffset measuredSharesAt;
+
+    /// <summary>
+    /// The configured economics, with each line's capture share replaced by the one
+    /// the sale tracker measured wherever it has measured one.
+    /// </summary>
+    private ProcurementEconomicPolicy Economics =>
+        configuration.Current.EconomicPolicy with { MeasuredCaptureShares = MeasuredCaptureShares() };
+
+    /// <summary>
+    /// Our measured share of each line we have sold, against the home market's own
+    /// rate. Recomputed every few minutes: the planner asks for it on every check.
+    /// </summary>
+    public IReadOnlyDictionary<(uint ItemId, bool IsHighQuality), decimal> MeasuredCaptureShares()
+    {
+        var now = timeProvider.GetUtcNow();
+        if (measuredShares is not null && now - measuredSharesAt < TimeSpan.FromMinutes(5))
+            return measuredShares;
+        var shares = new Dictionary<(uint, bool), decimal>();
+        if (priceMemory?.Invoke() is { } memory)
+        {
+            var since = now - CaptureShareEstimator.Window;
+            var sales = memory.SalesSince(since);
+            var watched = memory.WatchedSince(since);
+            foreach (var (itemId, quality) in sales.Select(x => (x.ItemId, x.IsHighQuality)).Distinct())
+                if (memory.LatestHome(itemId, quality, now, TimeSpan.FromDays(2)) is { } home &&
+                    CaptureShareEstimator.Measure(sales, watched, itemId, quality, home.UnitsPerDay, now) is { } share)
+                    shares[(itemId, quality)] = share;
+        }
+        measuredSharesAt = now;
+        return measuredShares = shares;
+    }
+
     /// <summary>Remember a live board reading of one item on the current world.</summary>
     private void RememberLiveRead(uint itemId, IReadOnlyList<ProcurementMarketListing> rows, bool atHome, bool boardEmpty)
     {

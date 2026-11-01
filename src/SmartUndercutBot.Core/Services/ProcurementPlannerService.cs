@@ -174,8 +174,10 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
             x.Quantity > 0 && x.SoldAt >= DateTimeOffset.UtcNow.AddDays(-7) && x.SoldAt <= DateTimeOffset.UtcNow).ToArray();
         var reliableHistory = recent.Length >= 3;
 
+        // Food and potions share one bar whether pinned as core stock or not.
         var requiredRoi = PortfolioPolicy.RequiredRoiPercent(
-            context.Policy, rule.PreferredStock, salesPerDay, referenceValuePerSlot);
+            context.Policy, rule.PreferredStock || rule.Consumable, salesPerDay, referenceValuePerSlot);
+        var captureShare = context.Policy.CaptureShareFor(market.ItemId, quality);
         if (!reliableHistory && context.Policy.AbsoluteMinimumRoiPercent > 0)
             requiredRoi = Math.Max(requiredRoi, context.Policy.StandardRoiPercent);
         var ceiling = context.Fees.MaximumUnitPrice(targetSalePrice, requiredRoi, minimumProfitPerUnit);
@@ -221,7 +223,8 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
                 RequiredRoiPercent: requiredRoi,
                 OwnedUnitsBefore: ownedUnits,
                 TargetUnits: InventoryCoveragePolicy.TargetUnits(
-                    salesPerDay, context.Policy.CoverageDaysFor(PortfolioTier.Core))));
+                    salesPerDay * captureShare, context.Policy.CoverageDaysFor(PortfolioTier.Core)),
+                CaptureShare: captureShare));
         }
     }
 
@@ -238,9 +241,11 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
         {
             Tier = tier,
             TargetUnits = InventoryCoveragePolicy.TargetUnits(
-                candidate.SalesPerDay, context.Policy.CoverageDaysFor(tier)),
+                candidate.OwnSalesPerDay, context.Policy.CoverageDaysFor(tier)),
         };
-        if (tier != PortfolioTier.Core && tiered.ExpectedProfitPerSaleSlot < context.Gates.MinimumProfitPerSaleSlot)
+        // Core stock is held to the profit floor too: a twenty-unit lot of popcorn
+        // is the same wasted purchase as a twenty-unit lot of anything else.
+        if (tiered.ExpectedProfitPerSaleSlot < context.Gates.MinimumProfitPerSaleSlot)
         {
             context.Rejected.Add(Describe(tiered, false,
                 $"insufficient slot value ({tiered.ExpectedProfitPerSaleSlot:N0} gil, " +
@@ -395,9 +400,9 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
                 if (coverageDays > 0)
                 {
                     if (!InventoryCoveragePolicy.CanAdd(held, candidate.Quantity, candidate.SalesPerDay,
-                            coverageDays, policy.CoverageOvershootDays))
+                            candidate.CaptureShare, coverageDays, policy.CoverageOvershootDays))
                     {
-                        var have = InventoryCoveragePolicy.CoverageDays(held, candidate.SalesPerDay);
+                        var have = InventoryCoveragePolicy.CoverageDays(held, candidate.OwnSalesPerDay);
                         notes.Add(Describe(candidate with { OwnedUnitsBefore = held }, false,
                             candidate.SalesPerDay <= 0
                                 ? "no reliable sales velocity to size a position against"
@@ -608,7 +613,7 @@ public sealed class ProcurementPlannerService : IProcurementPlannerService
         if (days <= 0)
             return rule.MaximumSaleSlots;
         var demandSlots = InventoryCoveragePolicy.DemandJustifiedSlots(
-            candidate.SalesPerDay, days + policy.CoverageOvershootDays,
+            candidate.OwnSalesPerDay, days + policy.CoverageOvershootDays,
             Math.Max(1, rule.TargetStackSize), policy.EmergencyMaximumSlotsPerItem);
         return Math.Min(policy.EmergencyMaximumSlotsPerItem, Math.Max(rule.MaximumSaleSlots, demandSlots));
     }
