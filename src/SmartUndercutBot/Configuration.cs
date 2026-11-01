@@ -7,12 +7,13 @@ namespace SmartUndercutBot;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 45;
+    public int Version { get; set; } = 46;
     public bool AutomationEnabled { get; set; }
     public bool ProcessAllRetainers { get; set; } = true;
     public bool RepeatBellRuns { get; set; }
-    public int RepeatMinimumMinutes { get; set; } = 5;
-    public int RepeatMaximumMinutes { get; set; } = 5;
+    // Two minutes between retainer passes: an undercut pass about every 4.5 minutes.
+    public int RepeatMinimumMinutes { get; set; } = 2;
+    public int RepeatMaximumMinutes { get; set; } = 2;
     public bool AllowAutomaticWrites { get; set; }
     public bool OpenDashboardOnRetainer { get; set; } = true;
     public int MinimumDelayMs { get; set; } = 250;
@@ -38,7 +39,9 @@ public sealed class Configuration : IPluginConfiguration
     public uint ProcurementBufferValueTarget { get; set; } = 1_000_000;
     // Filling a sale slot is not the objective; holding a good portfolio is. The
     // lower fill margin only ever applies to preferred and high-liquidity stock.
-    public decimal ProcurementFillRoiPercent { get; set; } = 10m;
+    // At the standard bar the thinner-margin top-up never runs: the margin floors
+    // chosen on 2026-11-01 are floors, not starting points.
+    public decimal ProcurementFillRoiPercent { get; set; } = 25m;
     /// <summary>
     /// The margin required on preferred stock that is both fast-moving and valuable -
     /// popcorn, potages, raid gemdraughts. These are back out of the bags within a
@@ -46,7 +49,7 @@ public sealed class Configuration : IPluginConfiguration
     /// than from the size of each flip, and holding out for a fat margin on them
     /// mostly leaves millions of gil idle.
     /// </summary>
-    public decimal ProcurementFastMoverRoiPercent { get; set; } = 10m;
+    public decimal ProcurementFastMoverRoiPercent { get; set; } = 20m;
 
     // --- Demand-based inventory sizing -------------------------------------------
     // How much stock to hold, measured in days of each market's own observed sales.
@@ -68,10 +71,10 @@ public sealed class Configuration : IPluginConfiguration
     // Margin bar for non-preferred high-volume stock, and the deliberately stricter
     // bar for low-value stock, which is welcome as a side profit but not as a
     // destination for capital.
-    public decimal ProcurementHighVolumeRoiPercent { get; set; } = 14m;
+    public decimal ProcurementHighVolumeRoiPercent { get; set; } = 25m;
     public decimal ProcurementLowValueRoiPercent { get; set; } = 35m;
     // Nothing is ever bought below this net return, whatever the other bars say.
-    public decimal ProcurementAbsoluteMinimumRoiPercent { get; set; } = 8m;
+    public decimal ProcurementAbsoluteMinimumRoiPercent { get; set; } = 20m;
     // Days of demand worth of cheap competing stock the market swallows before it
     // should move our resale anchor or provoke an undercut.
     public decimal ProcurementAnchorAbsorptionDays { get; set; } = 0.5m;
@@ -95,7 +98,9 @@ public sealed class Configuration : IPluginConfiguration
     public decimal OpportunisticPortfolioMaximumPercent { get; set; } = 10m;
     // A whole retainer slot is the scarce resource. A deal that cannot clear this
     // much profit is not worth occupying one, however good its ROI percentage is.
-    public uint ProcurementMinimumProfitPerSaleSlot { get; set; } = 2_500;
+    // Per purchased lot. A lot that cannot make this much is not worth buying,
+    // whatever its percentage.
+    public uint ProcurementMinimumProfitPerSaleSlot { get; set; } = 25_000;
     // Optional external market discovery. Recommendations only: every purchase
     // still needs a fresh live board reading and all existing safety checks.
     // Off by default: it downloads a whole-region dataset and is the only part of
@@ -172,9 +177,18 @@ public sealed class Configuration : IPluginConfiguration
     // added later never reaches an existing configuration. Backfilled once, so a
     // favorite the user removes on purpose afterwards stays removed.
     public bool FavoriteRulesBackfilled { get; set; }
+    // The 2026-11-01 secondary lines (Nachos, Mason's Abrasive, Multifaceted
+    // Alchemic) are added once at start, with names from the item sheet.
+    public bool SecondaryLinesSeeded { get; set; }
+    /// <summary>
+    /// Minimums older versions wrote automatically, cleared by the v46 migration and
+    /// kept here so the dashboard can put them back. Keyed by item id.
+    /// </summary>
+    public Dictionary<uint, ClearedMinimum> ClearedLegacyMinimums { get; set; } = [];
+    public bool ClearedLegacyMinimumsReported { get; set; }
     public int ProcurementTargetSaleSlots { get; set; } = 60;
     public int ProcurementInventoryReserve { get; set; } = 10;
-    public decimal ProcurementMinimumRoiPercent { get; set; } = 20m;
+    public decimal ProcurementMinimumRoiPercent { get; set; } = 25m;
     public uint ProcurementMinimumProfitPerUnit { get; set; } = 100;
     public string ProcurementDataCenter { get; set; } = "North-America";
     public string MarketBoardTravelCommand { get; set; } = "/li tp Limsa Lominsa Lower Decks";
@@ -264,7 +278,7 @@ public sealed class Configuration : IPluginConfiguration
         AutomationEnabled = true;
         ProcessAllRetainers = true;
         RepeatBellRuns = true;
-        RepeatMinimumMinutes = RepeatMaximumMinutes = 5;
+        RepeatMinimumMinutes = RepeatMaximumMinutes = 2;
         AllowAutomaticWrites = true;
         AutomaticProcurementEnabled = true;
         AllowAutomaticPurchases = true;
@@ -296,6 +310,60 @@ public sealed class Configuration : IPluginConfiguration
         name.Contains("Pure White Dye", StringComparison.OrdinalIgnoreCase);
 
     private static bool IsMassMarketDyeName(string name) => ResaleStockPolicy.IsMassMarketDye(name);
+
+    /// <summary>
+    /// Clear the minimums older versions ratcheted up automatically on every
+    /// purchase: MinimumPrice, MinimumMarginPercent, and the cost basis of a
+    /// position no longer tracked. A rule opted into an explicit minimum is left
+    /// alone. Every cleared value is kept in <see cref="ClearedLegacyMinimums"/>.
+    /// </summary>
+    public int ClearLegacyMinimums()
+    {
+        var cleared = 0;
+        foreach (var (itemId, rule) in PerItemRules)
+        {
+            if (rule is null || rule.ApplyMinimumPriceToPurchasedStock)
+                continue;
+            var staleCost = rule.CostBasisUnits == 0 && (rule.CostBasis > 0 || rule.AcquisitionFloor > 0);
+            if (rule.MinimumPrice <= 1 && rule.MinimumMarginPercent <= 0 && !staleCost)
+                continue;
+            ClearedLegacyMinimums[itemId] = new()
+            {
+                MinimumPrice = rule.MinimumPrice,
+                MinimumMarginPercent = rule.MinimumMarginPercent,
+                CostBasis = staleCost ? rule.CostBasis : 0,
+                AcquisitionFloor = staleCost ? rule.AcquisitionFloor : 0,
+            };
+            rule.MinimumPrice = 1;
+            rule.MinimumMarginPercent = 0;
+            if (staleCost)
+                rule.CostBasis = rule.AcquisitionFloor = 0;
+            cleared++;
+        }
+        return cleared;
+    }
+
+    /// <summary>Put back every minimum <see cref="ClearLegacyMinimums"/> cleared.</summary>
+    public int RestoreLegacyMinimums()
+    {
+        var restored = 0;
+        foreach (var (itemId, saved) in ClearedLegacyMinimums)
+        {
+            if (!PerItemRules.TryGetValue(itemId, out var rule) || rule is null)
+                continue;
+            rule.MinimumPrice = Math.Max(rule.MinimumPrice, saved.MinimumPrice);
+            rule.MinimumMarginPercent = Math.Max(rule.MinimumMarginPercent, saved.MinimumMarginPercent);
+            // A position bought since carries its own, current basis.
+            if (saved.CostBasis > 0 && rule.CostBasisUnits == 0)
+            {
+                rule.CostBasis = saved.CostBasis;
+                rule.AcquisitionFloor = saved.AcquisitionFloor;
+            }
+            restored++;
+        }
+        ClearedLegacyMinimums.Clear();
+        return restored;
+    }
 
     public void Normalize()
     {
@@ -696,7 +764,41 @@ public sealed class Configuration : IPluginConfiguration
             FavoriteRulesBackfilled = false;
             Version = 45;
         }
-        Version = Math.Max(Version, 45);
+        if (Version < 46)
+        {
+            // The answers to the 2026-11-01 review: "all recommendations".
+            // Margin floors: 20% net for food and potions, 25% for everything else,
+            // nothing under 20%, and 25,000 gil profit per lot. The thinner-margin
+            // top-up is off, since it would lower the floors just set.
+            ProcurementFastMoverRoiPercent = 20m;
+            ProcurementHighVolumeRoiPercent = 25m;
+            ProcurementMinimumRoiPercent = 25m;
+            ProcurementAbsoluteMinimumRoiPercent = 20m;
+            ProcurementFillRoiPercent = 25m;
+            ProcurementMinimumProfitPerSaleSlot = 25_000;
+            // At most 9 of 60 listings per item; holdings sized on a 30% share of
+            // each market until the sale tracker measures the real one.
+            ProcurementEmergencyMaximumSlotsPerItem = 9;
+            ProcurementCaptureSharePercent = 30m;
+            // Two minutes between retainer passes.
+            RepeatMinimumMinutes = RepeatMaximumMinutes = 2;
+            // Listings in the sizes home buyers take; food and potions on their bar.
+            ProcurementRules ??= [];
+            foreach (var rule in ProcurementRules.Where(x => x is not null && x.ItemId != 0 && !x.LiquidateOnly))
+            {
+                if (ResaleStockPolicy.DecidedListingSize(rule.ItemName ?? string.Empty) is > 0 and var size)
+                    rule.ListingStackSize = size;
+                if (ResaleStockPolicy.IsCuratedConsumable(rule.ItemName ?? string.Empty))
+                    rule.Consumable = true;
+            }
+            // Nachos and the two reagents are added at start, from the item sheet.
+            SecondaryLinesSeeded = false;
+            // The automatic minimums older versions wrote come off; a copy is kept.
+            ClearLegacyMinimums();
+            ClearedLegacyMinimumsReported = false;
+            Version = 46;
+        }
+        Version = Math.Max(Version, 46);
         ProcurementPreferredCoverageDays = Math.Clamp(ProcurementPreferredCoverageDays, 0.25m, 7m);
         ProcurementSecondaryCoverageDays = Math.Clamp(ProcurementSecondaryCoverageDays, 0.25m, 7m);
         ProcurementOpportunisticCoverageDays = Math.Clamp(ProcurementOpportunisticCoverageDays, 0.1m, 2m);
@@ -757,7 +859,7 @@ public sealed class Configuration : IPluginConfiguration
         MarketRequestCooldownMs = Math.Clamp(MarketRequestCooldownMs, 1000, 10_000);
         MarketRequestRetryCount = Math.Clamp(MarketRequestRetryCount, 0, 5);
         MarketRetryBackoffMs = Math.Clamp(MarketRetryBackoffMs, 1000, 10_000);
-        RepeatMinimumMinutes = Math.Clamp(RepeatMinimumMinutes, 5, 1_440);
+        RepeatMinimumMinutes = Math.Clamp(RepeatMinimumMinutes, 2, 1_440);
         RepeatMaximumMinutes = Math.Clamp(RepeatMaximumMinutes, RepeatMinimumMinutes, 1_440);
         MaximumUpdatesPerSession = Math.Clamp(MaximumUpdatesPerSession, 1, 200);
         ProcurementIntervalMinutes = Math.Clamp(ProcurementIntervalMinutes, 5, 1_440);
@@ -789,5 +891,15 @@ public sealed class Configuration : IPluginConfiguration
         }
         GlobalRule ??= new PricingRule();
         PerItemRules ??= [];
+        ClearedLegacyMinimums ??= [];
     }
+}
+
+/// <summary>A minimum the v46 migration cleared, kept so it can be restored.</summary>
+public sealed class ClearedMinimum
+{
+    public uint MinimumPrice { get; set; }
+    public decimal MinimumMarginPercent { get; set; }
+    public uint CostBasis { get; set; }
+    public uint AcquisitionFloor { get; set; }
 }

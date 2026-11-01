@@ -190,19 +190,20 @@ public sealed class BargainSweepTests
             RepeatMinimumMinutes = 5, RepeatMaximumMinutes = 10 };
         config.Normalize();
         Assert.Equal(expectedDays, config.ProcurementPreferredCoverageDays);
-        // Later migrations may follow; this one only has to have run.
+        // Later migrations may follow; this one only has to have run. The v46 one
+        // that follows moves retainer passes to two minutes apart.
         Assert.True(config.Version >= 44);
-        Assert.Equal(5, config.RepeatMinimumMinutes);
-        Assert.Equal(5, config.RepeatMaximumMinutes);
+        Assert.Equal(2, config.RepeatMinimumMinutes);
+        Assert.Equal(2, config.RepeatMaximumMinutes);
     }
 
     [Fact]
-    public void StartingStockAutomationUsesFiveMinuteUndercutChecks()
+    public void StartingStockAutomationUsesTwoMinuteUndercutChecks()
     {
         var config = new Configuration { RepeatMinimumMinutes = 10, RepeatMaximumMinutes = 20 };
         config.EnableStockAutomation();
-        Assert.Equal(5, config.RepeatMinimumMinutes);
-        Assert.Equal(5, config.RepeatMaximumMinutes);
+        Assert.Equal(2, config.RepeatMinimumMinutes);
+        Assert.Equal(2, config.RepeatMaximumMinutes);
     }
 
     private static Route BulkRoute(int listings, uint quantity)

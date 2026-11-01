@@ -152,6 +152,34 @@ public sealed class Plugin : IDalamudPlugin
             configuration.Current.BuyableDyeRulesSeeded = true;
             configuration.Save();
         }
+        if (!configuration.Current.SecondaryLinesSeeded)
+        {
+            foreach (var rule in universalis.CreateSecondaryLineRules())
+            {
+                if (configuration.Current.ProcurementRules.Any(x => x.ItemId == rule.ItemId))
+                    continue;
+                configuration.Current.ProcurementRules.Add(rule);
+                automationLog.Add(AutomationLogLevel.Information,
+                    $"Added {rule.ItemName} as a secondary line: bought when the margin and demand work, " +
+                    $"listed {rule.ListingStackSize} at a time.");
+            }
+            configuration.Current.SecondaryLinesSeeded = true;
+            configuration.Save();
+        }
+        if (configuration.Current.ClearedLegacyMinimums.Count > 0 && !configuration.Current.ClearedLegacyMinimumsReported)
+        {
+            string Name(uint id) => configuration.Current.ProcurementRules.FirstOrDefault(x => x.ItemId == id)?.ItemName
+                                    is { Length: > 0 } name ? name : $"item {id}";
+            automationLog.Add(AutomationLogLevel.Information,
+                $"OLD MINIMUMS CLEARED on {configuration.Current.ClearedLegacyMinimums.Count} item(s): " +
+                string.Join("; ", configuration.Current.ClearedLegacyMinimums.Select(x =>
+                    $"{Name(x.Key)} {x.Value.MinimumPrice:N0}" +
+                    (x.Value.MinimumMarginPercent > 0 ? $" +{x.Value.MinimumMarginPercent:N0}%" : string.Empty) +
+                    (x.Value.CostBasis > 0 ? $" (old cost {x.Value.CostBasis:N0})" : string.Empty))) +
+                ". Older versions wrote these automatically; Advanced > Pricing can restore them.");
+            configuration.Current.ClearedLegacyMinimumsReported = true;
+            configuration.Save();
+        }
         taskbarAttention = new TaskbarAttentionService();
         marketPurchase = new MarketPurchaseService(ObjectTable, GameGui, DataManager, automationLog, MarketBoard, Interop);
         procurement = new ProcurementController(
@@ -206,7 +234,8 @@ public sealed class Plugin : IDalamudPlugin
             () => retainerListings.OwnedRetainerIds,
             universalis.LookupItem,
             universalis.ResolveWorldName,
-            automationLog);
+            automationLog,
+            offerLines: marketDiscovery.Offer);
         retainerSales = new RetainerSaleService(
             ChatGui,
             configuration,

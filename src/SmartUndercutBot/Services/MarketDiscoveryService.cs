@@ -21,6 +21,7 @@ public sealed class MarketDiscoveryService
     private readonly object sync = new();
     private Task? running;
     private IReadOnlyList<ProcurementRule> pending = [];
+    private bool offered;
 
     public MarketDiscoveryService(
         IMarketStatisticsProvider provider,
@@ -107,64 +108,110 @@ public sealed class MarketDiscoveryService
         }
     }
 
+    // A short list: every line multiplies scouting cost across worlds.
+    public const int MaximumAutomaticLines = 6;
+    public const int MaximumAdditionsPerScan = 2;
+    // Scans in a row a line may fail before it is retired to sell-off.
+    public const int RetireAfterMisses = 3;
+
+    /// <summary>
+    /// Hand over proposals made elsewhere - the daily home-world sales scan - to be
+    /// merged on the framework thread. An empty list still counts: it is a scan in
+    /// which nothing qualified.
+    /// </summary>
+    public void Offer(IReadOnlyList<ProcurementRule> proposals)
+    {
+        ArgumentNullException.ThrowIfNull(proposals);
+        lock (sync)
+        {
+            pending = proposals;
+            offered = true;
+        }
+    }
+
     /// <summary>
     /// Merge finished discoveries into the configuration. Called on the framework
-    /// thread. Rules edited by hand are never overwritten, and a discovery that
-    /// stops qualifying is retired rather than left behind forever.
+    /// thread. Rules edited by hand are never overwritten. A discovered line that
+    /// stops qualifying for several scans in a row is retired to sell-off, so stock
+    /// already bought still lists from the bags; removing the rule stranded it.
     /// </summary>
     public int ApplyPendingDiscoveries()
     {
         IReadOnlyList<ProcurementRule> proposals;
         lock (sync)
         {
-            if (pending.Count == 0)
+            if (!offered && pending.Count == 0)
                 return 0;
             proposals = pending;
             pending = [];
+            offered = false;
         }
         var rules = configuration.Current.ProcurementRules;
         var proposed = proposals.Select(x => x.ItemId).ToHashSet();
-        var retired = rules.RemoveAll(x => x.DiscoveredAutomatically && !proposed.Contains(x.ItemId));
+        var retired = 0;
+        foreach (var rule in rules.Where(x => x.DiscoveredAutomatically))
+        {
+            if (proposed.Contains(rule.ItemId))
+            {
+                rule.DiscoveryMisses = 0;
+                continue;
+            }
+            if (rule.LiquidateOnly || ++rule.DiscoveryMisses < RetireAfterMisses)
+                continue;
+            rule.LiquidateOnly = true;
+            retired++;
+            log.Add(AutomationLogLevel.Information,
+                $"MARKET DISCOVERY: {rule.ItemName} has not qualified for {rule.DiscoveryMisses} scans in a row; " +
+                "it is no longer bought, and what is held sells off.");
+        }
+        var active = rules.Count(x => x.DiscoveredAutomatically && !x.LiquidateOnly);
         var added = 0;
-        var promoted = 0;
         foreach (var proposal in proposals)
         {
             var existing = rules.FirstOrDefault(x => x.ItemId == proposal.ItemId);
             if (existing is null)
             {
+                if (added >= MaximumAdditionsPerScan || active >= MaximumAutomaticLines)
+                    continue;
                 rules.Add(proposal);
                 added++;
+                active++;
+                log.Add(AutomationLogLevel.Information,
+                    $"MARKET DISCOVERY: added {proposal.ItemName} as a secondary food/medicine line " +
+                    $"({proposal.LastObservedSalesPerDay:N0} units a day at about {proposal.LastObservedUnitPrice:N0} gil). " +
+                    "It is a candidate only: live prices, fees, demand, budget and portfolio limits still decide.");
             }
             else if (existing.DiscoveredAutomatically)
             {
-                // Refresh the stack size and name from the newest statistics, but
-                // leave anything the player may have changed alone.
+                // Refresh the sizes and name from the newest statistics, but leave
+                // anything the player may have changed alone.
                 existing.ItemName = proposal.ItemName;
                 existing.TargetStackSize = proposal.TargetStackSize;
-                promoted += Reassess(existing, proposal) ? 1 : 0;
+                if (proposal.ListingStackSize > 0)
+                    existing.ListingStackSize = proposal.ListingStackSize;
+                if (existing.LiquidateOnly && active < MaximumAutomaticLines)
+                {
+                    existing.LiquidateOnly = false;
+                    active++;
+                }
+                Reassess(existing, proposal);
             }
         }
-        if (added > 0 || retired > 0 || promoted > 0)
-        {
+        if (added > 0 || retired > 0)
             configuration.Save();
-            log.Add(AutomationLogLevel.Information,
-                $"MARKET DISCOVERY: added {added}, retired {retired} and promoted {promoted} automatically " +
-                "discovered flip(s). Additions are candidates only: live prices, fees, demand, budget and " +
-                "portfolio limits still decide.");
-        }
         return added;
     }
 
     /// <summary>
     /// Fold a fresh proposal into what an existing discovered rule already knows
-    /// about itself, and promote it only if the accumulated evidence justifies it.
+    /// about itself, and grade how much the accumulated evidence shows.
     ///
     /// A refresh that agrees with the last one - same market, a price that has not
     /// lurched - is a confirmation. A refresh that disagrees resets the count,
     /// because the point of the count is "this line has behaved consistently", and
     /// an unstable price is exactly the evidence that it has not.
     /// </summary>
-    private bool Reassess(ProcurementRule existing, ProcurementRule proposal)
+    private void Reassess(ProcurementRule existing, ProcurementRule proposal)
     {
         var config = configuration.Current;
         var spread = MarketConfidencePolicy.PriceSpreadPercent(
@@ -190,16 +237,9 @@ public sealed class MarketDiscoveryService
 
         var confidence = MarketConfidencePolicy.Classify(new(
             salesPerDay, stackValue, gilPerDay, existing.DiscoveryConfirmations, spread, realized));
-        var wasPinned = existing.PreferredStock;
+        // Reported, never acted on: a discovered line stays secondary unless the
+        // player pins it (the 2026-11-01 decision; v43 had already un-pinned them).
         existing.Confidence = confidence;
-        existing.PreferredStock = MarketConfidencePolicy.ShouldPin(confidence);
-        if (!existing.PreferredStock || wasPinned)
-            return false;
-        log.Add(AutomationLogLevel.Information,
-            $"MARKET DISCOVERY: {existing.ItemName} promoted to preferred core stock after " +
-            $"{existing.DiscoveryConfirmations} agreeing observation(s) at {salesPerDay:N0} units/day, " +
-            $"{stackValue:N0} gil per stack and a realised profitable spread.");
-        return true;
     }
 
 }

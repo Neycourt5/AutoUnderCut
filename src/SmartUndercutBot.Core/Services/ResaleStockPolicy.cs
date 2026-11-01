@@ -80,6 +80,30 @@ public static class ResaleStockPolicy
         QualityAllowed(rule, hq) && (hq || !highQualityOnly || !TradesHighQuality(rule));
 
     /// <summary>
+    /// Secondary lines added on 2026-11-01 from the review's market scan: Nachos
+    /// (HQ food) and two reagents that sell every day at a wide spread.
+    /// </summary>
+    public static readonly uint[] SecondaryLineIds = [49239, 46252, 27796];
+
+    /// <summary>
+    /// Listing sizes chosen from what home-world buyers typically take per purchase
+    /// (the 2026-11-01 review): raid potions in 99s, popcorn and potage in 50s,
+    /// nachos in 20s, materia and abrasive in their few-unit lots, which the
+    /// minimum listing value then lifts. Zero means no decided size.
+    /// </summary>
+    public static int DecidedListingSize(string name) => name switch
+    {
+        "Caramel Popcorn" or "Popoto Potage" => 50,
+        "Nachos" => 20,
+        "Craftsman's Command Materia XI" => 4,
+        "Craftsman's Command Materia XII" => 3,
+        "Mason's Abrasive" => 5,
+        "Multifaceted Alchemic" => 99,
+        _ when name.StartsWith("Grade 4 Gemdraught of ", StringComparison.OrdinalIgnoreCase) => 99,
+        _ => 0,
+    };
+
+    /// <summary>
     /// The least a listing of a line sized to its buyers may be worth. Buyers take
     /// whole listings, so a listing only as big as one typical purchase sells
     /// soonest - but a forty-thousand-gil listing is a wasted retainer slot.

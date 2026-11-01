@@ -710,8 +710,70 @@ public sealed partial class DashboardWindow : Window
 
     private static string FormatGil(ulong value) => $"{value:N0} gil";
 
+    private void DrawStuckStockAndRaises()
+    {
+        var config = configuration.Current;
+        if (!ImGui.CollapsingHeader("Stuck stock and raises", ImGuiTreeNodeFlags.DefaultOpen))
+            return;
+        var breakEven = config.ListStuckStockAtBreakEven;
+        if (ImGui.Checkbox("List stock the market fell below at break-even", ref breakEven))
+        {
+            config.ListStuckStockAtBreakEven = breakEven;
+            configurationDirty = true;
+        }
+        var relaxHours = config.StuckStockRelaxAfterHours;
+        if (InputInt("Then follow the market down after (hours)", ref relaxHours, 1, 720))
+        {
+            config.StuckStockRelaxAfterHours = relaxHours;
+            configurationDirty = true;
+        }
+        var loss = (float)config.StuckStockMaximumLossPercent;
+        if (ImGui.DragFloat("...to at most this far under cost", ref loss, 0.5f, 0f, 50f, "%.0f%%"))
+        {
+            config.StuckStockMaximumLossPercent = (decimal)Math.Clamp(loss, 0f, 50f);
+            configurationDirty = true;
+        }
+        ImGui.TextDisabled("An ask the market has fallen below never sells. Never applied while the price-war guard sees a crash.");
+        var raise = config.RaisePricesToMarket;
+        if (ImGui.Checkbox("Raise listings priced under the market", ref raise))
+        {
+            config.RaisePricesToMarket = raise;
+            configurationDirty = true;
+        }
+        var cap = (float)config.RaiseMedianCapPercent;
+        if (ImGui.DragFloat("...to at most this share of the recent median sale", ref cap, 1f, 100f, 300f, "%.0f%%"))
+        {
+            config.RaiseMedianCapPercent = (decimal)Math.Clamp(cap, 100f, 300f);
+            configurationDirty = true;
+        }
+        ImGui.TextDisabled("Up to just under the cheapest competitor. Needs same-quality sale history; a lone seller is raised only when the whole board was read.");
+        if (config.BelowCostSince.Count > 0)
+        {
+            var now = DateTimeOffset.UtcNow;
+            ImGui.TextWrapped("Below cost now: " + string.Join("; ", config.BelowCostSince.OrderBy(x => x.Value).Select(x =>
+            {
+                var id = uint.TryParse(x.Key.Split(':')[0], out var parsed) ? parsed : 0;
+                var name = config.ProcurementRules.FirstOrDefault(r => r.ItemId == id)?.ItemName ?? $"#{id}";
+                return $"{name}{(x.Key.EndsWith(":H", StringComparison.Ordinal) ? " HQ" : string.Empty)} for {(now - x.Value).TotalHours:N0}h";
+            })) + ".");
+        }
+        if (config.ClearedLegacyMinimums.Count > 0)
+        {
+            ImGui.TextWrapped($"{config.ClearedLegacyMinimums.Count} old minimum(s) that older versions set automatically were " +
+                "cleared in the 1.0.0.77 update. If you set any of them yourself, put them back:");
+            if (ImGui.Button("Restore old minimums"))
+            {
+                var restored = config.RestoreLegacyMinimums();
+                configurationDirty = true;
+                log.Add(AutomationLogLevel.Information, $"Restored {restored} old minimum(s) cleared by the 1.0.0.77 update.");
+            }
+        }
+        ImGui.Separator();
+    }
+
     private void DrawRules()
     {
+        DrawStuckStockAndRaises();
         if (ImGui.CollapsingHeader("Global rule", ImGuiTreeNodeFlags.DefaultOpen))
             configurationDirty |= DrawPricingRule("global", configuration.Current.GlobalRule);
 
@@ -1225,12 +1287,24 @@ public sealed partial class DashboardWindow : Window
             }
             ImGui.TextDisabled("How much stock to hold, measured in days of each market's own observed sales rather than in slots. A line selling a hundred a day can absorb several stacks and millions of gil; a line selling three a day cannot absorb one, however good the margin looks.");
             var emergencySlots = config.ProcurementEmergencyMaximumSlotsPerItem;
-            if (InputInt("Emergency maximum slots per item", ref emergencySlots, 1, 60))
+            if (InputInt("Most listings per item", ref emergencySlots, 1, 60))
             {
                 config.ProcurementEmergencyMaximumSlotsPerItem = emergencySlots;
                 configurationDirty = true;
             }
-            ImGui.TextDisabled("Limits ordinary purchase plans. Bulk preferred fast-mover bargains use the coverage target and actual bag space instead, so cheap food and potions can be bought in thousands.");
+            ImGui.TextDisabled("No item holds more of the retainers' listings than this (9 of 60 is 15%), so one deep position cannot crowd the rest out. Bulk food and potions beyond it wait in the bags and are listed as these sell.");
+            var captureShare = (float)config.ProcurementCaptureSharePercent;
+            if (ImGui.DragFloat("Assumed share of each market %", ref captureShare, 1f, 5f, 100f, "%.0f%%"))
+            {
+                config.ProcurementCaptureSharePercent = (decimal)Math.Clamp(captureShare, 5f, 100f);
+                configurationDirty = true;
+            }
+            var measured = procurement.MeasuredCaptureShares();
+            ImGui.TextDisabled("Holdings are sized on what our own listings sell, not on every seller's volume. This is used until the sale tracker has measured the real share of a line (12 hours of listening and 5 sales). " +
+                (measured.Count == 0
+                    ? "Nothing measured yet."
+                    : "Measured: " + string.Join(", ", measured.Select(x =>
+                        $"{(config.ProcurementRules.FirstOrDefault(r => r.ItemId == x.Key.ItemId)?.ItemName ?? $"#{x.Key.ItemId}")}{(x.Key.IsHighQuality ? " HQ" : string.Empty)} {x.Value:P0}")) + "."));
             var absorptionDays = (float)config.ProcurementAnchorAbsorptionDays;
             if (ImGui.DragFloat("Undercut absorption days", ref absorptionDays, 0.05f, 0f, 0.5f, "%.2f d"))
             {
@@ -1256,12 +1330,12 @@ public sealed partial class DashboardWindow : Window
             }
             ImGui.TextDisabled("The ceiling for dyes, materia and other arbitrage. Listed holdings count against it, so an existing pile blocks buying more until it sells down.");
             var slotValue = config.ProcurementMinimumProfitPerSaleSlot;
-            if (InputUInt("Minimum profit per sale slot (gil)", ref slotValue, 0, 100_000_000))
+            if (InputUInt("Minimum profit per purchased lot (gil)", ref slotValue, 0, 100_000_000))
             {
                 config.ProcurementMinimumProfitPerSaleSlot = slotValue;
                 configurationDirty = true;
             }
-            ImGui.TextDisabled("A retainer slot is the scarce resource. A 300% return on a stack worth two thousand gil is not worth one. Pinned preferred stock is exempt.");
+            ImGui.TextDisabled("No small trades: a lot that cannot make this much is skipped, however good its percentage. Applies to preferred food and potions too.");
 
             ImGui.Separator();
             ImGui.TextUnformatted("Market discovery (optional)");
@@ -1271,7 +1345,7 @@ public sealed partial class DashboardWindow : Window
                 config.MarketDiscoveryEnabled = discovery;
                 configurationDirty = true;
             }
-            ImGui.TextDisabled("Off unless you switch it on. Uses a daily market-statistics feed to suggest additional flips, validated against the game's own item data. Suggestions only: every purchase still needs fresh live prices and all the usual checks. The six curated items stay pinned whether or not this is on, and the portfolio rules work exactly the same either way.");
+            ImGui.TextDisabled("The daily home-world scan already adds food and medicine that sell well at home with a clear spread (at most 6 lines, never pinned as core). This switch adds a second, region-wide statistics feed: a large daily download, off unless you switch it on. Either way every purchase still needs fresh live prices and all the usual checks.");
             var discoveryHours = config.MarketDiscoveryCacheHours;
             if (InputInt("Refresh discovery every (hours)", ref discoveryHours, 1, 168))
             {
@@ -1300,17 +1374,55 @@ public sealed partial class DashboardWindow : Window
             }
             ImGui.TextDisabled("Spendable gil after the travel reserve and any trip cap. Preferred stock is exempt from the smaller spare-stock budget.");
             var worldsPerTrip = config.PriorityWorldsPerTrip;
-            if (InputInt("Worlds to scout before comparing", ref worldsPerTrip, 1, 40))
+            if (InputInt("Full circuit: worlds before comparing", ref worldsPerTrip, 1, 40))
             {
                 config.PriorityWorldsPerTrip = worldsPerTrip;
                 configurationDirty = true;
             }
             var minutesPerTrip = config.PriorityMinutesPerTrip;
-            if (InputInt("Maximum scouting minutes", ref minutesPerTrip, 5, 480))
+            if (InputInt("Full circuit: maximum scouting minutes", ref minutesPerTrip, 5, 480))
             {
                 config.PriorityMinutesPerTrip = minutesPerTrip;
                 configurationDirty = true;
             }
+            var targeted = config.TargetedTripsEnabled;
+            if (ImGui.Checkbox("Targeted trips", ref targeted))
+            {
+                config.TargetedTripsEnabled = targeted;
+                configurationDirty = true;
+            }
+            var tripMinutes = config.TargetedTripMinutes;
+            if (InputInt("Targeted trip: minutes away", ref tripMinutes, 10, 240))
+            {
+                config.TargetedTripMinutes = tripMinutes;
+                configurationDirty = true;
+            }
+            var mostWorlds = config.TargetedTripMaximumWorlds;
+            if (InputInt("Targeted trip: most worlds", ref mostWorlds, 1, 20))
+            {
+                config.TargetedTripMaximumWorlds = mostWorlds;
+                configurationDirty = true;
+            }
+            var fewestWorlds = config.TargetedTripMinimumWorlds;
+            if (InputInt("Full circuit when memory knows fewer worlds than", ref fewestWorlds, 1, 20))
+            {
+                config.TargetedTripMinimumWorlds = fewestWorlds;
+                configurationDirty = true;
+            }
+            var circuitHours = config.FullCircuitIntervalHours;
+            if (InputInt("Hours between full circuits", ref circuitHours, 1, 168))
+            {
+                config.FullCircuitIntervalHours = circuitHours;
+                configurationDirty = true;
+            }
+            var targets = procurement.TripTargets();
+            ImGui.TextDisabled("A targeted trip goes straight to the worlds the price memory shows holding stock cheap enough to buy, then comes back to undercut. " +
+                (targets.Count == 0
+                    ? "Memory knows no such world right now."
+                    : "Right now: " + string.Join(", ", targets.Select(x => $"{x.World} (~{x.ExpectedProfit:N0} gil)")) + ".") +
+                (config.LastFullCircuitAt is { } lastCircuit
+                    ? $" Last full circuit {lastCircuit.LocalDateTime:g}."
+                    : " No full circuit yet."));
             var scoutItems = config.PriorityItemsPerWorld;
             if (InputInt("Items to skim per away world", ref scoutItems, 1, 40))
             {
@@ -1442,14 +1554,15 @@ public sealed partial class DashboardWindow : Window
             configurationDirty = true;
         }
 
-        if (ImGui.BeginTable("ProcurementRules", 8,
+        if (ImGui.BeginTable("ProcurementRules", 9,
                 ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.ScrollX | ImGuiTableFlags.Resizable,
                 new Vector2(0, 190 * ImGuiHelpers.GlobalScale)))
         {
             ImGui.TableSetupColumn("On", ImGuiTableColumnFlags.WidthFixed, 35);
             ImGui.TableSetupColumn("Item", ImGuiTableColumnFlags.WidthFixed, 210);
             ImGui.TableSetupColumn("Max unit", ImGuiTableColumnFlags.WidthFixed, 90);
-            ImGui.TableSetupColumn("Stack", ImGuiTableColumnFlags.WidthFixed, 70);
+            ImGui.TableSetupColumn("Lot", ImGuiTableColumnFlags.WidthFixed, 70);
+            ImGui.TableSetupColumn("Listing", ImGuiTableColumnFlags.WidthFixed, 70);
             ImGui.TableSetupColumn("Max slots", ImGuiTableColumnFlags.WidthFixed, 75);
             ImGui.TableSetupColumn("Weekly sales", ImGuiTableColumnFlags.WidthFixed, 90);
             ImGui.TableSetupColumn("HQ only", ImGuiTableColumnFlags.WidthFixed, 55);
@@ -1473,6 +1586,11 @@ public sealed partial class DashboardWindow : Window
                 var stack = rule.TargetStackSize;
                 ImGui.SetNextItemWidth(-1);
                 if (InputInt("##stack", ref stack, 1, 999)) { rule.TargetStackSize = stack; configurationDirty = true; }
+                ImGui.TableNextColumn();
+                // 0 lists in lots; a set size is still lifted to a 100,000 gil listing.
+                var listing = rule.ListingStackSize;
+                ImGui.SetNextItemWidth(-1);
+                if (InputInt("##listing", ref listing, 0, 999)) { rule.ListingStackSize = listing; configurationDirty = true; }
                 ImGui.TableNextColumn();
                 var maxSlots = rule.MaximumSaleSlots;
                 ImGui.SetNextItemWidth(-1);

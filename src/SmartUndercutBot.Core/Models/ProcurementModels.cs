@@ -151,6 +151,9 @@ public sealed class ProcurementRule
     // PreferredStock is only set once the line has agreed with itself repeatedly.
     public MarketConfidence Confidence { get; set; } = MarketConfidence.Candidate;
     public int DiscoveryConfirmations { get; set; }
+    // Consecutive discovery scans this line failed to qualify in. One bad day is
+    // not a verdict: it is only retired to sell-off after several in a row.
+    public int DiscoveryMisses { get; set; }
     public uint LastObservedUnitPrice { get; set; }
     public decimal LastObservedSalesPerDay { get; set; }
     // The all-world tour is slow - every extra item is multiplied by the number of

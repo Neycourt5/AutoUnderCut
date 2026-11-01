@@ -1897,6 +1897,14 @@ public sealed class ProcurementControllerTests
             Config.Current.ProcurementEmergencyMaximumSlotsPerItem = 20;
             // They also drive the full circuit. Targeted trips have their own tests.
             Config.Current.TargetedTripsEnabled = false;
+            // And the margin bars before the 2026-11-01 floors (20%/25%, 25,000 gil
+            // a lot), which have their own tests.
+            Config.Current.ProcurementFastMoverRoiPercent = 10m;
+            Config.Current.ProcurementHighVolumeRoiPercent = 14m;
+            Config.Current.ProcurementMinimumRoiPercent = 20m;
+            Config.Current.ProcurementAbsoluteMinimumRoiPercent = 8m;
+            Config.Current.ProcurementFillRoiPercent = 10m;
+            Config.Current.ProcurementMinimumProfitPerSaleSlot = 2_500;
             Config.Current.ProcurementRules.Add(new()
             {
                 ItemId = 1, ItemName = "Popcorn", AllowHighQuality = true, RequireHighQuality = true, HuntOnTour = true,

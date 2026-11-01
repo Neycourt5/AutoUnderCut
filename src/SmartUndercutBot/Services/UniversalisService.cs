@@ -98,10 +98,32 @@ public sealed class UniversalisService : IUniversalisService, IDisposable
                 // Priced on every world. The migration that set this on existing
                 // rules ran before any favourite was seeded, so seed it directly.
                 AlwaysScout = true,
+                // Listed in the sizes buyers take, on the food and potion margin bar.
+                ListingStackSize = ResaleStockPolicy.DecidedListingSize(x.Name.ToString()),
+                Consumable = true,
             })
             .OrderBy(x => x.ItemName)
             .ToArray();
     }
+
+    // Secondary lines chosen in the 2026-11-01 review: bought when the numbers
+    // work, never pinned, and sized to their buyers. Ids, because a reagent name
+    // is not guaranteed unique; the names come from the sheet.
+    public IReadOnlyList<ProcurementRule> CreateSecondaryLineRules() => ResaleStockPolicy.SecondaryLineIds
+        .Select(id => dataManager.GetExcelSheet<Item>().TryGetRow(id, out var row) &&
+                      !row.IsUntradable && row.ItemSearchCategory.RowId != 0 ? (Row: row, Name: row.Name.ToString()) : default)
+        .Where(x => !string.IsNullOrWhiteSpace(x.Name))
+        .Select(x => new ProcurementRule
+        {
+            ItemId = x.Row.RowId, ItemName = x.Name, TargetStackSize = 99,
+            ListingStackSize = ResaleStockPolicy.DecidedListingSize(x.Name),
+            // A floor, not a ceiling: demand decides how many lots it may hold.
+            MaximumSaleSlots = 1, MinimumWeeklyUnitsSold = 20,
+            ListFromBags = true, BagReserveQuantity = 0,
+            AllowHighQuality = x.Row.CanBeHq, RequireHighQuality = x.Row.CanBeHq,
+            Consumable = LookupItem(x.Row.RowId)?.IsFoodOrMedicine == true,
+            HuntOnTour = true, TourPriority = 3,
+        }).ToArray();
 
     // Dyes, materia and ethers are stock the player wants cleared, not traded: list
     // everything held in the bags, keep nothing back, and never plan a purchase.
@@ -152,6 +174,7 @@ public sealed class UniversalisService : IUniversalisService, IDisposable
         .Select(x => new ProcurementRule
         {
             ItemId = x.Row.RowId, ItemName = x.Name, TargetStackSize = 20,
+            ListingStackSize = ResaleStockPolicy.DecidedListingSize(x.Name),
             MaximumSaleSlots = 1, MinimumWeeklyUnitsSold = 50,
             ListFromBags = true, BagReserveQuantity = 0,
             AllowHighQuality = x.Row.CanBeHq,

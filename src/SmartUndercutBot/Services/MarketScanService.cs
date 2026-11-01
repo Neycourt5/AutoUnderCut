@@ -57,6 +57,8 @@ public sealed class MarketScanService : IDisposable
     private readonly Func<IReadOnlySet<ulong>> ownRetainerIds;
     private readonly Func<uint, MarketItemFacts?> lookup;
     private readonly Func<uint, string?> worldName;
+    // Food and medicine the daily ranking qualifies, handed to the discovery merge.
+    private readonly Action<IReadOnlyList<ProcurementRule>>? offerLines;
     private readonly AutomationLog log;
     private readonly TimeProvider timeProvider;
     private readonly CancellationTokenSource stopping = new();
@@ -75,7 +77,8 @@ public sealed class MarketScanService : IDisposable
         Func<uint, MarketItemFacts?> lookup,
         Func<uint, string?> worldName,
         AutomationLog log,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        Action<IReadOnlyList<ProcurementRule>>? offerLines = null)
     {
         this.source = source;
         this.configuration = configuration;
@@ -85,6 +88,7 @@ public sealed class MarketScanService : IDisposable
         this.ownRetainerIds = ownRetainerIds;
         this.lookup = lookup;
         this.worldName = worldName;
+        this.offerLines = offerLines;
         this.log = log;
         this.timeProvider = timeProvider ?? TimeProvider.System;
     }
@@ -129,12 +133,18 @@ public sealed class MarketScanService : IDisposable
             var items = TrackedItems(config);
             var names = ownRetainerNames();
             var ids = ownRetainerIds();
+            // Lines the player already has a rule for, discovered ones aside: those
+            // may be proposed again, which is what keeps them from being retired.
+            var configured = config.ProcurementRules.Where(x => x.ItemId != 0 && !x.DiscoveredAutomatically)
+                .Select(x => x.ItemId).ToHashSet();
+            var fees = config.Fees;
             if (tracked)
                 nextTrackedScan = now + TrackedInterval;
             if (discovery)
                 nextDiscoveryScan = now + DiscoveryInterval;
             var target = memory();
-            running = Task.Run(() => RunAsync(target, home!, items, names, ids, tracked, discovery, stopping.Token));
+            running = Task.Run(() => RunAsync(target, home!, items, names, ids, tracked, discovery,
+                new(configured, fees), stopping.Token));
         }
     }
 
@@ -151,8 +161,11 @@ public sealed class MarketScanService : IDisposable
             .Take(120)
             .ToArray();
 
+    private sealed record DiscoveryContext(IReadOnlySet<uint> Configured, FeeModel Fees);
+
     private async Task RunAsync(PriceMemory target, string home, IReadOnlyList<(uint ItemId, bool HighQuality)> items,
-        IReadOnlySet<string> names, IReadOnlySet<ulong> ids, bool tracked, bool discovery, CancellationToken token)
+        IReadOnlySet<string> names, IReadOnlySet<ulong> ids, bool tracked, bool discovery, DiscoveryContext context,
+        CancellationToken token)
     {
         var parts = new List<string>();
         try
@@ -160,7 +173,7 @@ public sealed class MarketScanService : IDisposable
             if (tracked)
                 parts.Add(await ScanTrackedAsync(target, home, items, names, ids, token).ConfigureAwait(false));
             if (discovery)
-                parts.Add(await ScanDiscoveryAsync(target, home, token).ConfigureAwait(false));
+                parts.Add(await ScanDiscoveryAsync(target, home, context, token).ConfigureAwait(false));
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested)
         {
@@ -223,7 +236,8 @@ public sealed class MarketScanService : IDisposable
                (failed > 0 ? $"; {failed} of {requests} request(s) went unanswered." : ".");
     }
 
-    private async Task<string> ScanDiscoveryAsync(PriceMemory target, string home, CancellationToken token)
+    private async Task<string> ScanDiscoveryAsync(PriceMemory target, string home, DiscoveryContext context,
+        CancellationToken token)
     {
         using var ranking = await source.MarketshareAsync(home, DiscoveryWindowHours, DiscoveryMinimumWeeklySales,
             DiscoveryMinimumAveragePrice, [0], "marketValue", token).ConfigureAwait(false);
@@ -277,8 +291,14 @@ public sealed class MarketScanService : IDisposable
             .ToArray();
         target.ReplaceCandidates(priced, observedAt);
         LastDiscoveryScanAt = observedAt;
+        // Only food and medicine are ever added as lines; the rest stays a suggestion.
+        var lines = MarketDiscoveryPolicy.ProposeFromHomeRanking(priced, lookup, context.Configured, context.Fees);
+        // Without every spread a line that still qualifies would look as if it had
+        // stopped, so an incomplete scan neither adds nor counts against anything.
+        if (unanswered == 0)
+            offerLines?.Invoke(lines);
         return $"Saddlebag ranked {rows.Length} {home} market(s) with {DiscoveryMinimumWeeklySales}+ sales a week; " +
-               $"{priced.Length} tradeable candidate(s) kept" +
+               $"{priced.Length} tradeable candidate(s) kept, {lines.Count} food/medicine line(s) qualify to be added" +
                (unanswered > 0 ? $", {unanswered} spread request(s) unanswered." : ".");
     }
 

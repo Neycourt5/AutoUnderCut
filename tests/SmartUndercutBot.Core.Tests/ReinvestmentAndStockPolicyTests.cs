@@ -76,7 +76,7 @@ public sealed class ReinvestmentAndStockPolicyTests
         // Plugin start re-seeds the tradeable dyes and adds missing favorites once.
         Assert.False(config.BuyableDyeRulesSeeded);
         Assert.False(config.FavoriteRulesBackfilled);
-        Assert.Equal(45, config.Version);
+        Assert.Equal(46, config.Version);
 
         config.FavoriteRulesBackfilled = config.BuyableDyeRulesSeeded = true;
         config.Normalize();
